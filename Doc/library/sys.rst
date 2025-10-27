@@ -285,6 +285,22 @@ always available. Unless explicitly noted otherwise, all variables are read-only
       Each value in the dictionary is now a single exception instance, rather
       than a 3-tuple as returned from ``sys.exc_info()``.
 
+.. function:: get_gil_wait_stats()
+
+   Return a dictionary mapping each thread's identifier to a tuple
+   ``(total_wait_ns, wait_count)`` describing how long the thread has
+   spent waiting to acquire the :term:`global interpreter lock` (GIL).
+
+   The total time is reported in nanoseconds using the interpreter's
+   monotonic performance counter.  The counters reset each time a thread
+   exits.
+
+   This function should be used for diagnostic and specialized purposes only.
+
+   .. audit-event:: sys.get_gil_wait_stats "" sys.get_gil_wait_stats
+
+   .. versionadded:: 3.13
+
 .. function:: breakpointhook()
 
    This hook function is called by built-in :func:`breakpoint`.  By default,

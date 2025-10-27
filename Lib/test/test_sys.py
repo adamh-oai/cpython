@@ -628,6 +628,51 @@ class SysModuleTest(unittest.TestCase):
             leave_g.set()
             t.join()
 
+    def test_get_gil_wait_stats_includes_current_thread(self):
+        import threading
+
+        stats = sys.get_gil_wait_stats()
+        self.assertIsInstance(stats, dict)
+        ident = threading.get_ident()
+        self.assertIn(ident, stats)
+        total, count = stats[ident]
+        self.assertIsInstance(total, int)
+        self.assertIsInstance(count, int)
+        self.assertGreaterEqual(total, 0)
+        self.assertGreaterEqual(count, 0)
+
+    @threading_helper.requires_working_threading()
+    def test_get_gil_wait_stats_increments_when_contending(self):
+        import queue
+        import threading
+        import time
+
+        barrier = threading.Barrier(2)
+        q = queue.Queue()
+
+        def worker():
+            barrier.wait()
+            for _ in range(5):
+                time.sleep(0.02)
+            ident = threading.get_ident()
+            stats = sys.get_gil_wait_stats()
+            q.put((ident, stats.get(ident)))
+
+        threads = [threading.Thread(target=worker)]
+        with threading_helper.start_threads(threads):
+            barrier.wait()
+            deadline = time.perf_counter() + 0.4
+            dummy = 0
+            while time.perf_counter() < deadline:
+                dummy += 1
+            worker_id, data = q.get(timeout=SHORT_TIMEOUT)
+
+        self.assertIsNotNone(data)
+        total, count = data
+        self.assertGreater(worker_id, 0)
+        self.assertGreater(count, 0)
+        self.assertGreater(total, 0)
+
     def test_attributes(self):
         self.assertIsInstance(sys.api_version, int)
         self.assertIsInstance(sys.argv, list)

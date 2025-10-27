@@ -2,6 +2,7 @@
 #  error "this header file must not be included directly"
 #endif
 
+#include "cpython/pytime.h"
 
 /* private interpreter helpers */
 
@@ -112,6 +113,10 @@ struct _ts {
 
     /* Currently holds the GIL. Must be its own field to avoid data races */
     int holds_gil;
+
+    /* Total time (in nanoseconds) spent waiting for the GIL and number of waits. */
+    PyTime_t gil_wait_time;
+    uint64_t gil_wait_count;
 
     int _whence;
 
@@ -251,6 +256,7 @@ PyAPI_FUNC(int) PyGILState_Check(void);
    thread id to that thread's current frame.
 */
 PyAPI_FUNC(PyObject*) _PyThread_CurrentFrames(void);
+PyAPI_FUNC(PyObject*) _PyThread_CurrentGILWaitStats(void);
 
 /* Routines for advanced debuggers, requested by David Beazley.
    Don't use unless you know what you are doing! */

@@ -9,6 +9,36 @@
 #include "pycore_runtime.h"       // _PyRuntime
 
 
+static inline void
+record_gil_wait_time(PyThreadState *tstate, int waited_for_gil,
+                     PyTime_t wait_start, int have_wait_start)
+{
+    if (!waited_for_gil) {
+        return;
+    }
+
+    tstate->gil_wait_count++;
+
+    if (!have_wait_start) {
+        return;
+    }
+
+    PyTime_t wait_end;
+    if (PyTime_PerfCounterRaw(&wait_end) < 0) {
+        return;
+    }
+    if (wait_end <= wait_start) {
+        return;
+    }
+
+    PyTime_t delta = wait_end - wait_start;
+    if (delta > PyTime_MAX - tstate->gil_wait_time) {
+        tstate->gil_wait_time = PyTime_MAX;
+        return;
+    }
+    tstate->gil_wait_time += delta;
+}
+
 /*
    Notes about the implementation:
 
@@ -321,7 +351,16 @@ take_gil(PyThreadState *tstate)
     MUTEX_LOCK(gil->mutex);
 
     int drop_requested = 0;
+    int waited_for_gil = 0;
+    PyTime_t wait_start = 0;
+    int have_wait_start = 0;
     while (_Py_atomic_load_int_relaxed(&gil->locked)) {
+        waited_for_gil = 1;
+        if (!have_wait_start) {
+            if (PyTime_PerfCounterRaw(&wait_start) == 0) {
+                have_wait_start = 1;
+            }
+        }
         unsigned long saved_switchnum = gil->switch_number;
 
         unsigned long interval = _Py_atomic_load_ulong_relaxed(&gil->interval);
@@ -360,6 +399,8 @@ take_gil(PyThreadState *tstate)
             drop_requested = 1;
         }
     }
+
+    record_gil_wait_time(tstate, waited_for_gil, wait_start, have_wait_start);
 
 #ifdef Py_GIL_DISABLED
     if (!_Py_atomic_load_int_relaxed(&gil->enabled)) {

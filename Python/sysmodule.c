@@ -2159,6 +2159,23 @@ sys__current_exceptions_impl(PyObject *module)
 }
 
 /*[clinic input]
+sys.get_gil_wait_stats
+
+Return per-thread statistics for time spent waiting to acquire the GIL.
+
+The result is a dict mapping each thread's identifier to a 2-tuple
+``(total_wait_ns, wait_count)``.  The total wait time is reported in
+nanoseconds using the interpreter's monotonic clock.
+[clinic start generated code]*/
+
+static PyObject *
+sys_get_gil_wait_stats_impl(PyObject *module)
+/*[clinic end generated code: output=938341681d4a3ca6 input=e7efb2ca1250d7d9]*/
+{
+    return _PyThread_CurrentGILWaitStats();
+}
+
+/*[clinic input]
 sys.call_tracing
 
     func: object
@@ -2794,6 +2811,7 @@ static PyMethodDef sys_methods[] = {
     SYS_GETUNICODEINTERNEDSIZE_METHODDEF
     SYS_GETFILESYSTEMENCODING_METHODDEF
     SYS_GETFILESYSTEMENCODEERRORS_METHODDEF
+    SYS_GET_GIL_WAIT_STATS_METHODDEF
 #ifdef Py_TRACE_REFS
     {"getobjects", _Py_GetObjects, METH_VARARGS},
 #endif

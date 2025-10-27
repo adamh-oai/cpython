@@ -2594,6 +2594,67 @@ done:
     return result;
 }
 
+PyObject *
+_PyThread_CurrentGILWaitStats(void)
+{
+    _PyRuntimeState *runtime = &_PyRuntime;
+    PyThreadState *tstate = current_fast_get();
+    if (_PySys_Audit(tstate, "sys.get_gil_wait_stats", NULL) < 0) {
+        return NULL;
+    }
+
+    PyObject *result = PyDict_New();
+    if (result == NULL) {
+        return NULL;
+    }
+
+    _PyEval_StopTheWorldAll(runtime);
+    HEAD_LOCK(runtime);
+    PyInterpreterState *interp;
+    for (interp = runtime->interpreters.head; interp != NULL; interp = interp->next) {
+        _Py_FOR_EACH_TSTATE_UNLOCKED(interp, t) {
+            PyObject *thread_id = PyLong_FromUnsignedLong(t->thread_id);
+            if (thread_id == NULL) {
+                goto fail;
+            }
+            PyObject *wait_total = PyLong_FromLongLong((long long)t->gil_wait_time);
+            if (wait_total == NULL) {
+                Py_DECREF(thread_id);
+                goto fail;
+            }
+            PyObject *wait_count = PyLong_FromUnsignedLongLong(t->gil_wait_count);
+            if (wait_count == NULL) {
+                Py_DECREF(thread_id);
+                Py_DECREF(wait_total);
+                goto fail;
+            }
+            PyObject *tuple = PyTuple_Pack(2, wait_total, wait_count);
+            Py_DECREF(wait_total);
+            Py_DECREF(wait_count);
+            if (tuple == NULL) {
+                Py_DECREF(thread_id);
+                goto fail;
+            }
+            if (PyDict_SetItem(result, thread_id, tuple) < 0) {
+                Py_DECREF(thread_id);
+                Py_DECREF(tuple);
+                goto fail;
+            }
+            Py_DECREF(thread_id);
+            Py_DECREF(tuple);
+        }
+    }
+    goto done2;
+
+fail:
+    Py_CLEAR(result);
+
+done2:
+    HEAD_UNLOCK(runtime);
+    _PyEval_StartTheWorldAll(runtime);
+    return result;
+}
+
 /* The implementation of sys._current_exceptions().  This is intended to be
    called with the GIL held, as it will be when called via
    sys._current_exceptions().  It's possible it would work fine even without
