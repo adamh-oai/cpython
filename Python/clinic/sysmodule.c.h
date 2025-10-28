@@ -1063,6 +1063,26 @@ sys__current_exceptions(PyObject *module, PyObject *Py_UNUSED(ignored))
     return sys__current_exceptions_impl(module);
 }
 
+PyDoc_STRVAR(sys_get_gil_wait_stats__doc__,
+"get_gil_wait_stats($module, /)\n"
+"--\n"
+"\n"
+"Return a mapping from thread identifiers to their GIL wait statistics.\n"
+"\n"
+"Each value is a tuple (seconds_waited, wait_count).");
+
+#define SYS_GET_GIL_WAIT_STATS_METHODDEF    \
+    {"get_gil_wait_stats", (PyCFunction)sys_get_gil_wait_stats, METH_NOARGS, sys_get_gil_wait_stats__doc__},
+
+static PyObject *
+sys_get_gil_wait_stats_impl(PyObject *module);
+
+static PyObject *
+sys_get_gil_wait_stats(PyObject *module, PyObject *Py_UNUSED(ignored))
+{
+    return sys_get_gil_wait_stats_impl(module);
+}
+
 PyDoc_STRVAR(sys_call_tracing__doc__,
 "call_tracing($module, func, args, /)\n"
 "--\n"
@@ -1455,4 +1475,4 @@ exit:
 #ifndef SYS_GETANDROIDAPILEVEL_METHODDEF
     #define SYS_GETANDROIDAPILEVEL_METHODDEF
 #endif /* !defined(SYS_GETANDROIDAPILEVEL_METHODDEF) */
-/*[clinic end generated code: output=2a1fbdf7de450c63 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=10db6442ff067d53 input=a9049054013a1b77]*/

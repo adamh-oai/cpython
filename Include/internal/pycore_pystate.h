@@ -100,6 +100,16 @@ _PyThreadState_GET(void)
 #endif
 }
 
+static inline void
+_PyThreadState_AddGilWaitTime(PyThreadState *tstate, _PyTime_t duration)
+{
+    if (duration < 0) {
+        duration = 0;
+    }
+    tstate->gil_wait_time_ns += duration;
+    tstate->gil_wait_count += 1;
+}
+
 
 static inline void
 _Py_EnsureFuncTstateNotNULL(const char *func, PyThreadState *tstate)

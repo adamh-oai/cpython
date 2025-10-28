@@ -2,6 +2,8 @@
 #  error "this header file must not be included directly"
 #endif
 
+#include "pytime.h"              // _PyTime_t
+
 
 /*
 Runtime Feature Flags
@@ -225,6 +227,10 @@ struct _ts {
     /* Unique thread state id. */
     uint64_t id;
 
+    /* Per-thread GIL wait statistics. */
+    _PyTime_t gil_wait_time_ns;
+    uint64_t gil_wait_count;
+
     _PyStackChunk *datastack_chunk;
     PyObject **datastack_top;
     PyObject **datastack_limit;
@@ -320,6 +326,9 @@ PyAPI_FUNC(PyObject *) _PyThread_CurrentFrames(void);
    thread id to that thread's current exception.
 */
 PyAPI_FUNC(PyObject *) _PyThread_CurrentExceptions(void);
+
+/* The implementation of sys.get_gil_wait_stats(). */
+PyAPI_FUNC(PyObject *) _PyThread_GetGILWaitStats(void);
 
 /* Routines for advanced debuggers, requested by David Beazley.
    Don't use unless you know what you are doing! */

@@ -2105,6 +2105,21 @@ sys__current_exceptions_impl(PyObject *module)
 }
 
 /*[clinic input]
+sys.get_gil_wait_stats
+
+Return a mapping from thread identifiers to their GIL wait statistics.
+
+Each value is a tuple (seconds_waited, wait_count).
+[clinic start generated code]*/
+
+static PyObject *
+sys_get_gil_wait_stats_impl(PyObject *module)
+/*[clinic end generated code: output=938341681d4a3ca6 input=ef450d58d1e46fdb]*/
+{
+    return _PyThread_GetGILWaitStats();
+}
+
+/*[clinic input]
 sys.call_tracing
 
     func: object
@@ -2484,6 +2499,7 @@ static PyMethodDef sys_methods[] = {
     SYS_GETTOTALREFCOUNT_METHODDEF
     SYS_GETREFCOUNT_METHODDEF
     SYS_GETRECURSIONLIMIT_METHODDEF
+    SYS_GET_GIL_WAIT_STATS_METHODDEF
     {"getsizeof", _PyCFunction_CAST(sys_getsizeof),
      METH_VARARGS | METH_KEYWORDS, getsizeof_doc},
     SYS__GETFRAME_METHODDEF

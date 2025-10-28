@@ -11,6 +11,7 @@ import subprocess
 import sys
 import sysconfig
 import test.support
+import time
 from test import support
 from test.support import os_helper
 from test.support.script_helper import assert_python_ok, assert_python_failure
@@ -194,6 +195,57 @@ class ExceptHookTest(unittest.TestCase):
 
     # FIXME: testing the code for a lost or replaced excepthook in
     # Python/pythonrun.c::PyErr_PrintEx() is tricky.
+
+
+class GilWaitStatsTests(unittest.TestCase):
+
+    def test_current_thread_entry(self):
+        _thread = import_helper.import_module('_thread')
+        stats = sys.get_gil_wait_stats()
+        self.assertIsInstance(stats, dict)
+        ident = _thread.get_ident()
+        self.assertIn(ident, stats)
+        wait_seconds, wait_count = stats[ident]
+        self.assertIsInstance(wait_seconds, float)
+        self.assertIsInstance(wait_count, int)
+        self.assertGreaterEqual(wait_seconds, 0.0)
+        self.assertGreaterEqual(wait_count, 0)
+
+    @threading_helper.requires_working_threading()
+    def test_threads_record_waits(self):
+        queue = import_helper.import_module('queue')
+        threading = import_helper.import_module('threading')
+        start_event = threading.Event()
+        results = queue.SimpleQueue()
+
+        def worker():
+            ident = threading.get_ident()
+            start_event.wait()
+            deadline = time.perf_counter() + 0.2
+            counter = 0
+            while time.perf_counter() < deadline:
+                counter += 1
+            stats = sys.get_gil_wait_stats()
+            results.put((ident, stats[ident]))
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+
+        start_event.set()
+
+        for thread in threads:
+            thread.join()
+
+        seen = {}
+        for _ in threads:
+            ident, (wait_seconds, wait_count) = results.get()
+            seen[ident] = (wait_seconds, wait_count)
+
+        self.assertEqual(len(seen), 2)
+        for wait_seconds, wait_count in seen.values():
+            self.assertGreater(wait_seconds, 0.0)
+            self.assertGreater(wait_count, 0)
 
 
 class SysModuleTest(unittest.TestCase):

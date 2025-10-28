@@ -1364,6 +1364,9 @@ init_threadstate(PyThreadState *tstate,
     tstate->datastack_limit = NULL;
     tstate->what_event = -1;
 
+    tstate->gil_wait_time_ns = 0;
+    tstate->gil_wait_count = 0;
+
     tstate->_status.initialized = 1;
 }
 
@@ -1559,6 +1562,9 @@ PyThreadState_Clear(PyThreadState *tstate)
     if (tstate->on_delete != NULL) {
         tstate->on_delete(tstate->on_delete_data);
     }
+
+    tstate->gil_wait_time_ns = 0;
+    tstate->gil_wait_count = 0;
 
     tstate->_status.cleared = 1;
 
@@ -2089,6 +2095,71 @@ _PyThread_CurrentExceptions(void)
             if (stat < 0) {
                 goto fail;
             }
+        }
+    }
+    goto done;
+
+fail:
+    Py_CLEAR(result);
+
+done:
+    HEAD_UNLOCK(runtime);
+    return result;
+}
+
+/* The implementation of sys.get_gil_wait_stats(). */
+PyObject *
+_PyThread_GetGILWaitStats(void)
+{
+    _PyRuntimeState *runtime = &_PyRuntime;
+    PyThreadState *tstate = current_fast_get(runtime);
+    if (_PySys_Audit(tstate, "sys.get_gil_wait_stats", NULL) < 0) {
+        return NULL;
+    }
+
+    PyObject *result = PyDict_New();
+    if (result == NULL) {
+        return NULL;
+    }
+
+    HEAD_LOCK(runtime);
+    PyInterpreterState *interp;
+    for (interp = runtime->interpreters.head; interp != NULL; interp = interp->next) {
+        PyThreadState *thread;
+        for (thread = interp->threads.head; thread != NULL; thread = thread->next) {
+            PyObject *id = PyLong_FromUnsignedLong(thread->thread_id);
+            if (id == NULL) {
+                goto fail;
+            }
+            PyObject *seconds = PyFloat_FromDouble(
+                _PyTime_AsSecondsDouble(thread->gil_wait_time_ns));
+            if (seconds == NULL) {
+                Py_DECREF(id);
+                goto fail;
+            }
+            PyObject *count = PyLong_FromUnsignedLongLong(thread->gil_wait_count);
+            if (count == NULL) {
+                Py_DECREF(id);
+                Py_DECREF(seconds);
+                goto fail;
+            }
+            PyObject *entry = PyTuple_New(2);
+            if (entry == NULL) {
+                Py_DECREF(id);
+                Py_DECREF(seconds);
+                Py_DECREF(count);
+                goto fail;
+            }
+            PyTuple_SET_ITEM(entry, 0, seconds);
+            PyTuple_SET_ITEM(entry, 1, count);
+
+            if (PyDict_SetItem(result, id, entry) < 0) {
+                Py_DECREF(id);
+                Py_DECREF(entry);
+                goto fail;
+            }
+            Py_DECREF(id);
+            Py_DECREF(entry);
         }
     }
     goto done;

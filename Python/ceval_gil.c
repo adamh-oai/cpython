@@ -6,6 +6,7 @@
 #include "pycore_pylifecycle.h"   // _PyErr_Print()
 #include "pycore_initconfig.h"    // _PyStatus_OK()
 #include "pycore_interp.h"        // _Py_RunGC()
+#include "pycore_pystate.h"       // _PyThreadState_AddGilWaitTime()
 #include "pycore_pymem.h"         // _PyMem_IsPtrFreed()
 
 /*
@@ -363,12 +364,20 @@ take_gil(PyThreadState *tstate)
 
     MUTEX_LOCK(gil->mutex);
 
+    _PyTime_t gil_wait_start = 0;
+    int gil_waiting = 0;
+
     if (!_Py_atomic_load_relaxed(&gil->locked)) {
         goto _ready;
     }
 
     int drop_requested = 0;
     while (_Py_atomic_load_relaxed(&gil->locked)) {
+        if (!gil_waiting) {
+            gil_wait_start = _PyTime_GetMonotonicClock();
+            gil_waiting = 1;
+        }
+
         unsigned long saved_switchnum = gil->switch_number;
 
         unsigned long interval = (gil->interval >= 1 ? gil->interval : 1);
@@ -402,6 +411,11 @@ take_gil(PyThreadState *tstate)
     }
 
 _ready:
+
+    if (gil_waiting) {
+        _PyTime_t gil_wait_end = _PyTime_GetMonotonicClock();
+        _PyThreadState_AddGilWaitTime(tstate, gil_wait_end - gil_wait_start);
+    }
 #ifdef FORCE_SWITCHING
     /* This mutex must be taken before modifying gil->last_holder:
        see drop_gil(). */

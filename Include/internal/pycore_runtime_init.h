@@ -130,6 +130,8 @@ extern PyTypeObject _PyExc_MemoryError;
     { \
         .py_recursion_limit = Py_DEFAULT_RECURSION_LIMIT, \
         .context_ver = 1, \
+        .gil_wait_time_ns = 0, \
+        .gil_wait_count = 0, \
     }
 
 # define _py_object_state_INIT(INTERP) \
