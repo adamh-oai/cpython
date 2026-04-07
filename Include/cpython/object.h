@@ -281,6 +281,9 @@ typedef struct _heaptypeobject {
     PyObject *ht_module;
     char *_ht_tpname;  // Storage for "tp_name"; see PyType_FromModuleAndSpec
     void *ht_token;  // Storage for the "Py_tp_token" slot
+    void *ht_soac_metadata;   /* Private SOAC metadata pointer or NULL */
+    void (*ht_soac_metadata_destructor)(void *);
+    uint64_t ht_soac_function_id; /* 0 means no SOAC function id is registered */
     struct _specialization_cache _spec_cache; // For use by the specializer.
 #ifdef Py_GIL_DISABLED
     Py_ssize_t unique_id;  // ID used for per-thread refcounting
@@ -292,6 +295,14 @@ PyAPI_FUNC(const char *) _PyType_Name(PyTypeObject *);
 PyAPI_FUNC(PyObject *) _PyType_Lookup(PyTypeObject *, PyObject *);
 PyAPI_FUNC(PyObject *) _PyType_LookupRef(PyTypeObject *, PyObject *);
 PyAPI_FUNC(PyObject *) PyType_GetDict(PyTypeObject *);
+PyAPI_FUNC(int) PyType_SetSoacMetadata(
+    PyObject *,
+    uint64_t soac_function_id,
+    void *metadata,
+    void (*destructor)(void *)
+);
+PyAPI_FUNC(void *) PyType_GetSoacMetadata(PyObject *);
+PyAPI_FUNC(uint64_t) PyType_GetSoacFunctionId(PyObject *);
 
 PyAPI_FUNC(int) PyObject_Print(PyObject *, FILE *, int);
 PyAPI_FUNC(void) _Py_BreakPoint(void);

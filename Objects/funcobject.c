@@ -71,6 +71,19 @@ handle_func_event(PyFunction_WatchEvent event, PyFunctionObject *func,
     }
 }
 
+static void
+func_clear_soac_metadata(PyFunctionObject *op)
+{
+    void *metadata = op->func_soac_metadata;
+    void (*destructor)(void *) = op->func_soac_metadata_destructor;
+    op->func_soac_metadata = NULL;
+    op->func_soac_metadata_destructor = NULL;
+    op->func_soac_function_id = 0;
+    if (metadata != NULL && destructor != NULL) {
+        destructor(metadata);
+    }
+}
+
 int
 PyFunction_AddWatcher(PyFunction_WatchCallback callback)
 {
@@ -137,6 +150,9 @@ _PyFunction_FromConstructor(PyFrameConstructor *constr)
     op->func_annotate = NULL;
     op->func_typeparams = NULL;
     op->vectorcall = _PyFunction_Vectorcall;
+    op->func_soac_metadata = NULL;
+    op->func_soac_metadata_destructor = NULL;
+    op->func_soac_function_id = 0;
     op->func_version = FUNC_VERSION_UNSET;
     // NOTE: functions created via FrameConstructor do not use deferred
     // reference counting because they are typically not part of cycles
@@ -215,6 +231,9 @@ PyFunction_NewWithQualName(PyObject *code, PyObject *globals, PyObject *qualname
     op->func_annotate = NULL;
     op->func_typeparams = NULL;
     op->vectorcall = _PyFunction_Vectorcall;
+    op->func_soac_metadata = NULL;
+    op->func_soac_metadata_destructor = NULL;
+    op->func_soac_function_id = 0;
     op->func_version = FUNC_VERSION_UNSET;
     if (((code_obj->co_flags & CO_NESTED) == 0) ||
         (code_obj->co_flags & CO_METHOD)) {
@@ -480,6 +499,40 @@ PyFunction_SetVectorcall(PyFunctionObject *func, vectorcallfunc vectorcall)
     assert(func != NULL);
     _PyFunction_ClearVersion(func);
     func->vectorcall = vectorcall;
+}
+
+int
+PyFunction_SetSoacMetadata(
+    PyObject *op,
+    uint64_t soac_function_id,
+    void *metadata,
+    void (*destructor)(void *)
+)
+{
+    if (!PyFunction_Check(op)) {
+        PyErr_BadInternalCall();
+        return -1;
+    }
+    PyFunctionObject *func = (PyFunctionObject *)op;
+    func_clear_soac_metadata(func);
+    func->func_soac_metadata = metadata;
+    func->func_soac_metadata_destructor = destructor;
+    func->func_soac_function_id = soac_function_id;
+    return 0;
+}
+
+void *
+PyFunction_GetSoacMetadata(PyObject *op)
+{
+    assert(PyFunction_Check(op));
+    return ((PyFunctionObject *)op)->func_soac_metadata;
+}
+
+uint64_t
+PyFunction_GetSoacFunctionId(PyObject *op)
+{
+    assert(PyFunction_Check(op));
+    return ((PyFunctionObject *)op)->func_soac_function_id;
 }
 
 PyObject *
@@ -1133,6 +1186,7 @@ func_clear(PyObject *self)
     Py_CLEAR(op->func_annotations);
     Py_CLEAR(op->func_annotate);
     Py_CLEAR(op->func_typeparams);
+    func_clear_soac_metadata(op);
     // Don't Py_CLEAR(op->func_code), since code is always required
     // to be non-NULL. Similarly, name and qualname shouldn't be NULL.
     // However, name and qualname could be str subclasses, so they

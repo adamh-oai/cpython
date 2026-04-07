@@ -44,6 +44,9 @@ typedef struct {
     PyObject *func_annotate;    /* Callable to fill the annotations dictionary */
     PyObject *func_typeparams;  /* Tuple of active type variables or NULL */
     vectorcallfunc vectorcall;
+    void *func_soac_metadata;   /* Private SOAC metadata pointer or NULL */
+    void (*func_soac_metadata_destructor)(void *);
+    uint64_t func_soac_function_id; /* 0 means no SOAC function id is registered */
     /* Version number for use by specializer.
      * Can set to non-zero when we want to specialize.
      * Will be set to zero if any of these change:
@@ -75,6 +78,14 @@ PyAPI_FUNC(PyObject *) PyFunction_GetModule(PyObject *);
 PyAPI_FUNC(PyObject *) PyFunction_GetDefaults(PyObject *);
 PyAPI_FUNC(int) PyFunction_SetDefaults(PyObject *, PyObject *);
 PyAPI_FUNC(void) PyFunction_SetVectorcall(PyFunctionObject *, vectorcallfunc);
+PyAPI_FUNC(int) PyFunction_SetSoacMetadata(
+    PyObject *,
+    uint64_t soac_function_id,
+    void *metadata,
+    void (*destructor)(void *)
+);
+PyAPI_FUNC(void *) PyFunction_GetSoacMetadata(PyObject *);
+PyAPI_FUNC(uint64_t) PyFunction_GetSoacFunctionId(PyObject *);
 PyAPI_FUNC(PyObject *) PyFunction_GetKwDefaults(PyObject *);
 PyAPI_FUNC(int) PyFunction_SetKwDefaults(PyObject *, PyObject *);
 PyAPI_FUNC(PyObject *) PyFunction_GetClosure(PyObject *);

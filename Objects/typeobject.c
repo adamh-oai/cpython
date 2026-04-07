@@ -5529,6 +5529,9 @@ PyType_FromMetaclass(
     type->tp_name = _ht_tpname;
     res->_ht_tpname = _ht_tpname;
     _ht_tpname = NULL;  // Give ownership to the type
+    res->ht_soac_metadata = NULL;
+    res->ht_soac_metadata_destructor = NULL;
+    res->ht_soac_function_id = 0;
 
     /* Copy the sizes */
 
@@ -6693,6 +6696,57 @@ type_dealloc_common(PyTypeObject *type)
     }
 }
 
+static void
+heaptype_clear_soac_metadata(PyHeapTypeObject *type)
+{
+    if (type->ht_soac_metadata_destructor != NULL &&
+        type->ht_soac_metadata != NULL)
+    {
+        type->ht_soac_metadata_destructor(type->ht_soac_metadata);
+    }
+    type->ht_soac_metadata = NULL;
+    type->ht_soac_metadata_destructor = NULL;
+    type->ht_soac_function_id = 0;
+}
+
+int
+PyType_SetSoacMetadata(
+    PyObject *op,
+    uint64_t soac_function_id,
+    void *metadata,
+    void (*destructor)(void *)
+)
+{
+    if (!PyType_Check(op) ||
+        !((((PyTypeObject *)op)->tp_flags & Py_TPFLAGS_HEAPTYPE)))
+    {
+        PyErr_BadInternalCall();
+        return -1;
+    }
+    PyHeapTypeObject *type = (PyHeapTypeObject *)op;
+    heaptype_clear_soac_metadata(type);
+    type->ht_soac_metadata = metadata;
+    type->ht_soac_metadata_destructor = destructor;
+    type->ht_soac_function_id = soac_function_id;
+    return 0;
+}
+
+void *
+PyType_GetSoacMetadata(PyObject *op)
+{
+    assert(PyType_Check(op));
+    assert(((PyTypeObject *)op)->tp_flags & Py_TPFLAGS_HEAPTYPE);
+    return ((PyHeapTypeObject *)op)->ht_soac_metadata;
+}
+
+uint64_t
+PyType_GetSoacFunctionId(PyObject *op)
+{
+    assert(PyType_Check(op));
+    assert(((PyTypeObject *)op)->tp_flags & Py_TPFLAGS_HEAPTYPE);
+    return ((PyHeapTypeObject *)op)->ht_soac_function_id;
+}
+
 
 static void
 clear_static_tp_subclasses(PyTypeObject *type, int isbuiltin)
@@ -6850,6 +6904,7 @@ type_dealloc(PyObject *self)
 #ifdef Py_GIL_DISABLED
     assert(et->unique_id == _Py_INVALID_UNIQUE_ID);
 #endif
+    heaptype_clear_soac_metadata(et);
     et->ht_token = NULL;
     Py_TYPE(type)->tp_free((PyObject *)type);
 }
