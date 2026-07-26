@@ -14,6 +14,8 @@ extern "C" {
 struct _Py_dict_state {
     uint32_t next_keys_version;
     PyDict_WatchCallback watchers[DICT_MAX_WATCHERS];
+    PyObject *key_layout_watch_types;
+    PyObject *key_layout_events;
 };
 
 #define _dict_state_INIT \

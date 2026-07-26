@@ -47,6 +47,8 @@ PyAPI_FUNC(Py_ssize_t) _PyDict_SizeOf(PyDictObject *);
 extern Py_ssize_t _PyDict_SizeOf_LockHeld(PyDictObject *);
 
 #define _PyDict_HasSplitTable(d) ((d)->ma_values != NULL)
+#define _PyDict_HasIndexedTable(d) \
+    ((d)->ma_values != NULL && (d)->ma_keys->dk_kind == DICT_KEYS_INDEXED_UNICODE)
 
 /* Like PyDict_Merge, but override can be 0, 1 or 2.  If override is 0,
    the first occurrence of a key wins, if override is 1, the last occurrence
@@ -84,6 +86,16 @@ typedef struct {
 
 extern PyDictKeysObject *_PyDict_NewKeysForClass(PyHeapTypeObject *);
 extern PyObject *_PyDict_FromKeys(PyObject *, PyObject *, PyObject *);
+PyAPI_FUNC(PyDictKeysObject *) _PyDict_NewIndexedKeySet(PyObject *keys);
+PyAPI_FUNC(PyObject *) _PyDict_NewWithIndexedKeySet(PyDictKeysObject *keys);
+PyAPI_FUNC(Py_ssize_t) _PyDict_IndexedKeyIndex(PyObject *dict, PyObject *key);
+PyAPI_FUNC(int) _PyDict_GetIndexedItem(
+        PyObject *dict, Py_ssize_t index, PyObject **result);
+PyAPI_FUNC(int) _PyDict_SetIndexedItem(
+        PyObject *dict, Py_ssize_t index, PyObject *value);
+PyAPI_FUNC(int) _PyDict_WatchSplitKeysForType(PyObject *type);
+PyAPI_FUNC(PyObject *) _PyDict_GetKeyLayoutEvents(void);
+PyAPI_DATA(char) _PyDict_IndexedValueTombstone;
 
 /* Gets a version number unique to the current state of the keys of dict, if possible.
  * Returns the version number, or zero if it was not possible to get a version number. */
@@ -103,7 +115,7 @@ extern uint32_t _PyDict_GetKeysVersionForCurrentState(
 
 extern size_t _PyDict_KeysSize(PyDictKeysObject *keys);
 
-extern void _PyDictKeys_DecRef(PyDictKeysObject *keys);
+PyAPI_FUNC(void) _PyDictKeys_DecRef(PyDictKeysObject *keys);
 
 /* _Py_dict_lookup() returns index of entry which can be used like DK_ENTRIES(dk)[index].
  * -1 when no entry found, -3 when compare raises error.
@@ -166,7 +178,8 @@ PyAPI_FUNC(void) _PyDict_EnsureSharedOnRead(PyDictObject *mp);
 typedef enum {
     DICT_KEYS_GENERAL = 0,
     DICT_KEYS_UNICODE = 1,
-    DICT_KEYS_SPLIT = 2
+    DICT_KEYS_SPLIT = 2,
+    DICT_KEYS_INDEXED_UNICODE = 3
 } DictKeysKind;
 
 /* See dictobject.c for actual layout of DictKeysObject */
@@ -233,6 +246,18 @@ struct _dictvalues {
     uint8_t valid;
     PyObject *values[1];
 };
+
+/* Values for an immutable indexed-unicode key set.
+ *
+ * The value slots are followed by ``capacity`` Py_ssize_t insertion-order
+ * indices.  Deleted values retain a tombstone in their stable slot while
+ * their index is removed from the insertion-order array.
+ */
+typedef struct {
+    Py_ssize_t capacity;
+    Py_ssize_t order_size;
+    PyObject *values[1];
+} PyDictIndexedValues;
 
 #define DK_LOG_SIZE(dk)  _Py_RVALUE((dk)->dk_log2_size)
 #if SIZEOF_VOID_P > 4

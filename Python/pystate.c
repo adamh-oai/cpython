@@ -912,6 +912,8 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
     for (int i=0; i < DICT_MAX_WATCHERS; i++) {
         interp->dict_state.watchers[i] = NULL;
     }
+    Py_CLEAR(interp->dict_state.key_layout_watch_types);
+    Py_CLEAR(interp->dict_state.key_layout_events);
 
     for (int i=0; i < TYPE_MAX_WATCHERS; i++) {
         interp->type_watchers[i] = NULL;

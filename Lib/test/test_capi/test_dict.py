@@ -6,6 +6,7 @@ from test.support import import_helper
 
 
 _testcapi = import_helper.import_module("_testcapi")
+_testinternalcapi = import_helper.import_module("_testinternalcapi")
 _testlimitedcapi = import_helper.import_module("_testlimitedcapi")
 
 
@@ -24,6 +25,133 @@ def gen():
     yield 'a'
     yield 'b'
     yield 'c'
+
+
+class IndexedDictTests(unittest.TestCase):
+
+    def new_dict(self, keys):
+        return _testinternalcapi.dict_new_indexed(keys)
+
+    def test_indexed_dict_direct_access_and_shared_keys(self):
+        left = self.new_dict(("first", "second", "third"))
+        right = self.new_dict(("first", "second", "third"))
+
+        self.assertTrue(_testinternalcapi.dict_has_indexed_keys(left))
+        self.assertTrue(_testinternalcapi.dict_has_indexed_keys(right))
+        self.assertEqual(
+            _testinternalcapi.dict_indexed_key_index(left, "second"),
+            1,
+        )
+        self.assertEqual(
+            _testinternalcapi.dict_indexed_key_index(right, "second"),
+            1,
+        )
+
+        _testinternalcapi.dict_set_indexed_item(left, 1, 20)
+        _testinternalcapi.dict_set_indexed_item(left, 0, 10)
+        _testinternalcapi.dict_set_indexed_item(left, 1, 21)
+
+        self.assertEqual(
+            _testinternalcapi.dict_get_indexed_item(left, 0),
+            10,
+        )
+        self.assertEqual(
+            _testinternalcapi.dict_get_indexed_item(left, 1),
+            21,
+        )
+        with self.assertRaises(KeyError):
+            _testinternalcapi.dict_get_indexed_item(left, 2)
+        self.assertEqual(list(left), ["second", "first"])
+        self.assertEqual(right, {})
+
+    def test_indexed_dict_deletion_and_reinsertion_convert(self):
+        dct = self.new_dict(("first", "second", "third"))
+        dct["first"] = 1
+        dct["second"] = 2
+        dct["third"] = 3
+
+        del dct["second"]
+        self.assertTrue(_testinternalcapi.dict_has_indexed_keys(dct))
+        self.assertEqual(list(dct), ["first", "third"])
+        with self.assertRaises(KeyError):
+            _testinternalcapi.dict_get_indexed_item(dct, 1)
+        with self.assertRaises(RuntimeError):
+            _testinternalcapi.dict_set_indexed_item(dct, 1, 20)
+
+        dct["second"] = 20
+        self.assertFalse(_testinternalcapi.dict_has_indexed_keys(dct))
+        self.assertEqual(list(dct), ["first", "third", "second"])
+        self.assertEqual(dct, {"first": 1, "third": 3, "second": 20})
+
+    def test_indexed_dict_unknown_key_converts(self):
+        dct = self.new_dict(("first", "second"))
+        dct["second"] = 2
+        dct["other"] = 3
+
+        self.assertFalse(_testinternalcapi.dict_has_indexed_keys(dct))
+        self.assertEqual(list(dct), ["second", "other"])
+        self.assertEqual(dct, {"second": 2, "other": 3})
+
+    def test_indexed_dict_copy_clear_and_iteration(self):
+        dct = self.new_dict(("first", "second", "third"))
+        dct["third"] = 3
+        dct["first"] = 1
+
+        copied = dct.copy()
+        self.assertTrue(_testinternalcapi.dict_has_indexed_keys(copied))
+        self.assertEqual(list(copied), ["third", "first"])
+        self.assertEqual(list(reversed(copied)), ["first", "third"])
+        self.assertEqual(list(copied.values()), [3, 1])
+        self.assertEqual(list(copied.items()), [("third", 3), ("first", 1)])
+        self.assertEqual(repr(copied), "{'third': 3, 'first': 1}")
+
+        copied.clear()
+        self.assertTrue(_testinternalcapi.dict_has_indexed_keys(copied))
+        self.assertEqual(copied, {})
+        _testinternalcapi.dict_set_indexed_item(copied, 0, 10)
+        self.assertEqual(copied, {"first": 10})
+
+    def test_indexed_dict_large_unicode_keyset(self):
+        keys = tuple(f"key_{index}" for index in range(300))
+        dct = self.new_dict(keys)
+        for index in (0, 127, 255, 299):
+            _testinternalcapi.dict_set_indexed_item(dct, index, index)
+
+        self.assertEqual(list(dct), [keys[0], keys[127], keys[255], keys[299]])
+        for index in (0, 127, 255, 299):
+            self.assertEqual(
+                _testinternalcapi.dict_get_indexed_item(dct, index),
+                index,
+            )
+
+    def test_indexed_dict_rejects_invalid_keysets(self):
+        with self.assertRaises(TypeError):
+            self.new_dict(("valid", 1))
+        with self.assertRaises(ValueError):
+            self.new_dict(("duplicate", "duplicate"))
+
+    def test_split_key_layout_events(self):
+        class Point:
+            pass
+
+        _testinternalcapi.dict_get_key_layout_events()
+        _testinternalcapi.dict_watch_split_keys_for_type(Point)
+
+        point = Point()
+        point.x = 1
+        point.y = 2
+
+        events = _testinternalcapi.dict_get_key_layout_events()
+        point_events = [
+            (key, index)
+            for owner, key, index in events
+            if owner is Point
+        ]
+        self.assertEqual(point_events, [("x", 0), ("y", 1)])
+        self.assertEqual(_testinternalcapi.dict_get_key_layout_events(), [])
+
+        with self.assertRaises(TypeError):
+            _testinternalcapi.dict_watch_split_keys_for_type(int)
 
 
 class CAPITest(unittest.TestCase):

@@ -1903,6 +1903,100 @@ dict_getitem_knownhash(PyObject *self, PyObject *args)
     return Py_XNewRef(result);
 }
 
+static PyObject *
+dict_new_indexed(PyObject *self, PyObject *keys_obj)
+{
+    PyDictKeysObject *keys = _PyDict_NewIndexedKeySet(keys_obj);
+    if (keys == NULL) {
+        return NULL;
+    }
+    PyObject *dict = _PyDict_NewWithIndexedKeySet(keys);
+    _PyDictKeys_DecRef(keys);
+    return dict;
+}
+
+static PyObject *
+dict_has_indexed_keys(PyObject *self, PyObject *dict)
+{
+    if (!PyDict_Check(dict)) {
+        PyErr_SetString(PyExc_TypeError, "expected a dictionary");
+        return NULL;
+    }
+    return PyBool_FromLong(
+        _PyDict_HasIndexedTable((PyDictObject *)dict));
+}
+
+static PyObject *
+dict_indexed_key_index(PyObject *self, PyObject *args)
+{
+    PyObject *dict;
+    PyObject *key;
+    if (!PyArg_ParseTuple(
+            args, "OO:dict_indexed_key_index", &dict, &key))
+    {
+        return NULL;
+    }
+    Py_ssize_t index = _PyDict_IndexedKeyIndex(dict, key);
+    if (index < 0 && PyErr_Occurred()) {
+        return NULL;
+    }
+    return PyLong_FromSsize_t(index);
+}
+
+static PyObject *
+dict_get_indexed_item(PyObject *self, PyObject *args)
+{
+    PyObject *dict;
+    Py_ssize_t index;
+    if (!PyArg_ParseTuple(
+            args, "On:dict_get_indexed_item", &dict, &index))
+    {
+        return NULL;
+    }
+    PyObject *result = NULL;
+    int found = _PyDict_GetIndexedItem(dict, index, &result);
+    if (found < 0) {
+        return NULL;
+    }
+    if (found == 0) {
+        PyErr_SetString(PyExc_KeyError, "indexed dictionary slot is empty");
+        return NULL;
+    }
+    return result;
+}
+
+static PyObject *
+dict_set_indexed_item(PyObject *self, PyObject *args)
+{
+    PyObject *dict;
+    PyObject *value;
+    Py_ssize_t index;
+    if (!PyArg_ParseTuple(
+            args, "OnO:dict_set_indexed_item", &dict, &index, &value))
+    {
+        return NULL;
+    }
+    if (_PyDict_SetIndexedItem(dict, index, value) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+dict_watch_split_keys_for_type(PyObject *self, PyObject *type)
+{
+    if (_PyDict_WatchSplitKeysForType(type) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+dict_get_key_layout_events(PyObject *self, PyObject *Py_UNUSED(args))
+{
+    return _PyDict_GetKeyLayoutEvents();
+}
+
 
 static int
 _init_interp_config_from_object(PyInterpreterConfig *config, PyObject *obj)
@@ -2902,6 +2996,13 @@ static PyMethodDef module_functions[] = {
     {"get_object_dict_values", get_object_dict_values, METH_O},
     {"hamt", new_hamt, METH_NOARGS},
     {"dict_getitem_knownhash",  dict_getitem_knownhash,          METH_VARARGS},
+    {"dict_new_indexed", dict_new_indexed, METH_O},
+    {"dict_has_indexed_keys", dict_has_indexed_keys, METH_O},
+    {"dict_indexed_key_index", dict_indexed_key_index, METH_VARARGS},
+    {"dict_get_indexed_item", dict_get_indexed_item, METH_VARARGS},
+    {"dict_set_indexed_item", dict_set_indexed_item, METH_VARARGS},
+    {"dict_watch_split_keys_for_type", dict_watch_split_keys_for_type, METH_O},
+    {"dict_get_key_layout_events", dict_get_key_layout_events, METH_NOARGS},
     {"create_interpreter", _PyCFunction_CAST(create_interpreter),
      METH_VARARGS | METH_KEYWORDS},
     {"destroy_interpreter", _PyCFunction_CAST(destroy_interpreter),
