@@ -7,7 +7,18 @@ typedef struct {
     PySoacTypeConstructionSpec spec;
     int consumed;
     int dataclass_slots;
+    /* Only the private native __build_class__ consume interval may borrow
+     * these inputs from its actual C/argument owners. Never a public mode. */
+    unsigned int borrowed_inputs;
 } SoacConstructionHandle;
+
+enum {
+    SOAC_HANDLE_BORROWS_FUNCTION = 1u,
+    SOAC_HANDLE_BORROWS_NAME = 2u,
+    SOAC_HANDLE_BORROWS_BASES = 4u,
+    SOAC_HANDLE_BORROWS_NAMESPACE = 8u,
+    SOAC_HANDLE_BORROWS_KEYWORDS = 16u,
+};
 
 typedef struct {
     /* Comparison-only native definition. The live type/base chain owns it. */
@@ -153,11 +164,21 @@ static int
 soac_handle_traverse(SoacConstructionHandle *handle, visitproc visit, void *arg)
 {
     Py_VISIT(handle->spec.owner);
-    Py_VISIT(handle->spec.namespace_function);
-    Py_VISIT(handle->spec.name);
-    Py_VISIT(handle->spec.bases);
-    Py_VISIT(handle->spec.namespace_dict);
-    Py_VISIT(handle->spec.keywords);
+    if (!(handle->borrowed_inputs & SOAC_HANDLE_BORROWS_FUNCTION)) {
+        Py_VISIT(handle->spec.namespace_function);
+    }
+    if (!(handle->borrowed_inputs & SOAC_HANDLE_BORROWS_NAME)) {
+        Py_VISIT(handle->spec.name);
+    }
+    if (!(handle->borrowed_inputs & SOAC_HANDLE_BORROWS_BASES)) {
+        Py_VISIT(handle->spec.bases);
+    }
+    if (!(handle->borrowed_inputs & SOAC_HANDLE_BORROWS_NAMESPACE)) {
+        Py_VISIT(handle->spec.namespace_dict);
+    }
+    if (!(handle->borrowed_inputs & SOAC_HANDLE_BORROWS_KEYWORDS)) {
+        Py_VISIT(handle->spec.keywords);
+    }
     Py_VISIT(handle->spec.fields);
     Py_VISIT(handle->spec.object_slot_fields);
     Py_VISIT(handle->spec.protected_names);
@@ -165,10 +186,26 @@ soac_handle_traverse(SoacConstructionHandle *handle, visitproc visit, void *arg)
     return 0;
 }
 
+/* Unpublish all C-supported views before any metadata release can reenter.
+ * This does not own/close those inputs. All other spec fields retain their
+ * existing owning GC/clear semantics, including an owned empty keyword dict. */
+static void
+soac_handle_unpublish_borrowed_inputs(SoacConstructionHandle *handle)
+{
+    unsigned int borrowed = handle->borrowed_inputs;
+    handle->borrowed_inputs = 0;
+    if (borrowed & SOAC_HANDLE_BORROWS_FUNCTION) handle->spec.namespace_function = NULL;
+    if (borrowed & SOAC_HANDLE_BORROWS_NAME) handle->spec.name = NULL;
+    if (borrowed & SOAC_HANDLE_BORROWS_BASES) handle->spec.bases = NULL;
+    if (borrowed & SOAC_HANDLE_BORROWS_NAMESPACE) handle->spec.namespace_dict = NULL;
+    if (borrowed & SOAC_HANDLE_BORROWS_KEYWORDS) handle->spec.keywords = NULL;
+}
+
 static int
 soac_handle_clear(SoacConstructionHandle *handle)
 {
     handle->consumed = 1;
+    soac_handle_unpublish_borrowed_inputs(handle);
     Py_CLEAR(handle->spec.owner);
     Py_CLEAR(handle->spec.namespace_function);
     Py_CLEAR(handle->spec.name);
@@ -337,6 +374,7 @@ soac_new_construction_handle(const PySoacTypeConstructionSpec *spec,
     handle->spec = *spec;
     handle->consumed = 0;
     handle->dataclass_slots = dataclass_slots;
+    handle->borrowed_inputs = 0;
     Py_INCREF(spec->owner);
     Py_XINCREF(spec->namespace_function);
     Py_INCREF(spec->name);
@@ -806,6 +844,60 @@ PyType_FromSoacConstructionHandle(PyObject *object, PyObject *namespace_function
         return NULL;
     }
     return soac_type_from_handle(handle, NULL);
+}
+
+/* Same one-use handle and same type_new pipeline as the public constructor.
+ * This join is core-private and has one caller: the actual __build_class__
+ * operation, whose native argument stack and C locals own every borrowed
+ * input through all type callbacks. It does not grant a body or source role.
+ */
+PyObject *
+_PySOAC_TypeFromInterpreterConstructionHandle(
+    PyObject *object, PyObject *namespace_function, PyObject *metaclass,
+    PyObject *name, PyObject *bases, PyObject *namespace_dict, PyObject *keywords)
+{
+    if (object == NULL || !Py_IS_TYPE(object, &SoacConstructionHandle_Type)) {
+        PyErr_SetString(soac_type_mutation_error(),
+                        "expected an interpreter-owned strict construction handle");
+        return NULL;
+    }
+    SoacConstructionHandle *handle = (SoacConstructionHandle *)object;
+    PySoacTypeConstructionSpec *spec = &handle->spec;
+    if (handle->dataclass_slots || handle->consumed || handle->borrowed_inputs ||
+        handle->interpreter != _PyInterpreterState_GET() ||
+        metaclass != (PyObject *)&PyType_Type ||
+        namespace_function == NULL || spec->namespace_function != namespace_function ||
+        name == NULL || spec->name != name || bases == NULL || spec->bases != bases ||
+        namespace_dict == NULL || spec->namespace_dict != namespace_dict ||
+        (keywords != NULL && spec->keywords != keywords) ||
+        (keywords == NULL && (spec->keywords == NULL ||
+          !PyDict_CheckExact(spec->keywords) || PyDict_GET_SIZE(spec->keywords) != 0))) {
+        PyErr_SetString(soac_type_mutation_error(),
+                        "strict construction handle does not match the actual native class operation");
+        return NULL;
+    }
+    /* Publish one-use/borrowed mode before retiring duplicates. Each DECREF
+     * below has a separate real C/argument owner, so none can finalize an
+     * input. The handle remains an owned C root throughout construction. */
+    handle->consumed = 1;
+    handle->borrowed_inputs =
+        SOAC_HANDLE_BORROWS_FUNCTION | SOAC_HANDLE_BORROWS_NAME |
+        SOAC_HANDLE_BORROWS_BASES | SOAC_HANDLE_BORROWS_NAMESPACE;
+    if (keywords != NULL) {
+        handle->borrowed_inputs |= SOAC_HANDLE_BORROWS_KEYWORDS;
+    }
+    Py_DECREF(namespace_function);
+    Py_DECREF(name);
+    Py_DECREF(bases);
+    Py_DECREF(namespace_dict);
+    if (keywords != NULL) {
+        Py_DECREF(keywords);
+    }
+    /* No-keyword native calls have no mkw owner to borrow. The handle keeps
+     * its existing exact empty keyword dictionary as an OWNED spec field. */
+    PyObject *result = soac_type_from_handle(handle, NULL);
+    soac_handle_unpublish_borrowed_inputs(handle);
+    return result;
 }
 
 PyObject *

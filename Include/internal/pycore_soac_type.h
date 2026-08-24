@@ -28,4 +28,10 @@ extern int _PySOAC_MatchesClassNamespacePolicy(
     PyObject *policy_owner, PyDict_SoacPolicyCallback validate,
     PyObject *dict, PyObject *expected_owner);
 
+/* Only the actual builtin __build_class__ may consume with these C-supported
+ * operands. No public mode or second type-construction implementation. */
+extern PyObject *_PySOAC_TypeFromInterpreterConstructionHandle(
+    PyObject *handle, PyObject *namespace_function, PyObject *metaclass,
+    PyObject *name, PyObject *bases, PyObject *namespace_dict, PyObject *keywords);
+
 #endif
