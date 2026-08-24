@@ -2142,14 +2142,24 @@ dict_new_soac_type(PyObject *self, PyObject *args)
         return NULL;
     }
     PySoacTypeConstructionSpec spec = {
-        .abi_version = Py_SOAC_TYPE_CONTRACT_ABI, .flags = 0, .owner = owner,
-        .namespace_function = namespace_function, .name = name,
-        .bases = bases, .namespace_dict = namespace, .keywords = keywords,
-        .fields = fields,
-        .protected_names = protected_names == NULL ? empty : protected_names,
-        .final_methods = final_methods == NULL ? empty : final_methods,
-        .new_instance_dict = soac_test_instance_factory,
+        .abi_version = Py_SOAC_TYPE_CONTRACT_ABI,
+        .struct_size = sizeof(PySoacTypeConstructionSpec),
+        .construction_mode = Py_SOAC_TYPE_CONSTRUCT_ENFORCED,
+        .owner = owner,
+        .namespace_function = namespace_function,
+        .name = name,
+        .bases = bases,
+        .namespace_dict = namespace,
+        .keywords = keywords,
         .bind_type = NULL,
+        .contract = {
+            .flags = 0,
+            .fields = fields,
+            .protected_names = protected_names == NULL ? empty : protected_names,
+            .final_methods = final_methods == NULL ? empty : final_methods,
+            .new_instance_dict = soac_test_instance_factory,
+            .dictionary_mode = Py_SOAC_INSTANCE_DICT_INDEXED,
+        },
     };
     PyObject *handle = PyType_NewSoacConstructionHandle(&spec);
     PyObject *type = handle == NULL ? NULL
@@ -3248,6 +3258,7 @@ test_threadstate_set_stack_protection(PyObject *self, PyObject *Py_UNUSED(args))
 
 #include "_testinternalcapi/soac_function_watch.inc"
 #include "_testinternalcapi/soac_interpreter.inc"
+#include "_testinternalcapi/soac_pending_type.inc"
 #include "_testinternalcapi/soac_slots.inc"
 #include "_testinternalcapi/soac_dataclass.inc"
 
@@ -3339,6 +3350,13 @@ soac_descriptor_birth_foreign(PyObject *self, PyObject *const *args,
 }
 
 static PyMethodDef module_functions[] = {
+    {"soac_pending_type_construct", soac_pending_type_construct, METH_VARARGS},
+    {"soac_pending_type_admit", soac_pending_type_admit, METH_VARARGS},
+    {"soac_pending_type_try_weaker_admission", soac_pending_type_try_weaker_admission, METH_VARARGS},
+    {"soac_pending_type_preserve_error", soac_pending_type_preserve_error, METH_VARARGS},
+    {"soac_pending_type_allocate", soac_pending_type_allocate, METH_VARARGS},
+    {"soac_pending_type_init_buffer", soac_pending_type_init_buffer, METH_VARARGS},
+    {"soac_pending_type_from_spec", soac_pending_type_from_spec, METH_O},
     {"soac_slot_type", soac_slot_type, METH_VARARGS},
     {"soac_slot_definition", soac_slot_definition, METH_O},
     {"soac_slot_view_get", _PyCFunction_CAST(soac_slot_view_get), METH_VARARGS | METH_KEYWORDS},

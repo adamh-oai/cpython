@@ -825,13 +825,20 @@ soac_ip_prepare_type(PyObject *object,
     if (keywords == NULL && empty_keywords == NULL) return -1;
     PySoacTypeConstructionSpec spec = {
         .abi_version = Py_SOAC_TYPE_CONTRACT_ABI,
-        .owner = object, .namespace_function = function,
-        .name = name, .bases = bases, .namespace_dict = namespace_dict,
+        .struct_size = sizeof(PySoacTypeConstructionSpec),
+        .construction_mode = Py_SOAC_TYPE_CONSTRUCT_ENFORCED,
+        .owner = object,
+        .namespace_function = function,
+        .name = name,
+        .bases = bases,
+        .namespace_dict = namespace_dict,
         .keywords = keywords == NULL ? empty_keywords : keywords,
-        .fields = fixture->empty,
-        .protected_names = fixture->protected_names,
-        .final_methods = fixture->empty,
         .bind_type = soac_ip_bind_type,
+        .contract = {
+            .fields = fixture->empty,
+            .protected_names = fixture->protected_names,
+            .final_methods = fixture->empty,
+        },
     };
     PyObject *handle = PyType_NewSoacConstructionHandle(&spec);
     Py_XDECREF(empty_keywords);

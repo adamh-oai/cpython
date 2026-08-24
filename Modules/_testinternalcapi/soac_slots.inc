@@ -91,13 +91,23 @@ soac_slot_type(PyObject *self, PyObject *args)
         return NULL;
     }
     PySoacTypeConstructionSpec spec = {
-        .abi_version = Py_SOAC_TYPE_CONTRACT_ABI, .owner = owner,
-        .namespace_function = namespace_function, .name = name,
-        .bases = bases, .namespace_dict = namespace, .keywords = keywords,
-        .fields = dictionary_fields == NULL ? empty : dictionary_fields,
-        .protected_names = empty, .final_methods = empty,
-        .check_instance_write = soac_slot_test_write,
-        .bind_type = soac_slot_test_bind, .object_slot_fields = fields,
+        .abi_version = Py_SOAC_TYPE_CONTRACT_ABI,
+        .struct_size = sizeof(PySoacTypeConstructionSpec),
+        .construction_mode = Py_SOAC_TYPE_CONSTRUCT_ENFORCED,
+        .owner = owner,
+        .namespace_function = namespace_function,
+        .name = name,
+        .bases = bases,
+        .namespace_dict = namespace,
+        .keywords = keywords,
+        .bind_type = soac_slot_test_bind,
+        .contract = {
+            .fields = dictionary_fields == NULL ? empty : dictionary_fields,
+            .protected_names = empty,
+            .final_methods = empty,
+            .check_instance_write = soac_slot_test_write,
+            .object_slot_fields = fields,
+        },
     };
     PyObject *handle = PyType_NewSoacConstructionHandle(&spec);
     PyObject *actual = handle == NULL ? NULL
@@ -199,10 +209,14 @@ soac_slot_definition(PyObject *self, PyObject *descriptor)
 static PyObject *
 soac_type_construction_layout(PyObject *self, PyObject *Py_UNUSED(args))
 {
-    return Py_BuildValue("{s:i,s:n,s:n,s:i,s:n,s:n}",
+    return Py_BuildValue("{s:i,s:n,s:n,s:n,s:n,s:n,s:i,s:n,s:n}",
         "abi_version", Py_SOAC_TYPE_CONTRACT_ABI,
         "spec_size", (Py_ssize_t)sizeof(PySoacTypeConstructionSpec),
-        "object_slot_fields", (Py_ssize_t)offsetof(PySoacTypeConstructionSpec, object_slot_fields),
+        "contract_size", (Py_ssize_t)sizeof(PySoacTypeContractSpecV4),
+        "contract", (Py_ssize_t)offsetof(PySoacTypeConstructionSpec, contract),
+        "commit_final", (Py_ssize_t)offsetof(PySoacTypeConstructionSpec, commit_final),
+        "object_slot_fields", (Py_ssize_t)(offsetof(PySoacTypeConstructionSpec, contract) +
+            offsetof(PySoacTypeContractSpecV4, object_slot_fields)),
         "dataclass_abi_version", Py_SOAC_DATACLASS_ABI,
         "dataclass_callbacks_size", (Py_ssize_t)sizeof(PySoacDataclassCallbacks),
         "prepare_slots", (Py_ssize_t)offsetof(PySoacDataclassCallbacks, prepare_slots));
@@ -218,7 +232,8 @@ soac_slot_test_check_plan(PyObject *plan)
         !PyTuple_CheckExact(PyTuple_GET_ITEM(plan, 0)) ||
         !PyTuple_CheckExact(PyTuple_GET_ITEM(plan, 1)) ||
         !PyList_CheckExact(PyTuple_GET_ITEM(plan, 2)) ||
-        PyList_GET_SIZE(PyTuple_GET_ITEM(plan, 2)) != 2 ||
+        (PyList_GET_SIZE(PyTuple_GET_ITEM(plan, 2)) != 2 &&
+         PyList_GET_SIZE(PyTuple_GET_ITEM(plan, 2)) != 4) ||
         PyList_GET_ITEM(PyTuple_GET_ITEM(plan, 2), 0) != Py_False ||
         PyList_GET_ITEM(PyTuple_GET_ITEM(plan, 2), 1) != Py_False ||
         !PyList_CheckExact(PyTuple_GET_ITEM(plan, 3)) ||
@@ -236,9 +251,13 @@ soac_slot_test_check_plan(PyObject *plan)
         }
     }
     long mode = PyLong_AsLong(PyTuple_GET_ITEM(plan, 5));
-    if (mode < 0 || mode > 2) {
+    if (mode < 0 || mode > 3 ||
+        PyList_GET_SIZE(PyTuple_GET_ITEM(plan, 2)) != (mode == 3 ? 4 : 2)) {
         goto bad;
     }
+    if (mode == 3 &&
+        (PyList_GET_ITEM(PyTuple_GET_ITEM(plan, 2), 2) != Py_False ||
+         PyList_GET_ITEM(PyTuple_GET_ITEM(plan, 2), 3) != Py_False)) goto bad;
     return 0;
 bad:
     if (!PyErr_Occurred()) {
@@ -259,14 +278,24 @@ soac_dc_test_prepare_slots(PyObject *owner, const PySoacDataclassFrameView *prod
                         "fixture has no selected replacement plan");
         return -1;
     }
-    PyObject *minus_one = PyLong_FromLong(-1);
-    if (minus_one == NULL) {
-        return -1;
+    long mode = PyLong_AsLong(PyTuple_GET_ITEM(plan, 5));
+    PyObject *slot_owner;
+    if (mode == 3) {
+        /* The same actual slots bridge creates a distinct pending owner;
+         * the fixture adds no source or native-creation authority. */
+        slot_owner = PyTuple_Pack(4, PyTuple_GET_ITEM(plan, 2), Py_None,
+            PyTuple_GET_ITEM(plan, 1), PyTuple_GET_ITEM(plan, 4));
     }
-    PyObject *slot_owner = PyTuple_Pack(5, PyTuple_GET_ITEM(plan, 0),
-        PyTuple_GET_ITEM(plan, 1), PyTuple_GET_ITEM(plan, 2),
-        PyTuple_GET_ITEM(plan, 4), minus_one);
-    Py_DECREF(minus_one);
+    else {
+        PyObject *minus_one = PyLong_FromLong(-1);
+        if (minus_one == NULL) {
+            return -1;
+        }
+        slot_owner = PyTuple_Pack(5, PyTuple_GET_ITEM(plan, 0),
+            PyTuple_GET_ITEM(plan, 1), PyTuple_GET_ITEM(plan, 2),
+            PyTuple_GET_ITEM(plan, 4), minus_one);
+        Py_DECREF(minus_one);
+    }
     PyObject *empty = PyTuple_New(0), *keywords = PyDict_New();
     if (slot_owner == NULL || empty == NULL || keywords == NULL) {
         Py_XDECREF(slot_owner);
@@ -274,17 +303,31 @@ soac_dc_test_prepare_slots(PyObject *owner, const PySoacDataclassFrameView *prod
         Py_XDECREF(keywords);
         return -1;
     }
-    long mode = PyLong_AsLong(PyTuple_GET_ITEM(plan, 5));
     PySoacTypeConstructionSpec spec = {
         .abi_version = Py_SOAC_TYPE_CONTRACT_ABI,
+        .struct_size = sizeof(PySoacTypeConstructionSpec),
+        .construction_mode = Py_SOAC_TYPE_CONSTRUCT_ENFORCED,
         .owner = mode == 2 ? PyType_GetSoacContractOwner(original) : slot_owner,
-        .namespace_function = NULL, .name = name, .bases = bases,
-        .namespace_dict = namespace, .keywords = keywords,
-        .fields = empty, .protected_names = empty, .final_methods = empty,
-        .check_instance_write = soac_slot_test_write,
+        .namespace_function = NULL,
+        .name = name,
+        .bases = bases,
+        .namespace_dict = namespace,
+        .keywords = keywords,
         .bind_type = soac_slot_test_bind,
-        .object_slot_fields = PyTuple_GET_ITEM(plan, 0),
+        .contract = {
+            .fields = empty,
+            .protected_names = empty,
+            .final_methods = empty,
+            .check_instance_write = soac_slot_test_write,
+            .object_slot_fields = PyTuple_GET_ITEM(plan, 0),
+        },
     };
+    if (mode == 3) {
+        spec.construction_mode = Py_SOAC_TYPE_CONSTRUCT_PENDING;
+        spec.bind_type = soac_pending_test_bind;
+        spec.commit_final = soac_pending_test_commit;
+        memset(&spec.contract, 0, sizeof(spec.contract));
+    }
     PyObject *handle = PyType_NewSoacDataclassSlotsHandle(producer, &spec);
     if (handle != NULL) {
         PyObject *handles = PyTuple_GET_ITEM(plan, 3);
