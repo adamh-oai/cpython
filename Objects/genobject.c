@@ -245,7 +245,7 @@ gen_dealloc(PyObject *self)
     if (_PyGen_IsSoacManaged(gen)) {
         soac_gen_transfer_destructor_tail(gen);
     }
-    PyStackRef_CLEAR(gen->gi_iframe.f_executable);
+    _PyFrame_ClearExecutable(&gen->gi_iframe);
     Py_CLEAR(gen->gi_name);
     Py_CLEAR(gen->gi_qualname);
     if (_PyGen_IsSoacManaged(gen)) {
@@ -1209,6 +1209,7 @@ make_gen(PyTypeObject *type, PyFunctionObject *func, PyCodeObject *code)
     gen->gi_exc_state.exc_value = NULL;
     gen->gi_exc_state.previous_item = NULL;
     gen->gi_iframe.f_executable = PyStackRef_None;
+    _PyFrame_SetExecutableView(&gen->gi_iframe, Py_None);
     assert(func->func_name != NULL);
     gen->gi_name = Py_NewRef(func->func_name);
     assert(func->func_qualname != NULL);
@@ -1294,6 +1295,7 @@ gen_new_with_qualname(PyTypeObject *type, PyFrameObject *f,
     gen->gi_frame_state = FRAME_CREATED;
     assert(frame->frame_obj == f);
     f->f_frame = frame;
+    _PyFrame_SetExecutableView((_PyInterpreterFrame *)f->_f_frame_data, NULL);
     frame->owner = FRAME_OWNED_BY_GENERATOR;
     assert(PyObject_GC_IsTracked((PyObject *)f));
     Py_DECREF(f);

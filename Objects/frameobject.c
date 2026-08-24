@@ -1993,7 +1993,7 @@ frame_dealloc(PyObject *op)
             frame->owner = FRAME_OWNED_BY_SOAC_CLEARED;
             _PyFrame_ClearSoacLifetimeEnvironment(frame);
         }
-        PyStackRef_CLEAR(frame->f_executable);
+        _PyFrame_ClearExecutable(frame);
         PyStackRef_CLEAR(frame->f_funcobj);
         Py_CLEAR(frame->f_locals);
         _PyStackRef *locals = _PyFrame_GetLocalsArray(frame);

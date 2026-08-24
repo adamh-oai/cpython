@@ -16,6 +16,41 @@
 extern "C" {
 #endif
 
+/* Keep the diagnostic view on the actual frame, with no extra Python owner.
+ * Pointer atomics must not use FT_ATOMIC wrappers: watchdog readers run
+ * without the GIL even in this GIL-only debug-handle configuration. */
+static inline void
+_PyFrame_SetExecutableView(_PyInterpreterFrame *frame, PyObject *executable)
+{
+#if !defined(Py_GIL_DISABLED) && defined(Py_STACKREF_DEBUG)
+    _Py_atomic_store_ptr_release(&frame->f_executable_view, executable);
+#else
+    (void)frame;
+    (void)executable;
+#endif
+}
+
+static inline void
+_PyFrame_CopyExecutableView(_PyInterpreterFrame *dest,
+                            const _PyInterpreterFrame *src)
+{
+#if !defined(Py_GIL_DISABLED) && defined(Py_STACKREF_DEBUG)
+    PyObject *executable = _Py_atomic_load_ptr_acquire(&src->f_executable_view);
+    _PyFrame_SetExecutableView(dest, executable);
+#else
+    (void)dest;
+    (void)src;
+#endif
+}
+
+static inline void
+_PyFrame_ClearExecutable(_PyInterpreterFrame *frame)
+{
+    /* Unpublish before the original Close can invoke code weakref callbacks. */
+    _PyFrame_SetExecutableView(frame, NULL);
+    PyStackRef_CLEAR(frame->f_executable);
+}
+
 #define _PyInterpreterFrame_LASTI(IF) \
     ((_PyFrame_IsSoacLifetime((IF)) && (IF)->instr_ptr == NULL) ? -1 : \
      (int)((IF)->instr_ptr - _PyFrame_GetBytecode((IF))))
@@ -73,6 +108,13 @@ _PyFrame_SafeGetCode(_PyInterpreterFrame *f)
         return NULL;
     }
 
+    PyObject *executable;
+#if !defined(Py_GIL_DISABLED) && defined(Py_STACKREF_DEBUG)
+    executable = _Py_atomic_load_ptr_acquire(&f->f_executable_view);
+    if (executable == NULL || _PyMem_IsPtrFreed(executable)) {
+        return NULL;
+    }
+#else
     if (PyStackRef_IsNull(f->f_executable)) {
         return NULL;
     }
@@ -81,7 +123,8 @@ _PyFrame_SafeGetCode(_PyInterpreterFrame *f)
     if (_PyMem_IsPtrFreed(ptr)) {
         return NULL;
     }
-    PyObject *executable = PyStackRef_AsPyObjectBorrow(f->f_executable);
+    executable = PyStackRef_AsPyObjectBorrow(f->f_executable);
+#endif
     if (_PyObject_IsFreed(executable)) {
         return NULL;
     }
@@ -173,6 +216,7 @@ _PyFrame_NumSlotsForCodeObject(PyCodeObject *code)
 static inline void _PyFrame_Copy(_PyInterpreterFrame *src, _PyInterpreterFrame *dest)
 {
     dest->f_executable = PyStackRef_MakeHeapSafe(src->f_executable);
+    _PyFrame_CopyExecutableView(dest, src);
     // Don't leave a dangling pointer to the old frame when creating generators
     // and coroutines:
     dest->previous = NULL;
@@ -232,6 +276,7 @@ _PyFrame_Initialize(
     frame->previous = previous;
     frame->f_funcobj = func;
     frame->f_executable = PyStackRef_FromPyObjectNew(code);
+    _PyFrame_SetExecutableView(frame, (PyObject *)code);
     PyFunctionObject *func_obj = (PyFunctionObject *)PyStackRef_AsPyObjectBorrow(func);
     frame->f_builtins = func_obj->func_builtins;
     frame->f_globals = func_obj->func_globals;
@@ -427,6 +472,7 @@ _PyFrame_PushTrampolineUnchecked(PyThreadState *tstate, PyCodeObject *code, int 
     frame->previous = previous;
     frame->f_funcobj = PyStackRef_None;
     frame->f_executable = PyStackRef_FromPyObjectNew(code);
+    _PyFrame_SetExecutableView(frame, (PyObject *)code);
 #ifdef Py_DEBUG
     frame->f_builtins = NULL;
     frame->f_globals = NULL;

@@ -265,6 +265,7 @@ soac_gen_transfer_destructor_tail(PyGenObject *gen)
     _PyStackRef executable = gen->gi_iframe.f_executable;
     PyObject *name = gen->gi_name;
     PyObject *qualname = gen->gi_qualname;
+    _PyFrame_SetExecutableView(&gen->gi_iframe, NULL);
     gen->gi_iframe.f_executable = PyStackRef_NULL;
     gen->gi_name = gen->gi_qualname = NULL;
     memcpy(&slots[PySoac_GENERATOR_RETIRE_CODE], &executable, sizeof(executable));
@@ -584,6 +585,7 @@ soac_gen_new_managed(PyTypeObject *type, int code_kind,
         memcpy(&gen->gi_iframe.f_executable, &moved, sizeof(moved));
         managed->code_mode = SOAC_GEN_TRANSFERRED_CODE;
     }
+    _PyFrame_SetExecutableView(&gen->gi_iframe, (PyObject *)source_code);
     gen->gi_iframe.f_funcobj = PyStackRef_NULL;
     gen->gi_iframe.owner = FRAME_OWNED_BY_GENERATOR;
     managed->spec = copied_spec;

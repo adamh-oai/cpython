@@ -100,6 +100,7 @@ soac_lifetime_new_code_primary(PyCodeObject *source_code,
          * independently closed. No decoding or tag-dependent policy here. */
         memcpy(&frame->f_executable, &moved, sizeof(frame->f_executable));
     }
+    _PyFrame_SetExecutableView(frame, (PyObject *)source_code);
     _PyObject_GC_TRACK(object);
     PyErr_SetRaisedException(error);
     return object;

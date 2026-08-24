@@ -1556,6 +1556,7 @@ init_threadstate(_PyThreadStateImpl *_tstate,
     // Initialize the embedded base frame - sentinel at the bottom of the frame stack
     _tstate->base_frame.previous = NULL;
     _tstate->base_frame.f_executable = PyStackRef_None;
+    _PyFrame_SetExecutableView(&_tstate->base_frame, Py_None);
     _tstate->base_frame.f_funcobj = PyStackRef_NULL;
     _tstate->base_frame.f_globals = NULL;
     _tstate->base_frame.f_builtins = NULL;
@@ -3111,6 +3112,9 @@ _PyThreadState_PushFrame(PyThreadState *tstate, size_t size)
 void
 _PyThreadState_PopFrame(PyThreadState *tstate, _PyInterpreterFrame * frame)
 {
+    /* Also retire the view when the executable moved into a generator or
+     * source-call activation rather than being closed in this frame. */
+    _PyFrame_SetExecutableView(frame, NULL);
     assert(tstate->datastack_chunk);
     PyObject **base = (PyObject **)frame;
     if (base == &tstate->datastack_chunk->data[0]) {

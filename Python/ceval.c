@@ -1233,6 +1233,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int 
     entry.frame.f_builtins = (PyObject*)0xaaa4;
 #endif
     entry.frame.f_executable = PyStackRef_None;
+    _PyFrame_SetExecutableView(&entry.frame, Py_None);
     entry.frame.instr_ptr = (_Py_CODEUNIT *)_Py_INTERPRETER_TRAMPOLINE_INSTRUCTIONS + 1;
     entry.frame.stackpointer = entry.stack;
     entry.frame.owner = FRAME_OWNED_BY_INTERPRETER;
@@ -1961,7 +1962,7 @@ clear_thread_frame(PyThreadState *tstate, _PyInterpreterFrame * frame)
         tstate->datastack_top);
     assert(frame->frame_obj == NULL || frame->frame_obj->f_frame == frame);
     _PyFrame_ClearExceptCode(frame);
-    PyStackRef_CLEAR(frame->f_executable);
+    _PyFrame_ClearExecutable(frame);
     _PyThreadState_PopFrame(tstate, frame);
 }
 
@@ -2307,6 +2308,7 @@ PySoacCall_TakeBindingV1(PySoacBoundCallViewV1 *view,
         parameters[i] = soac_call_move_native(&frame->localsplus[i]);
     }
     activation->function = soac_call_move_native(&frame->f_funcobj);
+    _PyFrame_SetExecutableView(frame, NULL);
     activation->code = soac_call_move_native(&frame->f_executable);
     activation->namespace_value = PySoacRef_TakeV1(&view->namespace_value);
     frame->f_globals = NULL;

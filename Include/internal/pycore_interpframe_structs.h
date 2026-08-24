@@ -63,6 +63,12 @@ struct _PyInterpreterFrame {
     unsigned int soac_dataclass_role;
     PyObject *soac_dataclass_invocation;
     PyObject *soac_dataclass_checked_activation;
+#if !defined(Py_GIL_DISABLED) && defined(Py_STACKREF_DEBUG)
+    /* Diagnostic-only borrowed view of f_executable. Signal/watchdog dumps
+     * cannot consult the mutable debug handle table or an attached tstate.
+     * This is not an owning reference, GC edge, or runtime code accessor. */
+    PyObject *f_executable_view;
+#endif
     /* Locals and stack */
     _PyStackRef localsplus[1];
 };
