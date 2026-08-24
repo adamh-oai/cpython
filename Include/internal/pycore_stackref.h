@@ -353,18 +353,18 @@ _PyStackRef_FromPyObjectNewMortal(PyObject *obj, const char *filename, int linen
 }
 #define PyStackRef_FromPyObjectNewMortal(obj) _PyStackRef_FromPyObjectNewMortal(_PyObject_CAST(obj), __FILE__, __LINE__)
 
-extern int PyStackRef_Is(_PyStackRef a, _PyStackRef b);
+PyAPI_FUNC(int) PyStackRef_Is(_PyStackRef a, _PyStackRef b);
 
 extern bool PyStackRef_IsTaggedInt(_PyStackRef ref);
 
-extern intptr_t PyStackRef_UntagInt(_PyStackRef ref);
+PyAPI_FUNC(intptr_t) PyStackRef_UntagInt(_PyStackRef ref);
 
-extern _PyStackRef PyStackRef_TagInt(intptr_t i);
+PyAPI_FUNC(_PyStackRef) PyStackRef_TagInt(intptr_t i);
 
 /* Increments a tagged int, but does not check for overflow */
-extern _PyStackRef PyStackRef_IncrementTaggedIntNoOverflow(_PyStackRef ref);
+PyAPI_FUNC(_PyStackRef) PyStackRef_IncrementTaggedIntNoOverflow(_PyStackRef ref);
 
-extern bool
+PyAPI_FUNC(bool)
 PyStackRef_IsNullOrInt(_PyStackRef ref);
 
 #else
