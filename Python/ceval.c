@@ -3,7 +3,6 @@
 #include "ceval.h"
 #include "pycore_soac_call_v1.h"
 #include "pycore_soac_source_entry_v1.h"
-#include "pycore_soac_vm_call_v1.h"
 #include "pycore_soac_outgoing_v1.h"
 #include "soac_reference_v1.inc"  // one native opaque-reference implementation
 
