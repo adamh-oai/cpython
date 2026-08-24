@@ -21,6 +21,12 @@
 #define SOAC_IP_MAX_EVENTS 4096
 #define SOAC_IP_MAX_PENDING 1024
 
+/* Closed, cold test policy. Neither choice supplies production ty authority. */
+enum {
+    SOAC_IP_CLASS_ENFORCED = 0,
+    SOAC_IP_CLASS_DYNAMIC = 1,
+};
+
 enum {
     SOAC_IP_ROOT_BEGIN = 1, SOAC_IP_ROOT_END, SOAC_IP_BIRTH,
     SOAC_IP_ENTER, SOAC_IP_BOUND, SOAC_IP_RETURN, SOAC_IP_LEAVE,
@@ -80,6 +86,7 @@ typedef struct {
     int root_phase;              /* 0:fresh, 1:consumed, 2:done, 3:failed/cleared */
     int overflow;
     unsigned int call_fault; /* Trusted test decision corruption, never source policy. */
+    int class_decision;       /* Closed test-only Enforced / Dynamic decision. */
     Py_ssize_t serial, node_count, site_count, event_count;
     SoacInterpreterTestNode nodes[SOAC_IP_MAX_NODES];
     SoacInterpreterTestSite sites[SOAC_IP_MAX_SITES];
@@ -860,6 +867,12 @@ soac_ip_prepare_type(PyObject *object,
         event->counts[i] = Py_REFCNT(operand.value);
     }
 #endif
+    /* Observe the complete actual CALL/decorator edge before declining. This
+     * fixture choice never installs a handle, base policy, or final type seal.
+     * The default Enforced decision still exercises native contract refusal. */
+    if (fixture->class_decision == SOAC_IP_CLASS_DYNAMIC) {
+        return 0;
+    }
     PyObject *empty_keywords = keywords == NULL ? PyDict_New() : NULL;
     if (keywords == NULL && empty_keywords == NULL) return -1;
     PySoacTypeConstructionSpec spec = {
@@ -1524,8 +1537,15 @@ soac_interpreter_fixture(PyObject *self, PyObject *args)
 {
     PyObject *module, *details, *policies, *probe;
     unsigned int call_fault = 0;
-    if (!PyArg_ParseTuple(args, "OOOO|I:soac_interpreter_fixture",
-                          &module, &details, &policies, &probe, &call_fault)) return NULL;
+    int class_decision = SOAC_IP_CLASS_ENFORCED;
+    if (!PyArg_ParseTuple(args, "OOOO|Ii:soac_interpreter_fixture",
+                          &module, &details, &policies, &probe, &call_fault,
+                          &class_decision)) return NULL;
+    if (class_decision != SOAC_IP_CLASS_ENFORCED &&
+        class_decision != SOAC_IP_CLASS_DYNAMIC) {
+        PyErr_SetString(PyExc_ValueError, "invalid interpreter fixture class decision");
+        return NULL;
+    }
     if (call_fault > 6) {
         PyErr_SetString(PyExc_ValueError, "invalid interpreter call test fault");
         return NULL;
@@ -1563,6 +1583,7 @@ soac_interpreter_fixture(PyObject *self, PyObject *args)
     fixture->root_code = (uintptr_t)code;
     fixture->probe = Py_NewRef(probe);
     fixture->call_fault = call_fault;
+    fixture->class_decision = class_decision;
     fixture->empty = PyTuple_New(0);
     fixture->protected_names = Py_BuildValue("(s)", "locked");
     if (fixture->empty == NULL || fixture->protected_names == NULL ||
