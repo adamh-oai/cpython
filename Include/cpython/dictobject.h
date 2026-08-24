@@ -77,6 +77,14 @@ enum {
 typedef int (*PyDict_SoacPolicyCallback)(
     PyObject *owner, PyObject *dict, PyObject *key, PyObject *value,
     int operation, PyObject *provenance);
+/* ABI4 type-contract metadata factory view. The forward typedef is in
+ * cpython/object.h. Existing inputs borrow the actual dictionary's metadata;
+ * output owner is a new reference transferred to the native transaction.
+ * This adds no dictionary/value/instance owner and no source authority. */
+struct _PySoacInstanceDictPolicy {
+    PyObject *owner;
+    PyDict_SoacPolicyCallback validate;
+};
 PyAPI_FUNC(int) PyDict_SetSoacPolicy(
     PyObject *dict, PyObject *owner, PyDict_SoacPolicyCallback validate,
     unsigned int flags);
