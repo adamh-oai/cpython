@@ -5316,6 +5316,7 @@ dummy_func(
 
         macro(CALL_EX_PY) =
             _RECORD_4OS +
+            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
             unused/1 +
             _CHECK_PEP_523 +
             _MAKE_CALLARGS_A_TUPLE +
@@ -5345,8 +5346,10 @@ dummy_func(
             assert(PyTuple_CheckExact(callargs));
             PyObject *kwargs = PyStackRef_AsPyObjectBorrow(kwargs_st);
             assert(kwargs == NULL || PyDict_CheckExact(kwargs));
+            /* The specialization's mandatory activation guard leaves actual
+             * checked CALL observation to the generic consuming path. */
             PyObject *result_o = _PySOAC_InterpreterObjectCallFromFrame(
-                frame, frame->instr_ptr, func, callargs, kwargs);
+                frame, frame->instr_ptr, func, callargs, kwargs, NULL);
             PyStackRef_XCLOSE(kwargs_st);
             PyStackRef_CLOSE(callargs_st);
             DEAD(null);
@@ -5356,6 +5359,7 @@ dummy_func(
         }
 
         macro(CALL_EX_NON_PY_GENERAL) =
+            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
             unused/1 +
             _CHECK_IS_NOT_PY_CALLABLE_EX +
             _MAKE_CALLARGS_A_TUPLE +
