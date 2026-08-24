@@ -216,8 +216,13 @@ PyAPI_FUNC(PyObject *) PySoac_CallBorrowedVectorcallV1(
  * If externally retained, copy object references into the native frame;
  * otherwise copy none. Valid Finish allocates nothing and calls no Python.
  * Primary tokens remain live and unchanged for the caller's ordered Close
- * transaction. Captured environment-map ownership/GC masks retain native19's
- * both-GC-orders behavior. Return 1 retained, 0 unique, -1 invalid untouched.
+ * transaction. Captured environment-map arguments are ignored; pass NULL.
+ * The actual native function primary supplies its ordinary map support. Finish
+ * unpublishes borrowed map fields and adds no separate map ownership, even
+ * when GC has already cleared the function. Python and C lifetime-frame map
+ * introspection remain explicitly unavailable; no None/empty-map result is
+ * substituted. Legacy FinishWithEnvironment retains its independently owned
+ * captured-map contract. Return 1 retained, 0 unique, -1 invalid untouched.
  */
 PyAPI_FUNC(int) PyFrame_FinishSoacLifetimeWithReferencesV1(
     PyFrameObject *frame, PyObject *source_function,
