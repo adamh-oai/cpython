@@ -5565,7 +5565,19 @@ codegen_async_with_inner(compiler *c, stmt_ty s, int pos)
 
     ADDOP_JUMP(c, loc, SETUP_CLEANUP, cleanup);
     ADDOP(c, loc, PUSH_EXC_INFO);
+    /* Exceptional exit invokes its protocol inside WITH_EXCEPT_START,
+     * not a CALL opcode. Preserve the original operation as unsupported. */
+    Py_ssize_t previous_exception_exit;
+    RETURN_IF_ERROR(codegen_soac_context(c, Py_SOAC_CONTEXT_ASYNC_WITH_EXIT,
+        s, pos - 1, Py_SOAC_CONTEXT_EXCEPTION, NULL,
+        Py_SOAC_CONTEXT_EXCEPTION_VALUE, &previous_exception_exit));
+    uint32_t exceptional_exit_origin;
+    RETURN_IF_ERROR(_PyCompile_SoacCallStart(c, LOC(s), s,
+        Py_SOAC_CALL_ASYNC_WITH_EXIT, pos - 1, NULL, &exceptional_exit_origin));
+    RETURN_IF_ERROR(_PyCompile_SoacCallAlternative(c, exceptional_exit_origin,
+        Py_SOAC_OPERATION_GAP_LOWERED_NONCALL));
     ADDOP(c, loc, WITH_EXCEPT_START);
+    _PyCompile_SoacPopContext(c, previous_exception_exit);
     ADDOP_I(c, loc, GET_AWAITABLE, 2);
     ADDOP_LOAD_CONST(c, loc, Py_None);
     ADD_YIELD_FROM(c, loc, 1);
@@ -5677,7 +5689,19 @@ codegen_with_inner(compiler *c, stmt_ty s, int pos)
 
     ADDOP_JUMP(c, loc, SETUP_CLEANUP, cleanup);
     ADDOP(c, loc, PUSH_EXC_INFO);
+    /* Exceptional exit invokes its protocol inside WITH_EXCEPT_START,
+     * not a CALL opcode. Preserve the original operation as unsupported. */
+    Py_ssize_t previous_exception_exit;
+    RETURN_IF_ERROR(codegen_soac_context(c, Py_SOAC_CONTEXT_WITH_EXIT,
+        s, pos - 1, Py_SOAC_CONTEXT_EXCEPTION, NULL,
+        Py_SOAC_CONTEXT_EXCEPTION_VALUE, &previous_exception_exit));
+    uint32_t exceptional_exit_origin;
+    RETURN_IF_ERROR(_PyCompile_SoacCallStart(c, LOC(s), s,
+        Py_SOAC_CALL_WITH_EXIT, pos - 1, NULL, &exceptional_exit_origin));
+    RETURN_IF_ERROR(_PyCompile_SoacCallAlternative(c, exceptional_exit_origin,
+        Py_SOAC_OPERATION_GAP_LOWERED_NONCALL));
     ADDOP(c, loc, WITH_EXCEPT_START);
+    _PyCompile_SoacPopContext(c, previous_exception_exit);
     RETURN_IF_ERROR(codegen_with_except_finish(c, cleanup));
 
     USE_LABEL(c, exit);
