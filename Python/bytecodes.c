@@ -3809,7 +3809,7 @@ dummy_func(
                 DEAD(self_or_null);
                 DEAD(callable);
                 SYNC_SP();
-                res = _PySoacVMCall_FinishV1(&source_call, stack_pointer);
+                res = _PySoacVMCall_FinishV1(&source_call, frame->stackpointer);
                 ERROR_IF(PyStackRef_IsNull(res));
             }
             else {
@@ -4737,7 +4737,7 @@ dummy_func(
                 DEAD(callable);
                 PyStackRef_CLOSE(kwnames);
                 SYNC_SP();
-                res = _PySoacVMCall_FinishV1(&source_call, stack_pointer);
+                res = _PySoacVMCall_FinishV1(&source_call, frame->stackpointer);
                 ERROR_IF(PyStackRef_IsNull(res));
             }
             else {
@@ -4966,7 +4966,9 @@ dummy_func(
                 !IS_PEP523_HOOKED(tstate) &&
                 _PySoacVMCall_IsRegisteredV1(func)) {
                 int consistent = _PySoacVMCall_RequireOptimizedExpandedV1(func);
-                ERROR_IF(consistent < 0);
+                if (consistent < 0) {
+                    ERROR_NO_POP();
+                }
                 /* Check above is before either container's native owned
                  * conversion. Iterable normalization already ran at its
                  * original _MAKE_CALLARGS_A_TUPLE position. */
@@ -4981,7 +4983,7 @@ dummy_func(
                  * native order. No stale VM transport token is closed again. */
                 INPUTS_DEAD();
                 SYNC_SP();
-                result = _PySoacVMCall_FinishV1(&source_call, stack_pointer);
+                result = _PySoacVMCall_FinishV1(&source_call, frame->stackpointer);
                 ERROR_IF(PyStackRef_IsNull(result));
             }
             else {
