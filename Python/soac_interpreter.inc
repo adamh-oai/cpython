@@ -1213,6 +1213,14 @@ soac_finish_dataclass(
     int status = soac_selected_finished(caller, instruction,
         Py_SOAC_INTERPRETER_CALL_DATACLASS_ROOT, invocation, owner, stage,
         native_status == 0 ? result : NULL);
+    if (native_status < 0 || status < 0) {
+        /* A post-clear policy failure is still an invocation failure. Publish
+         * terminal admission/execution before the caller closes its result. */
+        PyObject *primary = PyErr_GetRaisedException();
+        if (PySoac_FailDataclassInvocation(invocation) < 0)
+            PyErr_WriteUnraisable(invocation);
+        PyErr_SetRaisedException(primary);
+    }
     _PySOAC_DataclassReleaseRoot(invocation);
     return native_status == 0 ? status : -1;
 }
