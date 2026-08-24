@@ -290,6 +290,91 @@ class TestFunctionAttributeCallbackStack(unittest.TestCase):
         self.assertEqual(error.stack.physical_sp, error.stack.logical_sp)
         self.assertEqual(error.spilled, 0)
 
+    def test_real_call_commit_exposes_consumed_prefix_and_reloads_before_dispatch(self):
+        analysis = analyzer.analyze_files([
+            os.path.join(test_tools.basepath, "Python", "bytecodes.c")
+        ])
+        helper = "_PySOAC_InterpreterCallCommit"
+
+        class CommitStackEmitter(tier1_generator.Emitter):
+            def __init__(self):
+                super().__init__(CWriter.null(), analysis.labels)
+                self.observed = []
+                self._replacers[helper] = self.observe_commit
+                self._replacers["DISPATCH_INLINED"] = self.observe_dispatch
+
+            def observe_commit(self, token, tokens, uop, storage, instruction):
+                self.observed.append(("commit", storage.copy()))
+                self.out.emit(token)
+                return True
+
+            def observe_dispatch(self, token, tokens, uop, storage, instruction):
+                self.observed.append(("dispatch", storage.copy()))
+                self.out.emit(token)
+                return False
+
+            def emit_IfStmt(self, stmt, uop, storage, instruction):
+                if any(token.text == "soac_committed" for token in stmt.condition):
+                    self.observed.append(("status", storage.copy()))
+                return super().emit_IfStmt(stmt, uop, storage, instruction)
+
+        for names, consumer, numeric, negative in (
+            (("CALL", "INSTRUMENTED_CALL"), "_DO_CALL", -2, ("oparg",)),
+            (("CALL_KW", "INSTRUMENTED_CALL_KW"), "_DO_CALL_KW", -3, ("oparg",)),
+            (("CALL_FUNCTION_EX", "INSTRUMENTED_CALL_FUNCTION_EX"),
+             "_DO_CALL_FUNCTION_EX", -4, ()),
+        ):
+            for name in names:
+                with self.subTest(instruction=name):
+                    instruction = analysis.instructions[name]
+                    uops = [
+                        part for part in instruction.parts
+                        if isinstance(part, analyzer.Uop) and part.name == consumer
+                    ]
+                    self.assertEqual(len(uops), 1)
+                    uop = uops[0]
+                    # A callback in an if-condition was invisible to the
+                    # escaping-call analyzer, leaving no published caller SP.
+                    self.assertEqual(
+                        [call.call.text for call in uop.properties.escaping_calls.values()
+                         if call.call.text == helper],
+                        [helper],
+                    )
+                    emitter = CommitStackEmitter()
+                    tier1_generator.write_uop(
+                        uop, emitter, 1, Stack(), instruction, False
+                    )
+                    self.assertEqual(
+                        [phase for phase, _ in emitter.observed],
+                        ["commit", "status", "dispatch"],
+                    )
+                    for phase, storage in emitter.observed:
+                        # These are actual generator Storage/PointerOffset
+                        # values, not assertions over rendered C. Every input
+                        # is consumed; the undefined result is not published.
+                        self.assertEqual(storage.inputs, [], phase)
+                        self.assertEqual(storage.stack.variables, [], phase)
+                        self.assertTrue(
+                            all(not local.in_local and not local.in_memory()
+                                for local in storage.outputs),
+                            phase,
+                        )
+                        offset = storage.stack.logical_sp
+                        self.assertEqual(
+                            (offset.numeric, offset.positive, offset.negative),
+                            (numeric, (), negative),
+                            phase,
+                        )
+                        self.assertEqual(
+                            storage.stack.physical_sp, offset, phase
+                        )
+                        if phase == "commit":
+                            self.assertGreater(storage.spilled, 0)
+                        else:
+                            # Both the error test and successful inline
+                            # dispatch see the reloaded caller stack pointer.
+                            self.assertEqual(storage.spilled, 0, phase)
+
     def test_dead_attribute_below_live_function_still_refuses_spill(self):
         analysis = analyzer.analyze_forest(parse_src("""
             inst(TEST, (attr_st, func_in -- func_out)) {
