@@ -4155,6 +4155,9 @@ dummy_func(
             assert(tp->tp_alloc == PyType_GenericAlloc);
             PyHeapTypeObject *cls = (PyHeapTypeObject *)callable_o;
             PyFunctionObject *init_func = (PyFunctionObject *)FT_ATOMIC_LOAD_PTR_ACQUIRE(cls->_spec_cache.init);
+            // Public vectorcall replacement invalidates the function version,
+            // not this type-version cache. Check before allocating an instance.
+            DEOPT_IF(init_func == NULL || init_func->vectorcall != _PyFunction_Vectorcall);
             PyCodeObject *code = (PyCodeObject *)init_func->func_code;
             DEOPT_IF(!_PyThreadState_HasStackSpace(tstate, code->co_framesize + _Py_InitCleanup.co_framesize));
             STAT_INC(CALL, hit);

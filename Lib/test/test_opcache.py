@@ -575,6 +575,33 @@ class TestCallCache(TestBase):
         for _ in range(_testinternalcapi.SPECIALIZATION_THRESHOLD):
             f()
 
+    def test_constructor_honors_custom_initializer_vectorcall(self):
+        class C:
+            def __init__(self):
+                raise AssertionError("initializer vectorcall was bypassed")
+
+        _testinternalcapi.set_vectorcall_nop(C.__init__)
+        for _ in range(2 * _testinternalcapi.SPECIALIZATION_THRESHOLD):
+            self.assertIs(type(C()), C)
+
+    def test_warmed_constructor_checks_initializer_vectorcall(self):
+        calls = []
+
+        class C:
+            def __init__(self):
+                calls.append(None)
+
+        def instantiate():
+            return C()
+
+        for _ in range(2 * _testinternalcapi.SPECIALIZATION_THRESHOLD):
+            instantiate()
+        calls.clear()
+        _testinternalcapi.set_vectorcall_nop(C.__init__)
+        for _ in range(2 * _testinternalcapi.SPECIALIZATION_THRESHOLD):
+            instantiate()
+        self.assertEqual(calls, [])
+
     @requires_jit_disabled
     @requires_specialization
     def test_specialize_call_function_ex_py(self):

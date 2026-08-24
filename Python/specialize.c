@@ -1578,6 +1578,11 @@ get_init_for_simple_managed_python_class(PyTypeObject *tp, unsigned int *tp_vers
         Py_XDECREF(init);
         return NULL;
     }
+    if (((PyFunctionObject *)init)->vectorcall != _PyFunction_Vectorcall) {
+        SPECIALIZATION_FAIL(CALL, SPEC_FAIL_CALL_VECTORCALL);
+        Py_DECREF(init);
+        return NULL;
+    }
     int kind = function_kind((PyCodeObject *)PyFunction_GET_CODE(init));
     if (kind != SIMPLE_FUNCTION) {
         SPECIALIZATION_FAIL(CALL, SPEC_FAIL_CALL_INIT_NOT_SIMPLE);
