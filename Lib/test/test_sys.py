@@ -1673,11 +1673,13 @@ class SizeofTest(unittest.TestCase):
         def func():
             return sys._getframe()
         x = func()
-        # This native frame also carries the explicit SOAC invocation edge.
-        # Use the actual C layout probe instead of a second stale ABI mirror.
+        # The interpreter frame carries the SOAC invocation edge, and the
+        # frame object has an additional pointer in StackRef-debug builds.
+        # Use actual C layout probes instead of a second stale ABI mirror.
         from _testinternalcapi import soac_dataclass_frame_offsets
-        interpreter_frame_size = soac_dataclass_frame_offsets()['frame_size']
-        check(x, size('3PiccPPP') + interpreter_frame_size + self.P)
+        frame_layout = soac_dataclass_frame_offsets()
+        check(x, frame_layout['frame_object_data_offset']
+              + frame_layout['frame_size'] + self.P)
         # function
         def func(): pass
         # The SOAC tail includes two JIT metadata pointers and a uint64 id

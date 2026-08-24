@@ -400,8 +400,9 @@ soac_dataclass_fixture_c_proxy(PyObject *self, PyObject *function)
 static PyObject *
 soac_dataclass_frame_offsets(PyObject *self, PyObject *unused)
 {
-    return Py_BuildValue("{s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n}",
+    return Py_BuildValue("{s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n}",
                          "frame_size", sizeof(_PyInterpreterFrame),
+                         "frame_object_data_offset", offsetof(PyFrameObject, _f_frame_data),
                          "role", offsetof(_PyInterpreterFrame, soac_dataclass_role),
                          "invocation", offsetof(_PyInterpreterFrame, soac_dataclass_invocation),
                          "checked_activation", offsetof(_PyInterpreterFrame, soac_dataclass_checked_activation),
