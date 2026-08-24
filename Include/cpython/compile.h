@@ -86,6 +86,14 @@ PyAPI_FUNC(PyObject *) PySoac_NewTypeParameter(
  * native evaluation/creation order. Returns an owned alias to parameter. */
 PyAPI_FUNC(PyObject *) PySoac_SetTypeParameterDefault(
     PyObject *parameter, PyObject *evaluator);
+/* Consume the compiler-created exact native parameter tuple using the stock
+ * Generic intrinsic, including its ordinary typing callbacks. */
+PyAPI_FUNC(PyObject *) PySoac_SubscriptGeneric(PyObject *type_params);
+/* Attach the exact tuple before decorators/completion. The native function
+ * mutation guard still applies; this returns an owned alias to function and
+ * never grants code execution or optimizer authority. */
+PyAPI_FUNC(PyObject *) PySoac_SetFunctionTypeParameters(
+    PyObject *function, PyObject *type_params);
 /* 1/0 for exact private slot identity, -1 for invalid C arguments. Success is
  * allocation/callback-free and does not make an unowned function executable. */
 PyAPI_FUNC(int) PySoac_MatchesTypeExpression(

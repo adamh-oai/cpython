@@ -1,5 +1,6 @@
 // TypeVar, TypeVarTuple, ParamSpec, and TypeAlias
 #include "Python.h"
+#include "pycore_function.h"      // _Py_set_function_type_params()
 #include "pycore_interpframe.h"   // _PyInterpreterFrame
 #include "pycore_object.h"        // _PyObject_GC_TRACK/UNTRACK, PyAnnotateFormat
 #include "pycore_typevarobject.h"
@@ -2306,9 +2307,13 @@ PyObject *
 _Py_subscript_generic(PyThreadState* unused, PyObject *params)
 {
     params = unpack_typevartuples(params);
+    if (params == NULL) {
+        return NULL;
+    }
 
     PyInterpreterState *interp = _PyInterpreterState_GET();
     if (interp->cached_objects.generic_type == NULL) {
+        Py_DECREF(params);
         PyErr_SetString(PyExc_SystemError, "Cannot find Generic type");
         return NULL;
     }
@@ -2434,6 +2439,24 @@ soac_type_parameter_check(PyInterpreterState *interp, PyObject *parameter)
          Py_IS_TYPE(parameter, interp->cached_objects.typevartuple_type));
 }
 
+static int
+soac_type_parameters_validate(PyInterpreterState *interp, PyObject *parameters)
+{
+    if (parameters == NULL || !PyTuple_CheckExact(parameters)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "compiler type parameters must be an exact tuple");
+        return -1;
+    }
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(parameters); i++) {
+        if (!soac_type_parameter_check(interp, PyTuple_GET_ITEM(parameters, i))) {
+            PyErr_SetString(PyExc_TypeError,
+                            "compiler parameter is not a native type parameter");
+            return -1;
+        }
+    }
+    return 0;
+}
+
 PyObject *
 PySoac_NewTypeAlias(PyObject *name, PyObject *type_params, PyObject *evaluator)
 {
@@ -2447,14 +2470,9 @@ PySoac_NewTypeAlias(PyObject *name, PyObject *type_params, PyObject *evaluator)
         return NULL;
     }
     PyThreadState *tstate = _PyThreadState_GET();
-    if (!Py_IsNone(type_params)) {
-        for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(type_params); i++) {
-            if (!soac_type_parameter_check(tstate->interp, PyTuple_GET_ITEM(type_params, i))) {
-                PyErr_SetString(PyExc_TypeError,
-                                "type alias parameter is not a native type parameter");
-                return NULL;
-            }
-        }
+    if (!Py_IsNone(type_params) &&
+        soac_type_parameters_validate(tstate->interp, type_params) < 0) {
+        return NULL;
     }
     PyObject *arguments = PyTuple_Pack(3, name, type_params, evaluator);
     if (arguments == NULL) {
@@ -2530,6 +2548,31 @@ PySoac_SetTypeParameterDefault(PyObject *parameter, PyObject *evaluator)
         return NULL;
     }
     return _Py_set_typeparam_default(tstate, parameter, evaluator);
+}
+
+PyObject *
+PySoac_SubscriptGeneric(PyObject *type_params)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    if (soac_type_parameters_validate(tstate->interp, type_params) < 0) {
+        return NULL;
+    }
+    return _Py_subscript_generic(tstate, type_params);
+}
+
+PyObject *
+PySoac_SetFunctionTypeParameters(PyObject *function, PyObject *type_params)
+{
+    if (function == NULL || !PyFunction_Check(function)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "type-parameter attachment requires an exact Python function");
+        return NULL;
+    }
+    PyThreadState *tstate = _PyThreadState_GET();
+    if (soac_type_parameters_validate(tstate->interp, type_params) < 0) {
+        return NULL;
+    }
+    return _Py_set_function_type_params(tstate, function, type_params);
 }
 
 int
