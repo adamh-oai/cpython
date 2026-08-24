@@ -3042,6 +3042,101 @@ set_vectorcall_nop(PyObject *self, PyObject *func)
     Py_RETURN_NONE;
 }
 
+/* Trusted C fixtures for the replay mechanism, not the production Rust
+ * artifact/role/closure authentication boundary. No hidden Python globals. */
+static PyObject *
+soac_test_annotation_replay_resolver(PyObject *provider, PyObject *owner, int format)
+{
+    if (!PyFunction_Check(provider)) {
+        PyErr_SetString(PyExc_TypeError, "annotation replay fixture needs a function");
+        return NULL;
+    }
+    return PySoac_CloneAnnotationReplayCode(provider, Py_None,
+                                          PyFunction_GET_CODE(provider));
+}
+
+static PyObject *
+soac_test_other_replay_resolver(PyObject *provider, PyObject *owner, int format)
+{
+    PyErr_SetString(PyExc_AssertionError, "replacement replay resolver was called");
+    return NULL;
+}
+
+static PyObject *
+soac_install_annotation_replay_resolver(PyObject *self, PyObject *alternate)
+{
+    PySoacAnnotationReplayResolver resolver;
+    if (alternate == Py_False) {
+        resolver = soac_test_annotation_replay_resolver;
+    }
+    else if (alternate == Py_True) {
+        resolver = soac_test_other_replay_resolver;
+    }
+    else if (alternate == Py_None) {
+        resolver = NULL;
+    }
+    else {
+        PyErr_SetString(PyExc_TypeError, "expected bool or None");
+        return NULL;
+    }
+    if (PySoac_SetAnnotationReplayResolver(resolver) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+soac_test_annotation_vectorcall(PyObject *provider, PyObject *const *args,
+                               size_t nargsf, PyObject *kwnames)
+{
+    PyObject *code = PySoac_CloneAnnotationReplayCode(
+        provider, Py_None, PyFunction_GET_CODE(provider));
+    if (code == NULL) {
+        return NULL;
+    }
+    PyObject *plain = PyFunction_New(code, PyFunction_GET_GLOBALS(provider));
+    Py_DECREF(code);
+    if (plain == NULL) {
+        return NULL;
+    }
+    PyFunctionObject *original = (PyFunctionObject *)provider;
+    Py_SETREF(((PyFunctionObject *)plain)->func_builtins,
+              Py_NewRef(original->func_builtins));
+    if ((original->func_closure != NULL &&
+         PyFunction_SetClosure(plain, original->func_closure) < 0) ||
+        (original->func_defaults != NULL &&
+         PyFunction_SetDefaults(plain, original->func_defaults) < 0) ||
+        (original->func_kwdefaults != NULL &&
+         PyFunction_SetKwDefaults(plain, original->func_kwdefaults) < 0)) {
+        Py_DECREF(plain);
+        return NULL;
+    }
+    PyObject *result = PyObject_Vectorcall(plain, args, nargsf, kwnames);
+    Py_DECREF(plain);
+    return result;
+}
+
+static PyObject *
+soac_prepare_annotation_replay_fixture(PyObject *self, PyObject *provider)
+{
+    if (!PyFunction_Check(provider)) {
+        PyErr_SetString(PyExc_TypeError, "annotation replay fixture needs an exact function");
+        return NULL;
+    }
+    PyObject *code = PyFunction_GET_CODE(provider);
+    if (code == NULL || !PyCode_Check(code) ||
+        ((PyCodeObject *)code)->_co_soac_strict_source_id == 0 ||
+        !(((PyCodeObject *)code)->co_flags & CO_FUTURE_STRICT)) {
+        PyErr_SetString(PyExc_ValueError, "annotation replay fixture needs verified strict code");
+        return NULL;
+    }
+    if (PyFunction_SetSoacStrictOwner(provider, Py_None) < 0) {
+        return NULL;
+    }
+    PyFunction_SetVectorcall((PyFunctionObject *)provider, soac_test_annotation_vectorcall);
+    Py_RETURN_NONE;
+}
+
 static PyObject *
 module_get_gc_hooks(PyObject *self, PyObject *arg)
 {
@@ -3254,6 +3349,8 @@ static PyMethodDef module_functions[] = {
 #endif
     {"simple_pending_call", simple_pending_call, METH_O},
     {"set_vectorcall_nop", set_vectorcall_nop, METH_O},
+    {"soac_prepare_annotation_replay_fixture", soac_prepare_annotation_replay_fixture, METH_O},
+    {"soac_install_annotation_replay_resolver", soac_install_annotation_replay_resolver, METH_O},
     {"module_get_gc_hooks", module_get_gc_hooks, METH_O},
     {"test_threadstate_set_stack_protection",
      test_threadstate_set_stack_protection, METH_NOARGS},

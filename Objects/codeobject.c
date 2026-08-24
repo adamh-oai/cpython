@@ -2873,6 +2873,203 @@ PyCode_GetSoacStrictSourceId(PyObject *object)
     return ((PyCodeObject *)object)->_co_soac_strict_source_id;
 }
 
+static int
+soac_replay_code_error(const char *message)
+{
+    PyObject *exception = PySoac_GetStrictRuntimeUnavailableError();
+    if (exception != NULL) {
+        PyErr_SetString(exception, message);
+    }
+    return -1;
+}
+
+static PyObject *
+soac_clone_replay_constant(PyObject *object, uint64_t source_id, PyObject *memo)
+{
+    if (!PyCode_Check(object) && !PyTuple_CheckExact(object) &&
+        !PyFrozenSet_CheckExact(object)) {
+        return Py_NewRef(object);
+    }
+    if (Py_EnterRecursiveCall(" while preparing strict annotation replay")) {
+        return NULL;
+    }
+    PyObject *key = PyLong_FromVoidPtr(object);
+    PyObject *result = NULL;
+    if (key == NULL) {
+        goto done;
+    }
+    int found = PyDict_GetItemRef(memo, key, &result);
+    if (found != 0) {
+        goto done;
+    }
+    if (PyCode_Check(object)) {
+        PyCodeObject *code = (PyCodeObject *)object;
+        if (code->_co_soac_strict_source_id != source_id ||
+            !(code->co_flags & CO_FUTURE_STRICT)) {
+            soac_replay_code_error("annotation replay contains unrelated native code");
+            goto done;
+        }
+        PyObject *constants = soac_clone_replay_constant(code->co_consts, source_id, memo);
+        if (constants == NULL) {
+            goto done;
+        }
+        PyObject *bytecode = PyCode_GetCode(code);
+        if (bytecode == NULL) {
+            Py_DECREF(constants);
+            goto done;
+        }
+        struct _PyCodeConstructor con = {
+            .filename = code->co_filename,
+            .name = code->co_name,
+            .qualname = code->co_qualname,
+            .flags = code->co_flags & ~CO_FUTURE_STRICT,
+            .code = bytecode,
+            .firstlineno = code->co_firstlineno,
+            .linetable = code->co_linetable,
+            .consts = constants,
+            .names = code->co_names,
+            .localsplusnames = code->co_localsplusnames,
+            .localspluskinds = code->co_localspluskinds,
+            .argcount = code->co_argcount,
+            .posonlyargcount = code->co_posonlyargcount,
+            .kwonlyargcount = code->co_kwonlyargcount,
+            .stacksize = code->co_stacksize,
+            .exceptiontable = code->co_exceptiontable,
+        };
+        if (_PyCode_Validate(&con) == 0) {
+            /* A fresh code object has no SOAC ID, co_extra, executors, or
+             * monitoring state. Do not use code.replace(): it deliberately
+             * retains the original strict-language flag. */
+            result = (PyObject *)_PyCode_New(&con);
+        }
+        Py_DECREF(bytecode);
+        Py_DECREF(constants);
+    }
+    else if (PyTuple_CheckExact(object)) {
+        Py_ssize_t size = PyTuple_GET_SIZE(object);
+        result = PyTuple_New(size);
+        if (result == NULL) {
+            goto done;
+        }
+        int changed = 0;
+        for (Py_ssize_t index = 0; index < size; index++) {
+            PyObject *original = PyTuple_GET_ITEM(object, index);
+            PyObject *item = soac_clone_replay_constant(original, source_id, memo);
+            if (item == NULL) {
+                Py_CLEAR(result);
+                goto done;
+            }
+            changed |= item != original;
+            PyTuple_SET_ITEM(result, index, item);
+        }
+        if (!changed) {
+            Py_SETREF(result, Py_NewRef(object));
+        }
+    }
+    else {
+        result = PyFrozenSet_New(NULL);
+        if (result == NULL) {
+            goto done;
+        }
+        Py_ssize_t position = 0;
+        PyObject *original;
+        Py_hash_t hash;
+        int changed = 0;
+        while (_PySet_NextEntry(object, &position, &original, &hash)) {
+            PyObject *item = soac_clone_replay_constant(original, source_id, memo);
+            if (item == NULL) {
+                Py_CLEAR(result);
+                goto done;
+            }
+            changed |= item != original;
+            int status = PySet_Add(result, item);
+            Py_DECREF(item);
+            if (status < 0) {
+                Py_CLEAR(result);
+                goto done;
+            }
+        }
+        if (!changed) {
+            Py_SETREF(result, Py_NewRef(object));
+        }
+    }
+    if (result != NULL && PyDict_SetItem(memo, key, result) < 0) {
+        Py_CLEAR(result);
+    }
+done:
+    Py_XDECREF(key);
+    Py_LeaveRecursiveCall();
+    return result;
+}
+
+PyObject *
+_PyCode_CloneSoacAnnotationReplay(PyCodeObject *code)
+{
+    assert(PyCode_Check(code));
+    assert(code->_co_soac_strict_source_id != 0);
+    PyObject *memo = PyDict_New();
+    if (memo == NULL) {
+        return NULL;
+    }
+    /* Pointer keys avoid invoking code equality or user-provided constants. */
+    PyObject *result = soac_clone_replay_constant(
+        (PyObject *)code, code->_co_soac_strict_source_id, memo);
+    Py_DECREF(memo);
+    return result;
+}
+
+static int
+soac_check_replay_constant(PyObject *object)
+{
+    if (!PyCode_Check(object) && !PyTuple_CheckExact(object) &&
+        !PyFrozenSet_CheckExact(object)) {
+        return 0;
+    }
+    if (Py_EnterRecursiveCall(" while validating strict annotation replay")) {
+        return -1;
+    }
+    int result = 0;
+    if (PyCode_Check(object)) {
+        PyCodeObject *code = (PyCodeObject *)object;
+        if ((code->co_flags & CO_FUTURE_STRICT) || code->_co_soac_strict_source_id != 0) {
+            result = soac_replay_code_error("annotation replay retained strict source authority");
+        }
+        else {
+            result = soac_check_replay_constant(code->co_consts);
+        }
+    }
+    else if (PyTuple_CheckExact(object)) {
+        for (Py_ssize_t index = 0; index < PyTuple_GET_SIZE(object); index++) {
+            if (soac_check_replay_constant(PyTuple_GET_ITEM(object, index)) < 0) {
+                result = -1;
+                break;
+            }
+        }
+    }
+    else {
+        Py_ssize_t position = 0;
+        PyObject *item;
+        Py_hash_t hash;
+        while (_PySet_NextEntry(object, &position, &item, &hash)) {
+            if (soac_check_replay_constant(item) < 0) {
+                result = -1;
+                break;
+            }
+        }
+    }
+    Py_LeaveRecursiveCall();
+    return result;
+}
+
+int
+_PyCode_CheckSoacAnnotationReplay(PyObject *code)
+{
+    if (code == NULL || !PyCode_Check(code)) {
+        return soac_replay_code_error("annotation replay resolver did not return exact code");
+    }
+    return soac_check_replay_constant(code);
+}
+
 /*[clinic input]
 code._varname_from_oparg
 

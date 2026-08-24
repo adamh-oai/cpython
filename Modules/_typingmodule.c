@@ -5,6 +5,7 @@
 #endif
 
 #include "Python.h"
+#include "internal/pycore_code.h"
 #include "internal/pycore_interp.h"
 #include "internal/pycore_typevarobject.h"
 #include "internal/pycore_unionobject.h"  // _PyUnion_Type
@@ -34,9 +35,69 @@ _typing__idfunc(PyObject *module, PyObject *x)
     return Py_NewRef(x);
 }
 
+static PyObject *
+soac_annotation_replay_code(PyObject *module, PyObject *args)
+{
+    PyObject *provider, *owner, *format;
+    if (!PyArg_ParseTuple(args, "OOO:_soac_annotation_replay_code",
+                          &provider, &owner, &format)) {
+        return NULL;
+    }
+    if (!PyFunction_Check(provider)) {
+        return PyObject_GetAttrString(provider, "__code__");
+    }
+    PyObject *native_owner = PyFunction_GetSoacStrictOwner(provider);
+    if (native_owner == NULL && PyErr_Occurred()) {
+        return NULL;
+    }
+    PyObject *code = PyFunction_GET_CODE(provider);
+    if (native_owner == NULL &&
+        (code == NULL || !PyCode_Check(code) ||
+         (!(((PyCodeObject *)code)->co_flags & CO_FUTURE_STRICT) &&
+          ((PyCodeObject *)code)->_co_soac_strict_source_id == 0))) {
+        /* Keep stock callable/descriptor behavior outside strict ownership. */
+        return PyObject_GetAttrString(provider, "__code__");
+    }
+    if (!PyLong_Check(format)) {
+        PyErr_SetString(PyExc_ValueError, "annotation replay requires FORWARDREF or STRING");
+        return NULL;
+    }
+    long requested = PyLong_AsLong(format);
+    if (requested == -1 && PyErr_Occurred()) {
+        return NULL;
+    }
+    if (requested != 3 && requested != 4) {
+        PyErr_SetString(PyExc_ValueError, "annotation replay requires FORWARDREF or STRING");
+        return NULL;
+    }
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    PySoacAnnotationReplayResolver resolver = interp->soac.annotation_replay_resolver;
+    if (resolver == NULL || interp->soac.annotation_replay_closed) {
+        PyObject *exception = PySoac_GetStrictRuntimeUnavailableError();
+        if (exception != NULL) {
+            PyErr_SetString(exception, "strict annotation replay runtime is unavailable");
+        }
+        return NULL;
+    }
+    PyObject *result = resolver(provider, owner, (int)requested);
+    if (result == NULL) {
+        if (!PyErr_Occurred()) {
+            PyErr_SetString(PyExc_SystemError, "annotation replay resolver failed without an exception");
+        }
+        return NULL;
+    }
+    if (_PyCode_CheckSoacAnnotationReplay(result) < 0) {
+        Py_DECREF(result);
+        return NULL;
+    }
+    return result;
+}
+
 
 static PyMethodDef typing_methods[] = {
     _TYPING__IDFUNC_METHODDEF
+    {"_soac_annotation_replay_code", soac_annotation_replay_code, METH_VARARGS,
+     "Return ordinary replay code through the interpreter-owned native resolver."},
     {NULL, NULL, 0, NULL}
 };
 

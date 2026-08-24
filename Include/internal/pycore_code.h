@@ -674,6 +674,10 @@ PyAPI_FUNC(int) _PyCode_ReturnsOnlyNone(PyCodeObject *);
  * compare bytes and str which can raise a BytesWarning exception. */
 extern PyObject* _PyCode_ConstantKey(PyObject *obj);
 
+/* Annotation replay is ordinary derived code, not a strict execution permit. */
+extern PyObject *_PyCode_CloneSoacAnnotationReplay(PyCodeObject *);
+PyAPI_FUNC(int) _PyCode_CheckSoacAnnotationReplay(PyObject *);
+
 
 #ifdef __cplusplus
 }

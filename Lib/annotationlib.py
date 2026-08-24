@@ -6,6 +6,7 @@ import enum
 import keyword
 import sys
 import types
+from _typing import _soac_annotation_replay_code
 
 __all__ = [
     "Format",
@@ -746,7 +747,7 @@ def call_annotate_function(annotate, format, *, owner=None, _is_evaluate=False):
             annotate, owner, is_class, globals, allow_evaluation=False
         )
         func = types.FunctionType(
-            annotate.__code__,
+            _soac_annotation_replay_code(annotate, owner, format),
             globals,
             closure=closure,
             argdefs=annotate.__defaults__,
@@ -790,7 +791,7 @@ def call_annotate_function(annotate, format, *, owner=None, _is_evaluate=False):
             annotate, owner, is_class, globals, allow_evaluation=True
         )
         func = types.FunctionType(
-            annotate.__code__,
+            _soac_annotation_replay_code(annotate, owner, format),
             globals,
             closure=closure,
             argdefs=annotate.__defaults__,
@@ -820,7 +821,7 @@ def call_annotate_function(annotate, format, *, owner=None, _is_evaluate=False):
             annotate, owner, is_class, globals, allow_evaluation=False
         )
         func = types.FunctionType(
-            annotate.__code__,
+            _soac_annotation_replay_code(annotate, owner, format),
             globals,
             closure=closure,
             argdefs=annotate.__defaults__,

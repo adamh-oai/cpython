@@ -887,6 +887,8 @@ struct _is {
         uint64_t source_counter;
         PyObject *mutation_error;
         PyObject *runtime_unavailable_error;
+        PySoacAnnotationReplayResolver annotation_replay_resolver;
+        int annotation_replay_closed;
     } soac;
     unsigned long feature_flags;
 

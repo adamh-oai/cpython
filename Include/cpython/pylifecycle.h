@@ -36,6 +36,13 @@ PyAPI_FUNC(int) PySoac_GetStrictConfig(
 PyAPI_FUNC(PyObject *) PySoac_GetStrictMutationError(void);
 PyAPI_FUNC(PyObject *) PySoac_GetStrictRuntimeUnavailableError(void);
 
+/* One trusted native resolver per interpreter. A repeated identical callback
+ * is allowed; replacement, deletion, and installation during teardown fail.
+ * The callback validates the actual provider/owner/source/capture relationship
+ * and returns a new reference to ordinary replay-only code, never a permit. */
+typedef PyObject *(*PySoacAnnotationReplayResolver)(PyObject *, PyObject *, int);
+PyAPI_FUNC(int) PySoac_SetAnnotationReplayResolver(PySoacAnnotationReplayResolver);
+
 
 PyAPI_FUNC(void) _Py_NO_RETURN Py_ExitStatusException(PyStatus err);
 

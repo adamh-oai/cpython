@@ -225,3 +225,51 @@ There are a few functions specific to Python functions.
    it before returning.
 
    .. versionadded:: 3.12
+
+
+SOAC Annotation Replay
+----------------------
+
+These interpreter-specific APIs derive ordinary code for ``annotationlib``'s
+``FORWARDREF`` and ``STRING`` evaluation. They never authorize execution of
+original strict bytecode or grant optimizer or mutation authority.
+
+.. c:function:: PyObject *PySoac_CloneAnnotationReplayCode(PyObject *provider, PyObject *expected_owner, PyObject *verified_code)
+
+   The trusted native caller must first authenticate the exact provider's
+   annotation role, source, logical owner, and closure layout. The function
+   checks that *provider* is an exact function with the same attached live
+   native *expected_owner*, that its actual code is *verified_code*, and that
+   the code came from the authenticated native compiler.
+
+   Return a new ordinary code tree with all ``CO_FUTURE_STRICT`` bits and
+   private SOAC source IDs removed recursively. Code extras, executors, and
+   monitoring state are not copied. Nested lambdas, comprehensions, and
+   generators therefore remain ordinary if they escape an annotation replay.
+   The original tree is unchanged and remains subject to every native strict
+   frame-entry guard. Code copying through ``code.replace`` or ``marshal``
+   does not invoke this operation or receive its source authentication.
+
+.. c:type:: PyObject *(*PySoacAnnotationReplayResolver)(PyObject *provider, PyObject *logical_owner, int format)
+
+   Resolve one authenticated annotation-provider replay for public format 3
+   (``FORWARDREF``) or 4 (``STRING``). Return a new reference to ordinary code,
+   or ``NULL`` with an exception. The returned code must also accept the
+   internal ``VALUE_WITH_FAKE_GLOBALS`` argument used by ``annotationlib``.
+   This callback owns no interpreter references through its function pointer;
+   all source and Python state must have explicit, GC-visible owners.
+
+.. c:function:: int PySoac_SetAnnotationReplayResolver(PySoacAnnotationReplayResolver resolver)
+
+   Install the trusted resolver once in the current interpreter. Registering
+   the identical callback again succeeds. Replacing or removing it fails.
+   Subinterpreters do not inherit the registration. Interpreter teardown
+   clears and permanently closes it before object callbacks can run.
+
+The private ``_typing._soac_annotation_replay_code`` stdlib bridge dispatches
+owned strict providers through that native registration and verifies that the
+whole returned code tree is ordinary. Python attributes, mutable helper names,
+and code flags never install a resolver or authenticate a provider. Ordinary
+callbacks retain the existing ``__code__`` lookup and ``annotationlib`` replay
+behavior. Type-alias and type-parameter evaluate callbacks require their own
+authenticated source/capture integration; this API alone does not supply it.

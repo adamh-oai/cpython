@@ -286,6 +286,47 @@ PyFunction_HasSoacRequiredBoundary(PyObject *object)
     return ((PyFunctionObject *)object)->func_soac_required_boundary != 0;
 }
 
+PyObject *
+PySoac_CloneAnnotationReplayCode(PyObject *provider, PyObject *expected_owner,
+                               PyObject *verified_code)
+{
+    if (provider == NULL || !PyFunction_Check(provider) ||
+        verified_code == NULL || !PyCode_Check(verified_code)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "strict annotation replay needs an exact function and code");
+        return NULL;
+    }
+    PyFunctionObject *func = (PyFunctionObject *)provider;
+    PyCodeObject *code = (PyCodeObject *)verified_code;
+    if (expected_owner == NULL ||
+        func->func_soac_strict_owner_state != FUNC_SOAC_OWNER_ATTACHED ||
+        func->func_soac_strict_owner != expected_owner ||
+        func->func_code != verified_code ||
+        code->_co_soac_strict_source_id == 0 ||
+        !(code->co_flags & CO_FUTURE_STRICT)) {
+        func_soac_runtime_error("strict annotation replay needs its actual verified provider");
+        return NULL;
+    }
+    if (PyFunction_CheckSoacStrictDefaults(provider) < 0) {
+        return NULL;
+    }
+    /* Code allocation notifies native watchers. Keep the source tree alive
+     * and recheck the function identity after those callbacks finish. */
+    Py_INCREF(code);
+    PyObject *result = _PyCode_CloneSoacAnnotationReplay(code);
+    if (result != NULL &&
+        (func->func_soac_strict_owner_state != FUNC_SOAC_OWNER_ATTACHED ||
+         func->func_soac_strict_owner != expected_owner ||
+         func->func_code != verified_code)) {
+        Py_DECREF(code);
+        Py_DECREF(result);
+        func_soac_runtime_error("strict annotation provider changed during replay preparation");
+        return NULL;
+    }
+    Py_DECREF(code);
+    return result;
+}
+
 int
 PyFunction_AddWatcher(PyFunction_WatchCallback callback)
 {
