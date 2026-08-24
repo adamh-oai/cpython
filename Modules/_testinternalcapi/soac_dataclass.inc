@@ -151,6 +151,20 @@ soac_dc_test_member(PyObject *owner, PyObject *type, PyObject *class_owner,
             (fn->func_defaults == NULL ? Py_None : fn->func_defaults) == PyTuple_GET_ITEM(member, 4) &&
             (fn->func_closure == NULL ? Py_None : fn->func_closure) == PyTuple_GET_ITEM(member, 5) &&
             fn->func_kwdefaults == NULL) {
+            /* The existing GC-visible fixture owner carries this observer.
+             * It is deliberately a real registered validation callback:
+             * tests may collect, mutate operands, or fail here. */
+            PyObject *payload = PyTuple_GET_ITEM(owner, 4);
+            if (PyTuple_CheckExact(payload) && PyTuple_GET_SIZE(payload) == 2 &&
+                PyUnicode_CheckExact(PyTuple_GET_ITEM(payload, 0)) &&
+                _PyUnicode_EqualToASCIIString(PyTuple_GET_ITEM(payload, 0),
+                                             "member-validation-v1")) {
+                PyObject *result = PyObject_CallFunctionObjArgs(
+                    PyTuple_GET_ITEM(payload, 1), type, class_owner,
+                    name, function, NULL);
+                if (result == NULL) return -1;
+                Py_DECREF(result);
+            }
             return 0;
         }
     }
