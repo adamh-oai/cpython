@@ -365,7 +365,7 @@ assemble_location_info(struct assembler *a, instr_sequence *instrs,
     return SUCCESS;
 }
 
-static void
+static _Py_CODEUNIT *
 write_instr(_Py_CODEUNIT *codestr, instruction *instr, int ilen)
 {
     int opcode = instr->i_opcode;
@@ -373,6 +373,7 @@ write_instr(_Py_CODEUNIT *codestr, instruction *instr, int ilen)
     int oparg = instr->i_oparg;
     assert(OPCODE_HAS_ARG(opcode) || oparg == 0);
     int caches = _PyOpcode_Caches[opcode];
+    _Py_CODEUNIT *opcode_unit = NULL;
     switch (ilen - caches) {
         case 4:
             codestr->op.code = EXTENDED_ARG;
@@ -390,6 +391,7 @@ write_instr(_Py_CODEUNIT *codestr, instruction *instr, int ilen)
             codestr++;
             _Py_FALLTHROUGH;
         case 1:
+            opcode_unit = codestr;
             codestr->op.code = opcode;
             codestr->op.arg = oparg & 0xFF;
             codestr++;
@@ -402,6 +404,7 @@ write_instr(_Py_CODEUNIT *codestr, instruction *instr, int ilen)
         codestr->op.arg = 0;
         codestr++;
     }
+    return opcode_unit;
 }
 
 /* assemble_emit_instr()
@@ -410,7 +413,8 @@ write_instr(_Py_CODEUNIT *codestr, instruction *instr, int ilen)
 */
 
 static int
-assemble_emit_instr(struct assembler *a, instruction *instr)
+assemble_emit_instr(struct assembler *a, instruction *instr,
+                    _PyCompile_CodeUnitMetadata *umd, int ordinal)
 {
     Py_ssize_t len = PyBytes_GET_SIZE(a->a_bytecode);
     _Py_CODEUNIT *code;
@@ -424,19 +428,24 @@ assemble_emit_instr(struct assembler *a, instruction *instr)
     }
     code = (_Py_CODEUNIT *)PyBytes_AS_STRING(a->a_bytecode) + a->a_offset;
     a->a_offset += size;
-    write_instr(code, instr, size);
+    _Py_CODEUNIT *opcode = write_instr(code, instr, size);
+    if (umd->u_soac_bindings != NULL) {
+        Py_ssize_t offset = (char *)opcode - PyBytes_AS_STRING(a->a_bytecode);
+        RETURN_IF_ERROR(_PyCompile_SoacAssembledInstruction(umd, ordinal, instr, offset));
+    }
     return SUCCESS;
 }
 
 static int
 assemble_emit(struct assembler *a, instr_sequence *instrs,
-              int first_lineno, PyObject *const_cache)
+              int first_lineno, PyObject *const_cache,
+              _PyCompile_CodeUnitMetadata *umd)
 {
     RETURN_IF_ERROR(assemble_init(a, first_lineno));
 
     for (int i = 0; i < instrs->s_used; i++) {
         instruction *instr = &instrs->s_instrs[i];
-        RETURN_IF_ERROR(assemble_emit_instr(a, instr));
+        RETURN_IF_ERROR(assemble_emit_instr(a, instr, umd, i));
     }
 
     RETURN_IF_ERROR(assemble_location_info(a, instrs, a->a_lineno));
@@ -451,6 +460,10 @@ assemble_emit(struct assembler *a, instr_sequence *instrs,
 
     RETURN_IF_ERROR(_PyBytes_Resize(&a->a_bytecode, a->a_offset * sizeof(_Py_CODEUNIT)));
     RETURN_IF_ERROR(_PyCompile_ConstCacheMergeOne(const_cache, &a->a_bytecode));
+    if (umd->u_soac_bindings != NULL) {
+        RETURN_IF_ERROR(_PyCompile_SoacFinishAssembly(
+            umd, instrs->s_used, PyBytes_GET_SIZE(a->a_bytecode)));
+    }
     return SUCCESS;
 }
 
@@ -792,7 +805,7 @@ _PyAssemble_MakeCodeObject(_PyCompile_CodeUnitMetadata *umd, PyObject *const_cac
     PyCodeObject *co = NULL;
 
     struct assembler a;
-    int res = assemble_emit(&a, instrs, umd->u_firstlineno, const_cache);
+    int res = assemble_emit(&a, instrs, umd->u_firstlineno, const_cache, umd);
     if (res == SUCCESS) {
         co = makecode(umd, &a, const_cache, consts, maxdepth, nlocalsplus,
                       code_flags, filename);

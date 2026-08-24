@@ -2429,6 +2429,17 @@ optimize_basic_block(PyObject *const_cache, basicblock *bb, PyObject *consts)
                 break;
             case LOAD_GLOBAL:
                 if (nextop == PUSH_NULL && (oparg & 1) == 0) {
+                    cfg_instr *null = &bb->b_instr[i + 1];
+                    /* Preserve the exact preparation observation at the
+                     * transformation which folds its NULL into LOAD_GLOBAL.
+                     * Occupied/multi-origin lanes remain unsupported rather
+                     * than overwriting a different producer. */
+                    if (null->i_soac_origins.lane[0] != 0 &&
+                        null->i_soac_origins.lane[1] == 0 &&
+                        inst->i_soac_origins.lane[0] == 0 && inst->i_soac_origins.lane[1] == 0) {
+                        inst->i_soac_origins = null->i_soac_origins;
+                        null->i_soac_origins = (_PySoacReadOrigins){{0, 0}};
+                    }
                     INSTR_SET_OP1(inst, LOAD_GLOBAL, oparg | 1);
                     INSTR_SET_OP0(&bb->b_instr[i + 1], NOP);
                 }

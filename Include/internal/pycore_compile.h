@@ -114,6 +114,44 @@ int _PyCompile_SoacFinalReferenceInstruction(_PyCompile_CodeUnitMetadata *,
                                             _PySoacReadOrigins);
 int _PyCompile_SoacFinishReferences(_PyCompile_CodeUnitMetadata *, int count);
 
+/* Original source operation provenance, only for the existing opt-in product.
+ * None of these compiler hooks grants runtime or source-body authority. */
+int _PyCompile_SoacBindingOrigin(struct _PyCompiler *, _Py_SourceLocation,
+                                const void *, int kind, int phase,
+                                expr_context_ty);
+int _PyCompile_SoacCallStart(struct _PyCompiler *, _Py_SourceLocation,
+                            const void *, int kind, int detail,
+                            PyCodeObject *child, uint32_t *origin);
+int _PyCompile_SoacCallInput(struct _PyCompiler *, uint32_t origin,
+                            int channel, int preloaded, int positional_kind,
+                            asdl_expr_seq *, int injected_generic_base,
+                            int keyword_kind, asdl_keyword_seq *);
+int _PyCompile_SoacCallGroup(struct _PyCompiler *, uint32_t origin,
+                            int kind, Py_ssize_t first, Py_ssize_t count,
+                            int map_style);
+int _PyCompile_SoacCallKeywordConstant(struct _PyCompiler *, uint32_t origin);
+int _PyCompile_SoacCallKeywordNames(struct _PyCompiler *, uint32_t origin,
+                                   PyObject *names);
+int _PyCompile_SoacCallEmit(struct _PyCompiler *, uint32_t origin);
+int _PyCompile_SoacCallAlternative(struct _PyCompiler *, uint32_t origin,
+                                  int reason);
+int _PyCompile_SoacCallPreparation(struct _PyCompiler *, uint32_t origin);
+PyObject *_PyCompile_SoacPatternLeaf(struct _PyCompiler *, pattern_ty, int kind);
+int _PyCompile_SoacPatternStore(struct _PyCompiler *, pattern_ty,
+                               PyObject *leaf_origins);
+int _PyCompile_SoacPushContext(struct _PyCompiler *, int owner_kind,
+                              _Py_SourceLocation owner_loc, const void *owner,
+                              int item, int entry,
+                              _Py_SourceLocation transfer_loc, const void *transfer,
+                              int payload, Py_ssize_t *previous);
+void _PyCompile_SoacPopContext(struct _PyCompiler *, Py_ssize_t previous);
+Py_ssize_t _PyCompile_SoacBeginUnwindContext(struct _PyCompiler *);
+int _PyCompile_SoacAssembledInstruction(_PyCompile_CodeUnitMetadata *,
+                                      int ordinal, const _PyInstruction *,
+                                      Py_ssize_t opcode_offset);
+int _PyCompile_SoacFinishAssembly(_PyCompile_CodeUnitMetadata *, int count,
+                                 Py_ssize_t code_size);
+
 typedef enum {
     COMPILE_OP_FAST,
     COMPILE_OP_GLOBAL,
@@ -153,6 +191,10 @@ typedef struct {
     _PyJumpTargetLabel fb_exit;
     /* (optional) additional information required for unwinding */
     void *fb_datum;
+    /* Original semantic cleanup owner; never inferred from fb_loc or names. */
+    const void *fb_soac_owner;
+    int fb_soac_owner_kind;
+    int fb_soac_item;
 } _PyCompile_FBlockInfo;
 
 

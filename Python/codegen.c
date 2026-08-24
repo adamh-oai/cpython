@@ -176,6 +176,8 @@ typedef struct {
     // - Different name assignments in alternatives.
     // - The order of name assignments in alternatives.
     PyObject *stores;
+    // Parallel actual capture leaves; NULL on ordinary compilation.
+    PyObject *soac_store_origins;
     // If 0, any name captures against our subject will raise.
     int allow_irrefutable;
     // An array of blocks to jump to on failure. Jumping to fail_pop[i] will pop
@@ -218,15 +220,15 @@ static int codegen_async_for(compiler *, stmt_ty);
 static int codegen_call_simple_kw_helper(compiler *c,
                                          location loc,
                                          asdl_keyword_seq *keywords,
-                                         Py_ssize_t nkwelts);
+                                         Py_ssize_t nkwelts, uint32_t call_origin);
 static int codegen_call_helper_impl(compiler *c, location loc,
                                     int n, /* Args already pushed */
                                     asdl_expr_seq *args,
                                     PyObject *injected_arg,
-                                    asdl_keyword_seq *keywords);
+                                    asdl_keyword_seq *keywords, uint32_t call_origin);
 static int codegen_call_helper(compiler *c, location loc,
                                int n, asdl_expr_seq *args,
-                               asdl_keyword_seq *keywords);
+                               asdl_keyword_seq *keywords, uint32_t call_origin);
 static int codegen_try_except(compiler *, stmt_ty);
 static int codegen_try_star_except(compiler *, stmt_ty);
 
@@ -475,13 +477,39 @@ codegen_addop_j(instr_sequence *seq, location loc,
         }                                                                   \
     } while (0)
 
+#define SOAC_CALL_PREP(C, ORIGIN) \
+    do { \
+        if ((ORIGIN) != 0) { \
+            RETURN_IF_ERROR(_PyCompile_SoacCallPreparation((C), (ORIGIN))); \
+        } \
+    } while (0)
+
 static int
-codegen_call_exit_with_nones(compiler *c, location loc)
+codegen_soac_lowered_call(compiler *c, expr_ty call)
 {
+    uint32_t origin;
+    RETURN_IF_ERROR(_PyCompile_SoacCallStart(c, LOC(call), call,
+        Py_SOAC_CALL_SOURCE, -1, NULL, &origin));
+    return _PyCompile_SoacCallAlternative(c, origin, Py_SOAC_OPERATION_GAP_LOWERED_NONCALL);
+}
+
+static int
+codegen_call_exit_with_nones(compiler *c, location loc, stmt_ty owner, int item)
+{
+    uint32_t call_origin;
+    RETURN_IF_ERROR(_PyCompile_SoacCallStart(c, LOC(owner), owner,
+        owner->kind == AsyncWith_kind ? Py_SOAC_CALL_ASYNC_WITH_EXIT : Py_SOAC_CALL_WITH_EXIT,
+        item, NULL, &call_origin));
+    RETURN_IF_ERROR(_PyCompile_SoacCallInput(c, call_origin, Py_SOAC_CALL_METHOD_CHANNEL,
+        3, Py_SOAC_POSITIONAL_VECTOR, NULL, 0, Py_SOAC_KEYWORDS_NONE, NULL));
     ADDOP_LOAD_CONST(c, loc, Py_None);
+    SOAC_CALL_PREP(c, call_origin);
     ADDOP_LOAD_CONST(c, loc, Py_None);
+    SOAC_CALL_PREP(c, call_origin);
     ADDOP_LOAD_CONST(c, loc, Py_None);
+    SOAC_CALL_PREP(c, call_origin);
     ADDOP_I(c, loc, CALL, 3);
+    RETURN_IF_ERROR(_PyCompile_SoacCallEmit(c, call_origin));
     return SUCCESS;
 }
 
@@ -526,14 +554,91 @@ codegen_pop_except_and_reraise(compiler *c, location loc)
     return SUCCESS;
 }
 
+/* Source operation context is compile-local and independent of i_loc. */
+static void
+codegen_soac_fblock_owner(compiler *c, int kind, const void *owner, int item)
+{
+    if (METADATA(c)->u_soac_bindings == NULL) {
+        return;
+    }
+    fblockinfo *info = _PyCompile_TopFBlock(c);
+    assert(info != NULL);
+    info->fb_soac_owner = owner;
+    info->fb_soac_owner_kind = kind;
+    info->fb_soac_item = item;
+}
+
+static int
+codegen_soac_context(compiler *c, int kind, const void *owner, int item,
+                      int entry, stmt_ty transfer, int payload, Py_ssize_t *previous)
+{
+    *previous = -1;
+    if (METADATA(c)->u_soac_bindings == NULL) {
+        return SUCCESS;
+    }
+    location loc = NO_LOCATION;
+    if (owner != NULL) {
+        if (kind == Py_SOAC_CONTEXT_EXCEPT_CLEANUP || kind == Py_SOAC_CONTEXT_EXCEPT_STAR_CLEANUP) {
+            loc = LOC((excepthandler_ty)owner);
+        }
+        else {
+            loc = LOC((stmt_ty)owner);
+        }
+    }
+    return _PyCompile_SoacPushContext(c, kind, loc, owner, item, entry,
+        transfer == NULL ? NO_LOCATION : LOC(transfer), transfer, payload, previous);
+}
+
+static int
+codegen_soac_finalbody(compiler *c, stmt_ty owner, int kind, int entry,
+                        asdl_stmt_seq *body)
+{
+    Py_ssize_t previous;
+    RETURN_IF_ERROR(codegen_soac_context(c, kind, owner, -1, entry, NULL,
+        entry == Py_SOAC_CONTEXT_EXCEPTION ? Py_SOAC_CONTEXT_EXCEPTION_VALUE : Py_SOAC_CONTEXT_NO_PAYLOAD,
+        &previous));
+    VISIT_SEQ(c, stmt, body);
+    _PyCompile_SoacPopContext(c, previous);
+    return SUCCESS;
+}
+
+static int
+codegen_soac_cleanup_nameop(compiler *c, location loc, identifier name,
+                            excepthandler_ty handler, expr_context_ty context)
+{
+    RETURN_IF_ERROR(codegen_nameop(c, loc, name, context));
+    if (METADATA(c)->u_soac_bindings != NULL && handler != NULL) {
+        RETURN_IF_ERROR(_PyCompile_SoacBindingOrigin(c, LOC(handler), handler,
+            Py_SOAC_BINDING_EXCEPT_ALIAS, context == Store
+                ? Py_SOAC_BINDING_CLEANUP_STORE_NONE : Py_SOAC_BINDING_CLEANUP_DELETE,
+            context));
+    }
+    return SUCCESS;
+}
+
+static int
+codegen_soac_handler_cleanup(compiler *c, location loc, excepthandler_ty handler,
+                              int owner_kind, int entry)
+{
+    Py_ssize_t previous;
+    RETURN_IF_ERROR(codegen_soac_context(c, owner_kind, handler, -1, entry, NULL,
+        entry == Py_SOAC_CONTEXT_EXCEPTION ? Py_SOAC_CONTEXT_EXCEPTION_VALUE : Py_SOAC_CONTEXT_NO_PAYLOAD,
+        &previous));
+    ADDOP_LOAD_CONST(c, loc, Py_None);
+    RETURN_IF_ERROR(codegen_soac_cleanup_nameop(c, loc, handler->v.ExceptHandler.name, handler, Store));
+    RETURN_IF_ERROR(codegen_soac_cleanup_nameop(c, loc, handler->v.ExceptHandler.name, handler, Del));
+    _PyCompile_SoacPopContext(c, previous);
+    return SUCCESS;
+}
+
 /* Unwind a frame block.  If preserve_tos is true, the TOS before
  * popping the blocks will be restored afterwards, unless another
  * return, break or continue is found. In which case, the TOS will
  * be popped.
  */
 static int
-codegen_unwind_fblock(compiler *c, location *ploc,
-                      fblockinfo *info, int preserve_tos)
+codegen_unwind_fblock_impl(compiler *c, location *ploc,
+                           fblockinfo *info, int preserve_tos)
 {
     switch (info->fb_type) {
         case COMPILE_FBLOCK_WHILE_LOOP:
@@ -603,7 +708,7 @@ codegen_unwind_fblock(compiler *c, location *ploc,
                 ADDOP_I(c, *ploc, SWAP, 3);
                 ADDOP_I(c, *ploc, SWAP, 2);
             }
-            RETURN_IF_ERROR(codegen_call_exit_with_nones(c, *ploc));
+            RETURN_IF_ERROR(codegen_call_exit_with_nones(c, *ploc, (stmt_ty)info->fb_datum, info->fb_soac_item));
             if (info->fb_type == COMPILE_FBLOCK_ASYNC_WITH) {
                 ADDOP_I(c, *ploc, GET_AWAITABLE, 2);
                 ADDOP_LOAD_CONST(c, *ploc, Py_None);
@@ -627,8 +732,10 @@ codegen_unwind_fblock(compiler *c, location *ploc,
             ADDOP(c, *ploc, POP_EXCEPT);
             if (info->fb_datum) {
                 ADDOP_LOAD_CONST(c, *ploc, Py_None);
-                RETURN_IF_ERROR(codegen_nameop(c, *ploc, info->fb_datum, Store));
-                RETURN_IF_ERROR(codegen_nameop(c, *ploc, info->fb_datum, Del));
+                RETURN_IF_ERROR(codegen_soac_cleanup_nameop(c, *ploc, info->fb_datum,
+                    (excepthandler_ty)info->fb_soac_owner, Store));
+                RETURN_IF_ERROR(codegen_soac_cleanup_nameop(c, *ploc, info->fb_datum,
+                    (excepthandler_ty)info->fb_soac_owner, Del));
             }
             return SUCCESS;
         }
@@ -643,10 +750,32 @@ codegen_unwind_fblock(compiler *c, location *ploc,
     Py_UNREACHABLE();
 }
 
+static int
+codegen_unwind_fblock(compiler *c, location *ploc, fblockinfo *info,
+                       int preserve_tos, stmt_ty transfer)
+{
+    int cleanup = info->fb_type == COMPILE_FBLOCK_FINALLY_TRY ||
+        info->fb_type == COMPILE_FBLOCK_WITH || info->fb_type == COMPILE_FBLOCK_ASYNC_WITH ||
+        (info->fb_type == COMPILE_FBLOCK_HANDLER_CLEANUP && info->fb_datum != NULL);
+    if (!cleanup || METADATA(c)->u_soac_bindings == NULL) {
+        return codegen_unwind_fblock_impl(c, ploc, info, preserve_tos);
+    }
+    assert(transfer != NULL);
+    int entry = transfer->kind == Return_kind ? Py_SOAC_CONTEXT_RETURN :
+        transfer->kind == Break_kind ? Py_SOAC_CONTEXT_BREAK : Py_SOAC_CONTEXT_CONTINUE;
+    Py_ssize_t previous;
+    RETURN_IF_ERROR(codegen_soac_context(c, info->fb_soac_owner_kind,
+        info->fb_soac_owner, info->fb_soac_item, entry, transfer,
+        preserve_tos ? Py_SOAC_CONTEXT_RETURN_VALUE : Py_SOAC_CONTEXT_NO_PAYLOAD, &previous));
+    int result = codegen_unwind_fblock_impl(c, ploc, info, preserve_tos);
+    _PyCompile_SoacPopContext(c, previous);
+    return result;
+}
+
 /** Unwind block stack. If loop is not NULL, then stop when the first loop is encountered. */
 static int
 codegen_unwind_fblock_stack(compiler *c, location *ploc,
-                            int preserve_tos, fblockinfo **loop)
+                            int preserve_tos, fblockinfo **loop, stmt_ty transfer)
 {
     fblockinfo *top = _PyCompile_TopFBlock(c);
     if (top == NULL) {
@@ -664,10 +793,12 @@ codegen_unwind_fblock_stack(compiler *c, location *ploc,
     }
     fblockinfo copy = *top;
     _PyCompile_PopFBlock(c, top->fb_type, top->fb_block);
-    RETURN_IF_ERROR(codegen_unwind_fblock(c, ploc, &copy, preserve_tos));
-    RETURN_IF_ERROR(codegen_unwind_fblock_stack(c, ploc, preserve_tos, loop));
+    RETURN_IF_ERROR(codegen_unwind_fblock(c, ploc, &copy, preserve_tos, transfer));
+    RETURN_IF_ERROR(codegen_unwind_fblock_stack(c, ploc, preserve_tos, loop, transfer));
     _PyCompile_PushFBlock(c, copy.fb_loc, copy.fb_type, copy.fb_block,
                           copy.fb_exit, copy.fb_datum);
+    codegen_soac_fblock_owner(c, copy.fb_soac_owner_kind,
+                               copy.fb_soac_owner, copy.fb_soac_item);
     return SUCCESS;
 }
 
@@ -1016,7 +1147,7 @@ codegen_decorators(compiler *c, asdl_expr_seq* decos)
 }
 
 static int
-codegen_apply_decorators(compiler *c, asdl_expr_seq* decos)
+codegen_apply_decorators(compiler *c, stmt_ty owner, asdl_expr_seq* decos)
 {
     if (!decos) {
         return SUCCESS;
@@ -1024,7 +1155,13 @@ codegen_apply_decorators(compiler *c, asdl_expr_seq* decos)
 
     for (Py_ssize_t i = asdl_seq_LEN(decos) - 1; i > -1; i--) {
         location loc = LOC((expr_ty)asdl_seq_GET(decos, i));
+        uint32_t call_origin;
+        RETURN_IF_ERROR(_PyCompile_SoacCallStart(c, LOC(owner), owner,
+            Py_SOAC_CALL_DECORATOR, (int)i, NULL, &call_origin));
+        RETURN_IF_ERROR(_PyCompile_SoacCallInput(c, call_origin, Py_SOAC_CALL_LEADING_CHANNEL,
+            0, Py_SOAC_POSITIONAL_VECTOR, NULL, 0, Py_SOAC_KEYWORDS_NONE, NULL));
         ADDOP_I(c, loc, CALL, 0);
+        RETURN_IF_ERROR(_PyCompile_SoacCallEmit(c, call_origin));
     }
     return SUCCESS;
 }
@@ -1309,7 +1446,8 @@ codegen_type_params(compiler *c, asdl_type_param_seq *type_params)
                                         typeparam->v.TypeVar.name);
             }
             ADDOP_I(c, loc, COPY, 1);
-            RETURN_IF_ERROR(codegen_nameop(c, loc, typeparam->v.TypeVar.name, Store));
+            RETURN_IF_ERROR(codegen_binding_nameop(c, loc, typeparam->v.TypeVar.name,
+                LOC(typeparam), typeparam, Py_SOAC_BINDING_TYPEVAR));
             break;
         case TypeVarTuple_kind:
             ADDOP_LOAD_CONST(c, loc, typeparam->v.TypeVarTuple.name);
@@ -1328,7 +1466,8 @@ codegen_type_params(compiler *c, asdl_type_param_seq *type_params)
                                         typeparam->v.TypeVarTuple.name);
             }
             ADDOP_I(c, loc, COPY, 1);
-            RETURN_IF_ERROR(codegen_nameop(c, loc, typeparam->v.TypeVarTuple.name, Store));
+            RETURN_IF_ERROR(codegen_binding_nameop(c, loc, typeparam->v.TypeVarTuple.name,
+                LOC(typeparam), typeparam, Py_SOAC_BINDING_TYPEVARTUPLE));
             break;
         case ParamSpec_kind:
             ADDOP_LOAD_CONST(c, loc, typeparam->v.ParamSpec.name);
@@ -1347,7 +1486,8 @@ codegen_type_params(compiler *c, asdl_type_param_seq *type_params)
                                         typeparam->v.ParamSpec.name);
             }
             ADDOP_I(c, loc, COPY, 1);
-            RETURN_IF_ERROR(codegen_nameop(c, loc, typeparam->v.ParamSpec.name, Store));
+            RETURN_IF_ERROR(codegen_binding_nameop(c, loc, typeparam->v.ParamSpec.name,
+                LOC(typeparam), typeparam, Py_SOAC_BINDING_PARAMSPEC));
             break;
         }
     }
@@ -1532,20 +1672,33 @@ codegen_function(compiler *c, stmt_ty s, int is_async)
         if (co == NULL) {
             return ERROR;
         }
+        uint32_t call_origin;
+        if (_PyCompile_SoacCallStart(c, LOC(s), s, Py_SOAC_CALL_GENERIC_SCOPE,
+                -1, co, &call_origin) < 0 ||
+            _PyCompile_SoacCallInput(c, call_origin, num_typeparam_args > 0 ? Py_SOAC_CALL_LEADING_CHANNEL : Py_SOAC_CALL_NULL_CHANNEL,
+                num_typeparam_args > 0 ? num_typeparam_args - 1 : 0, Py_SOAC_POSITIONAL_VECTOR, NULL, 0, Py_SOAC_KEYWORDS_NONE, NULL) < 0) {
+            Py_DECREF(co);
+            return ERROR;
+        }
         int ret = codegen_make_closure(c, loc, co, 0);
         Py_DECREF(co);
         RETURN_IF_ERROR(ret);
+        SOAC_CALL_PREP(c, call_origin);
         if (num_typeparam_args > 0) {
             ADDOP_I(c, loc, SWAP, num_typeparam_args + 1);
+            SOAC_CALL_PREP(c, call_origin);
             ADDOP_I(c, loc, CALL, num_typeparam_args - 1);
+            RETURN_IF_ERROR(_PyCompile_SoacCallEmit(c, call_origin));
         }
         else {
             ADDOP(c, loc, PUSH_NULL);
+            SOAC_CALL_PREP(c, call_origin);
             ADDOP_I(c, loc, CALL, 0);
+            RETURN_IF_ERROR(_PyCompile_SoacCallEmit(c, call_origin));
         }
     }
 
-    RETURN_IF_ERROR(codegen_apply_decorators(c, decos));
+    RETURN_IF_ERROR(codegen_apply_decorators(c, s, decos));
     return codegen_binding_nameop(c, loc, name, LOC(s), s,
         is_async ? Py_SOAC_BINDING_ASYNC_FUNCTION : Py_SOAC_BINDING_FUNCTION);
 }
@@ -1561,7 +1714,7 @@ codegen_set_type_params_in_class(compiler *c, location loc)
 
 
 static int
-codegen_class_body(compiler *c, stmt_ty s, int firstlineno)
+codegen_class_body(compiler *c, stmt_ty s, int firstlineno, uint32_t *call_origin)
 {
     /* ultimately generate code for:
          <name> = __build_class__(<func>, <name>, *<bases>, **<keywords>)
@@ -1665,6 +1818,12 @@ codegen_class_body(compiler *c, stmt_ty s, int firstlineno)
         return ERROR;
     }
 
+    if (_PyCompile_SoacCallStart(c, LOC(s), s, Py_SOAC_CALL_CLASS,
+            -1, co, call_origin) < 0) {
+        Py_DECREF(co);
+        return ERROR;
+    }
+
     /* 2. load the 'build_class' function */
 
     // these instructions should be attributed to the class line,
@@ -1672,6 +1831,7 @@ codegen_class_body(compiler *c, stmt_ty s, int firstlineno)
     loc = LOC(s);
     ADDOP(c, loc, LOAD_BUILD_CLASS);
     ADDOP(c, loc, PUSH_NULL);
+    SOAC_CALL_PREP(c, *call_origin);
 
     /* 3. load a function (or closure) made from the code object */
     int ret = codegen_make_closure(c, loc, co, 0);
@@ -1714,7 +1874,8 @@ codegen_class(compiler *c, stmt_ty s)
         RETURN_IF_ERROR_IN_SCOPE(c, codegen_nameop(c, loc, &_Py_STR(type_params), Store));
     }
 
-    int ret = codegen_class_body(c, s, firstlineno);
+    uint32_t class_call_origin;
+    int ret = codegen_class_body(c, s, firstlineno, &class_call_origin);
     if (is_generic) {
         RETURN_IF_ERROR_IN_SCOPE(c, ret);
     }
@@ -1734,7 +1895,7 @@ codegen_class(compiler *c, stmt_ty s)
         RETURN_IF_ERROR_IN_SCOPE(c, codegen_call_helper_impl(c, loc, 2,
                                                              s->v.ClassDef.bases,
                                                              &_Py_STR(generic_base),
-                                                             s->v.ClassDef.keywords));
+                                                             s->v.ClassDef.keywords, class_call_origin));
 
         PyCodeObject *co = _PyCompile_OptimizeAndAssemble(c, 0);
 
@@ -1742,19 +1903,30 @@ codegen_class(compiler *c, stmt_ty s)
         if (co == NULL) {
             return ERROR;
         }
+        uint32_t call_origin;
+        if (_PyCompile_SoacCallStart(c, LOC(s), s, Py_SOAC_CALL_GENERIC_SCOPE,
+                -1, co, &call_origin) < 0 ||
+            _PyCompile_SoacCallInput(c, call_origin, Py_SOAC_CALL_NULL_CHANNEL,
+                0, Py_SOAC_POSITIONAL_VECTOR, NULL, 0, Py_SOAC_KEYWORDS_NONE, NULL) < 0) {
+            Py_DECREF(co);
+            return ERROR;
+        }
         int ret = codegen_make_closure(c, loc, co, 0);
         Py_DECREF(co);
         RETURN_IF_ERROR(ret);
+        SOAC_CALL_PREP(c, call_origin);
         ADDOP(c, loc, PUSH_NULL);
+        SOAC_CALL_PREP(c, call_origin);
         ADDOP_I(c, loc, CALL, 0);
+        RETURN_IF_ERROR(_PyCompile_SoacCallEmit(c, call_origin));
     } else {
         RETURN_IF_ERROR(codegen_call_helper(c, loc, 2,
                                             s->v.ClassDef.bases,
-                                            s->v.ClassDef.keywords));
+                                            s->v.ClassDef.keywords, class_call_origin));
     }
 
     /* 6. apply decorators */
-    RETURN_IF_ERROR(codegen_apply_decorators(c, decos));
+    RETURN_IF_ERROR(codegen_apply_decorators(c, s, decos));
 
     /* 7. store into <name> */
     RETURN_IF_ERROR(codegen_binding_nameop(
@@ -1828,13 +2000,24 @@ codegen_typealias(compiler *c, stmt_ty s)
         if (co == NULL) {
             return ERROR;
         }
+        uint32_t call_origin;
+        if (_PyCompile_SoacCallStart(c, LOC(s), s, Py_SOAC_CALL_GENERIC_SCOPE,
+                -1, co, &call_origin) < 0 ||
+            _PyCompile_SoacCallInput(c, call_origin, Py_SOAC_CALL_NULL_CHANNEL,
+                0, Py_SOAC_POSITIONAL_VECTOR, NULL, 0, Py_SOAC_KEYWORDS_NONE, NULL) < 0) {
+            Py_DECREF(co);
+            return ERROR;
+        }
         int ret = codegen_make_closure(c, loc, co, 0);
         Py_DECREF(co);
         RETURN_IF_ERROR(ret);
+        SOAC_CALL_PREP(c, call_origin);
         ADDOP(c, loc, PUSH_NULL);
+        SOAC_CALL_PREP(c, call_origin);
         ADDOP_I(c, loc, CALL, 0);
+        RETURN_IF_ERROR(_PyCompile_SoacCallEmit(c, call_origin));
     }
-    RETURN_IF_ERROR(codegen_nameop(c, loc, name, Store));
+    RETURN_IF_ERROR(codegen_source_nameop(c, loc, s->v.TypeAlias.name, Store));
     return SUCCESS;
 }
 
@@ -2282,7 +2465,8 @@ codegen_return(compiler *c, stmt_ty s)
         ADDOP(c, loc, NOP);
     }
 
-    RETURN_IF_ERROR(codegen_unwind_fblock_stack(c, &loc, preserve_tos, NULL));
+    Py_ssize_t previous_context = _PyCompile_SoacBeginUnwindContext(c);
+    RETURN_IF_ERROR(codegen_unwind_fblock_stack(c, &loc, preserve_tos, NULL, s));
     if (s->v.Return.value == NULL) {
         ADDOP_LOAD_CONST(c, loc, Py_None);
     }
@@ -2291,37 +2475,44 @@ codegen_return(compiler *c, stmt_ty s)
     }
     ADDOP(c, loc, RETURN_VALUE);
 
+    _PyCompile_SoacPopContext(c, previous_context);
     return SUCCESS;
 }
 
 static int
-codegen_break(compiler *c, location loc)
+codegen_break(compiler *c, stmt_ty s)
 {
+    location loc = LOC(s);
     fblockinfo *loop = NULL;
     location origin_loc = loc;
     /* Emit instruction with line number */
     ADDOP(c, loc, NOP);
-    RETURN_IF_ERROR(codegen_unwind_fblock_stack(c, &loc, 0, &loop));
+    Py_ssize_t previous_context = _PyCompile_SoacBeginUnwindContext(c);
+    RETURN_IF_ERROR(codegen_unwind_fblock_stack(c, &loc, 0, &loop, s));
     if (loop == NULL) {
         return _PyCompile_Error(c, origin_loc, "'break' outside loop");
     }
-    RETURN_IF_ERROR(codegen_unwind_fblock(c, &loc, loop, 0));
+    RETURN_IF_ERROR(codegen_unwind_fblock(c, &loc, loop, 0, s));
     ADDOP_JUMP(c, loc, JUMP, loop->fb_exit);
+    _PyCompile_SoacPopContext(c, previous_context);
     return SUCCESS;
 }
 
 static int
-codegen_continue(compiler *c, location loc)
+codegen_continue(compiler *c, stmt_ty s)
 {
+    location loc = LOC(s);
     fblockinfo *loop = NULL;
     location origin_loc = loc;
     /* Emit instruction with line number */
     ADDOP(c, loc, NOP);
-    RETURN_IF_ERROR(codegen_unwind_fblock_stack(c, &loc, 0, &loop));
+    Py_ssize_t previous_context = _PyCompile_SoacBeginUnwindContext(c);
+    RETURN_IF_ERROR(codegen_unwind_fblock_stack(c, &loc, 0, &loop, s));
     if (loop == NULL) {
         return _PyCompile_Error(c, origin_loc, "'continue' not properly in loop");
     }
     ADDOP_JUMP(c, loc, JUMP, loop->fb_block);
+    _PyCompile_SoacPopContext(c, previous_context);
     return SUCCESS;
 }
 
@@ -2372,6 +2563,7 @@ codegen_try_finally(compiler *c, stmt_ty s)
     RETURN_IF_ERROR(
         _PyCompile_PushFBlock(c, loc, COMPILE_FBLOCK_FINALLY_TRY, body, end,
                               s->v.Try.finalbody));
+    codegen_soac_fblock_owner(c, Py_SOAC_CONTEXT_TRY_FINALLY, s, -1);
 
     if (s->v.Try.handlers && asdl_seq_LEN(s->v.Try.handlers)) {
         RETURN_IF_ERROR(codegen_try_except(c, s));
@@ -2381,7 +2573,8 @@ codegen_try_finally(compiler *c, stmt_ty s)
     }
     ADDOP(c, NO_LOCATION, POP_BLOCK);
     _PyCompile_PopFBlock(c, COMPILE_FBLOCK_FINALLY_TRY, body);
-    VISIT_SEQ(c, stmt, s->v.Try.finalbody);
+    RETURN_IF_ERROR(codegen_soac_finalbody(c, s, Py_SOAC_CONTEXT_TRY_FINALLY,
+        Py_SOAC_CONTEXT_FALLTHROUGH, s->v.Try.finalbody));
 
     ADDOP_JUMP(c, NO_LOCATION, JUMP_NO_INTERRUPT, exit);
     /* `finally` block */
@@ -2393,7 +2586,8 @@ codegen_try_finally(compiler *c, stmt_ty s)
     ADDOP(c, loc, PUSH_EXC_INFO);
     RETURN_IF_ERROR(
         _PyCompile_PushFBlock(c, loc, COMPILE_FBLOCK_FINALLY_END, end, NO_LABEL, NULL));
-    VISIT_SEQ(c, stmt, s->v.Try.finalbody);
+    RETURN_IF_ERROR(codegen_soac_finalbody(c, s, Py_SOAC_CONTEXT_TRY_FINALLY,
+        Py_SOAC_CONTEXT_EXCEPTION, s->v.Try.finalbody));
     _PyCompile_PopFBlock(c, COMPILE_FBLOCK_FINALLY_END, end);
 
     loc = NO_LOCATION;
@@ -2422,6 +2616,7 @@ codegen_try_star_finally(compiler *c, stmt_ty s)
     RETURN_IF_ERROR(
         _PyCompile_PushFBlock(c, loc, COMPILE_FBLOCK_FINALLY_TRY, body, end,
                               s->v.TryStar.finalbody));
+    codegen_soac_fblock_owner(c, Py_SOAC_CONTEXT_TRY_STAR_FINALLY, s, -1);
 
     if (s->v.TryStar.handlers && asdl_seq_LEN(s->v.TryStar.handlers)) {
         RETURN_IF_ERROR(codegen_try_star_except(c, s));
@@ -2431,7 +2626,8 @@ codegen_try_star_finally(compiler *c, stmt_ty s)
     }
     ADDOP(c, NO_LOCATION, POP_BLOCK);
     _PyCompile_PopFBlock(c, COMPILE_FBLOCK_FINALLY_TRY, body);
-    VISIT_SEQ(c, stmt, s->v.TryStar.finalbody);
+    RETURN_IF_ERROR(codegen_soac_finalbody(c, s, Py_SOAC_CONTEXT_TRY_STAR_FINALLY,
+        Py_SOAC_CONTEXT_FALLTHROUGH, s->v.TryStar.finalbody));
 
     ADDOP_JUMP(c, NO_LOCATION, JUMP_NO_INTERRUPT, exit);
 
@@ -2444,7 +2640,8 @@ codegen_try_star_finally(compiler *c, stmt_ty s)
     RETURN_IF_ERROR(
         _PyCompile_PushFBlock(c, loc, COMPILE_FBLOCK_FINALLY_END, end, NO_LABEL, NULL));
 
-    VISIT_SEQ(c, stmt, s->v.TryStar.finalbody);
+    RETURN_IF_ERROR(codegen_soac_finalbody(c, s, Py_SOAC_CONTEXT_TRY_STAR_FINALLY,
+        Py_SOAC_CONTEXT_EXCEPTION, s->v.TryStar.finalbody));
 
     _PyCompile_PopFBlock(c, COMPILE_FBLOCK_FINALLY_END, end);
     loc = NO_LOCATION;
@@ -2561,6 +2758,7 @@ codegen_try_except(compiler *c, stmt_ty s)
             RETURN_IF_ERROR(
                 _PyCompile_PushFBlock(c, loc, COMPILE_FBLOCK_HANDLER_CLEANUP, cleanup_body,
                                       NO_LABEL, handler->v.ExceptHandler.name));
+        codegen_soac_fblock_owner(c, Py_SOAC_CONTEXT_EXCEPT_CLEANUP, handler, -1);
 
             /* second # body */
             VISIT_SEQ(c, stmt, handler->v.ExceptHandler.body);
@@ -2569,22 +2767,16 @@ codegen_try_except(compiler *c, stmt_ty s)
             ADDOP(c, NO_LOCATION, POP_BLOCK);
             ADDOP(c, NO_LOCATION, POP_BLOCK);
             ADDOP(c, NO_LOCATION, POP_EXCEPT);
-            ADDOP_LOAD_CONST(c, NO_LOCATION, Py_None);
-            RETURN_IF_ERROR(
-                codegen_nameop(c, NO_LOCATION, handler->v.ExceptHandler.name, Store));
-            RETURN_IF_ERROR(
-                codegen_nameop(c, NO_LOCATION, handler->v.ExceptHandler.name, Del));
+            RETURN_IF_ERROR(codegen_soac_handler_cleanup(c, NO_LOCATION, handler,
+                Py_SOAC_CONTEXT_EXCEPT_CLEANUP, Py_SOAC_CONTEXT_FALLTHROUGH));
             ADDOP_JUMP(c, NO_LOCATION, JUMP_NO_INTERRUPT, end);
 
             /* except: */
             USE_LABEL(c, cleanup_end);
 
             /* name = None; del name; # artificial */
-            ADDOP_LOAD_CONST(c, NO_LOCATION, Py_None);
-            RETURN_IF_ERROR(
-                codegen_nameop(c, NO_LOCATION, handler->v.ExceptHandler.name, Store));
-            RETURN_IF_ERROR(
-                codegen_nameop(c, NO_LOCATION, handler->v.ExceptHandler.name, Del));
+            RETURN_IF_ERROR(codegen_soac_handler_cleanup(c, NO_LOCATION, handler,
+                Py_SOAC_CONTEXT_EXCEPT_CLEANUP, Py_SOAC_CONTEXT_EXCEPTION));
 
             ADDOP_I(c, NO_LOCATION, RERAISE, 1);
         }
@@ -2760,6 +2952,7 @@ codegen_try_star_except(compiler *c, stmt_ty s)
         RETURN_IF_ERROR(
             _PyCompile_PushFBlock(c, loc, COMPILE_FBLOCK_HANDLER_CLEANUP, cleanup_body,
                                   NO_LABEL, handler->v.ExceptHandler.name));
+        codegen_soac_fblock_owner(c, Py_SOAC_CONTEXT_EXCEPT_STAR_CLEANUP, handler, -1);
 
         /* second # body */
         VISIT_SEQ(c, stmt, handler->v.ExceptHandler.body);
@@ -2767,11 +2960,8 @@ codegen_try_star_except(compiler *c, stmt_ty s)
         /* name = None; del name; # artificial */
         ADDOP(c, NO_LOCATION, POP_BLOCK);
         if (handler->v.ExceptHandler.name) {
-            ADDOP_LOAD_CONST(c, NO_LOCATION, Py_None);
-            RETURN_IF_ERROR(
-                codegen_nameop(c, NO_LOCATION, handler->v.ExceptHandler.name, Store));
-            RETURN_IF_ERROR(
-                codegen_nameop(c, NO_LOCATION, handler->v.ExceptHandler.name, Del));
+            RETURN_IF_ERROR(codegen_soac_handler_cleanup(c, NO_LOCATION, handler,
+                Py_SOAC_CONTEXT_EXCEPT_STAR_CLEANUP, Py_SOAC_CONTEXT_FALLTHROUGH));
         }
         ADDOP_JUMP(c, NO_LOCATION, JUMP_NO_INTERRUPT, except);
 
@@ -2780,11 +2970,8 @@ codegen_try_star_except(compiler *c, stmt_ty s)
 
         /* name = None; del name; # artificial */
         if (handler->v.ExceptHandler.name) {
-            ADDOP_LOAD_CONST(c, NO_LOCATION, Py_None);
-            RETURN_IF_ERROR(
-                codegen_nameop(c, NO_LOCATION, handler->v.ExceptHandler.name, Store));
-            RETURN_IF_ERROR(
-                codegen_nameop(c, NO_LOCATION, handler->v.ExceptHandler.name, Del));
+            RETURN_IF_ERROR(codegen_soac_handler_cleanup(c, NO_LOCATION, handler,
+                Py_SOAC_CONTEXT_EXCEPT_STAR_CLEANUP, Py_SOAC_CONTEXT_EXCEPTION));
         }
 
         /* add exception raised to the res list */
@@ -3016,12 +3203,21 @@ codegen_assert(compiler *c, stmt_ty s)
     if (OPTIMIZATION_LEVEL(c)) {
         return SUCCESS;
     }
+    uint32_t call_origin = 0;
+    if (s->v.Assert.msg != NULL) {
+        RETURN_IF_ERROR(_PyCompile_SoacCallStart(c, LOC(s), s,
+            Py_SOAC_CALL_ASSERT, -1, NULL, &call_origin));
+        RETURN_IF_ERROR(_PyCompile_SoacCallInput(c, call_origin, Py_SOAC_CALL_LEADING_CHANNEL,
+            0, Py_SOAC_POSITIONAL_VECTOR, NULL, 0, Py_SOAC_KEYWORDS_NONE, NULL));
+    }
     NEW_JUMP_TARGET_LABEL(c, end);
     RETURN_IF_ERROR(codegen_jump_if(c, LOC(s), s->v.Assert.test, end, 1));
     ADDOP_I(c, LOC(s), LOAD_COMMON_CONSTANT, CONSTANT_ASSERTIONERROR);
+    SOAC_CALL_PREP(c, call_origin);
     if (s->v.Assert.msg) {
         VISIT(c, expr, s->v.Assert.msg);
         ADDOP_I(c, LOC(s), CALL, 0);
+        RETURN_IF_ERROR(_PyCompile_SoacCallEmit(c, call_origin));
     }
     ADDOP_I(c, LOC(s->v.Assert.test), RAISE_VARARGS, 1);
 
@@ -3143,11 +3339,11 @@ codegen_visit_stmt(compiler *c, stmt_ty s)
     }
     case Break_kind:
     {
-        return codegen_break(c, LOC(s));
+        return codegen_break(c, s);
     }
     case Continue_kind:
     {
-        return codegen_continue(c, LOC(s));
+        return codegen_continue(c, s);
     }
     case With_kind:
         CODEGEN_COND_BLOCK(codegen_with, c, s);
@@ -3408,6 +3604,18 @@ codegen_binding_nameop(compiler *c, location loc, identifier name,
 }
 
 static int
+codegen_soac_target_origin(compiler *c, expr_ty target, expr_context_ty context)
+{
+    if (METADATA(c)->u_soac_bindings == NULL || context == Load) {
+        return SUCCESS;
+    }
+    assert(target->kind == Attribute_kind || target->kind == Subscript_kind);
+    return _PyCompile_SoacBindingOrigin(c, LOC(target), target,
+        target->kind == Attribute_kind ? Py_SOAC_BINDING_ATTRIBUTE : Py_SOAC_BINDING_SUBSCRIPT,
+        context == Del ? Py_SOAC_BINDING_SOURCE_DELETE : Py_SOAC_BINDING_PUBLISH, context);
+}
+
+static int
 codegen_boolop(compiler *c, expr_ty e)
 {
     int jumpi;
@@ -3438,7 +3646,8 @@ codegen_boolop(compiler *c, expr_ty e)
 static int
 starunpack_helper_impl(compiler *c, location loc,
                        asdl_expr_seq *elts, PyObject *injected_arg, int pushed,
-                       int build, int add, int extend, int tuple)
+                       int build, int add, int extend, int tuple,
+                       uint32_t call_origin, int *soac_plan)
 {
     Py_ssize_t n = asdl_seq_LEN(elts);
     int big = n + pushed + (injected_arg ? 1 : 0) > _PY_STACK_USE_GUIDELINE;
@@ -3451,6 +3660,10 @@ starunpack_helper_impl(compiler *c, location loc,
         }
     }
     if (!seen_star && !big) {
+        if (soac_plan != NULL) {
+            *soac_plan = n + pushed + (injected_arg != NULL) == 0
+                ? Py_SOAC_POSITIONAL_EXPANDED_EMPTY : Py_SOAC_POSITIONAL_DIRECT_TUPLE;
+        }
         for (Py_ssize_t i = 0; i < n; i++) {
             expr_ty elt = asdl_seq_GET(elts, i);
             VISIT(c, expr, elt);
@@ -3461,14 +3674,20 @@ starunpack_helper_impl(compiler *c, location loc,
         }
         if (tuple) {
             ADDOP_I(c, loc, BUILD_TUPLE, n+pushed);
+            SOAC_CALL_PREP(c, call_origin);
         } else {
             ADDOP_I(c, loc, build, n+pushed);
+            SOAC_CALL_PREP(c, call_origin);
         }
         return SUCCESS;
+    }
+    if (soac_plan != NULL) {
+        *soac_plan = big ? Py_SOAC_POSITIONAL_LIST_BEFORE_ARGUMENTS : Py_SOAC_POSITIONAL_LIST_AT_FIRST_STAR;
     }
     int sequence_built = 0;
     if (big) {
         ADDOP_I(c, loc, build, pushed);
+        SOAC_CALL_PREP(c, call_origin);
         sequence_built = 1;
     }
     for (Py_ssize_t i = 0; i < n; i++) {
@@ -3476,15 +3695,18 @@ starunpack_helper_impl(compiler *c, location loc,
         if (elt->kind == Starred_kind) {
             if (sequence_built == 0) {
                 ADDOP_I(c, loc, build, i+pushed);
+                SOAC_CALL_PREP(c, call_origin);
                 sequence_built = 1;
             }
             VISIT(c, expr, elt->v.Starred.value);
             ADDOP_I(c, loc, extend, 1);
+            SOAC_CALL_PREP(c, call_origin);
         }
         else {
             VISIT(c, expr, elt);
             if (sequence_built) {
                 ADDOP_I(c, loc, add, 1);
+                SOAC_CALL_PREP(c, call_origin);
             }
         }
     }
@@ -3492,9 +3714,11 @@ starunpack_helper_impl(compiler *c, location loc,
     if (injected_arg) {
         RETURN_IF_ERROR(codegen_nameop(c, loc, injected_arg, Load));
         ADDOP_I(c, loc, add, 1);
+        SOAC_CALL_PREP(c, call_origin);
     }
     if (tuple) {
         ADDOP_I(c, loc, CALL_INTRINSIC_1, INTRINSIC_LIST_TO_TUPLE);
+        SOAC_CALL_PREP(c, call_origin);
     }
     return SUCCESS;
 }
@@ -3505,7 +3729,7 @@ starunpack_helper(compiler *c, location loc,
                   int build, int add, int extend, int tuple)
 {
     return starunpack_helper_impl(c, loc, elts, NULL, pushed,
-                                  build, add, extend, tuple);
+                                  build, add, extend, tuple, 0, NULL);
 }
 
 static int
@@ -3968,7 +4192,8 @@ update_start_location_to_match_attr(compiler *c, location loc,
 }
 
 static int
-maybe_optimize_function_call(compiler *c, expr_ty e, jump_target_label end)
+maybe_optimize_function_call(compiler *c, expr_ty e, jump_target_label end,
+                               uint32_t call_origin)
 {
     asdl_expr_seq *args = e->v.Call.args;
     asdl_keyword_seq *kwds = e->v.Call.keywords;
@@ -4010,6 +4235,8 @@ maybe_optimize_function_call(compiler *c, expr_ty e, jump_target_label end)
         const_oparg = CONSTANT_BUILTIN_SET;
     }
     if (const_oparg != -1) {
+        RETURN_IF_ERROR(_PyCompile_SoacCallAlternative(
+            c, call_origin, Py_SOAC_OPERATION_GAP_GUARDED_NONCALL));
         ADDOP_I(c, loc, COPY, 1); // the function
         ADDOP_I(c, loc, LOAD_COMMON_CONSTANT, const_oparg);
         ADDOP_COMPARE(c, loc, Is);
@@ -4073,7 +4300,7 @@ maybe_optimize_function_call(compiler *c, expr_ty e, jump_target_label end)
 
 // Return 1 if the method call was optimized, 0 if not, and -1 on error.
 static int
-maybe_optimize_method_call(compiler *c, expr_ty e)
+maybe_optimize_method_call(compiler *c, expr_ty e, uint32_t call_origin)
 {
     Py_ssize_t argsl, i, kwdsl;
     expr_ty meth = e->v.Call.func;
@@ -4113,22 +4340,28 @@ maybe_optimize_method_call(compiler *c, expr_ty e)
         }
     }
 
+    RETURN_IF_ERROR(_PyCompile_SoacCallInput(c, call_origin, Py_SOAC_CALL_METHOD_CHANNEL,
+        0, Py_SOAC_POSITIONAL_VECTOR, args, 0,
+        kwdsl ? Py_SOAC_KEYWORDS_NAMES_TUPLE : Py_SOAC_KEYWORDS_NONE, kwds));
     /* Alright, we can optimize the code. */
     location loc = LOC(meth);
 
     ret = can_optimize_super_call(c, meth);
     RETURN_IF_ERROR(ret);
     if (ret) {
+        RETURN_IF_ERROR(codegen_soac_lowered_call(c, meth->v.Attribute.value));
         RETURN_IF_ERROR(load_args_for_super(c, meth->v.Attribute.value));
         int opcode = asdl_seq_LEN(meth->v.Attribute.value->v.Call.args) ?
             LOAD_SUPER_METHOD : LOAD_ZERO_SUPER_METHOD;
         ADDOP_NAME(c, loc, opcode, meth->v.Attribute.attr, names);
+        SOAC_CALL_PREP(c, call_origin);
         loc = update_start_location_to_match_attr(c, loc, meth);
         ADDOP(c, loc, NOP);
     } else {
         VISIT(c, expr, meth->v.Attribute.value);
         loc = update_start_location_to_match_attr(c, loc, meth);
         ADDOP_NAME(c, loc, LOAD_METHOD, meth->v.Attribute.attr, names);
+        SOAC_CALL_PREP(c, call_origin);
     }
 
     VISIT_SEQ(c, expr, e->v.Call.args);
@@ -4136,7 +4369,7 @@ maybe_optimize_method_call(compiler *c, expr_ty e)
     if (kwdsl) {
         VISIT_SEQ(c, keyword, kwds);
         RETURN_IF_ERROR(
-            codegen_call_simple_kw_helper(c, loc, kwds, kwdsl));
+            codegen_call_simple_kw_helper(c, loc, kwds, kwdsl, call_origin));
         loc = update_start_location_to_match_attr(c, LOC(e), meth);
         ADDOP_I(c, loc, CALL_KW, argsl + kwdsl);
     }
@@ -4144,6 +4377,7 @@ maybe_optimize_method_call(compiler *c, expr_ty e)
         loc = update_start_location_to_match_attr(c, LOC(e), meth);
         ADDOP_I(c, loc, CALL, argsl);
     }
+    RETURN_IF_ERROR(_PyCompile_SoacCallEmit(c, call_origin));
     return 1;
 }
 
@@ -4170,7 +4404,10 @@ static int
 codegen_call(compiler *c, expr_ty e)
 {
     RETURN_IF_ERROR(codegen_validate_keywords(c, e->v.Call.keywords));
-    int ret = maybe_optimize_method_call(c, e);
+    uint32_t call_origin;
+    RETURN_IF_ERROR(_PyCompile_SoacCallStart(c, LOC(e), e, Py_SOAC_CALL_SOURCE,
+        -1, NULL, &call_origin));
+    int ret = maybe_optimize_method_call(c, e, call_origin);
     if (ret < 0) {
         return ERROR;
     }
@@ -4180,13 +4417,14 @@ codegen_call(compiler *c, expr_ty e)
     NEW_JUMP_TARGET_LABEL(c, skip_normal_call);
     RETURN_IF_ERROR(check_caller(c, e->v.Call.func));
     VISIT(c, expr, e->v.Call.func);
-    RETURN_IF_ERROR(maybe_optimize_function_call(c, e, skip_normal_call));
+    RETURN_IF_ERROR(maybe_optimize_function_call(c, e, skip_normal_call, call_origin));
     location loc = LOC(e->v.Call.func);
     ADDOP(c, loc, PUSH_NULL);
+    SOAC_CALL_PREP(c, call_origin);
     loc = LOC(e);
     ret = codegen_call_helper(c, loc, 0,
                               e->v.Call.args,
-                              e->v.Call.keywords);
+                              e->v.Call.keywords, call_origin);
     USE_LABEL(c, skip_normal_call);
     return ret;
 }
@@ -4330,14 +4568,17 @@ codegen_formatted_value(compiler *c, expr_ty e)
 static int
 codegen_subkwargs(compiler *c, location loc,
                   asdl_keyword_seq *keywords,
-                  Py_ssize_t begin, Py_ssize_t end)
+                  Py_ssize_t begin, Py_ssize_t end, uint32_t call_origin)
 {
     Py_ssize_t i, n = end - begin;
     keyword_ty kw;
     assert(n > 0);
     int big = n*2 > _PY_STACK_USE_GUIDELINE;
+    RETURN_IF_ERROR(_PyCompile_SoacCallGroup(c, call_origin, Py_SOAC_KEYWORD_GROUP_NAMED,
+        begin, n, big ? Py_SOAC_KEYWORD_MAP_ADD : Py_SOAC_KEYWORD_BUILD_MAP));
     if (big) {
         ADDOP_I(c, NO_LOCATION, BUILD_MAP, 0);
+        SOAC_CALL_PREP(c, call_origin);
     }
     for (i = begin; i < end; i++) {
         kw = asdl_seq_GET(keywords, i);
@@ -4345,10 +4586,12 @@ codegen_subkwargs(compiler *c, location loc,
         VISIT(c, expr, kw->value);
         if (big) {
             ADDOP_I(c, NO_LOCATION, MAP_ADD, 1);
+            SOAC_CALL_PREP(c, call_origin);
         }
     }
     if (!big) {
         ADDOP_I(c, loc, BUILD_MAP, n);
+        SOAC_CALL_PREP(c, call_origin);
     }
     return SUCCESS;
 }
@@ -4358,7 +4601,8 @@ codegen_subkwargs(compiler *c, location loc,
  */
 static int
 codegen_call_simple_kw_helper(compiler *c, location loc,
-                              asdl_keyword_seq *keywords, Py_ssize_t nkwelts)
+                              asdl_keyword_seq *keywords, Py_ssize_t nkwelts,
+                              uint32_t call_origin)
 {
     PyObject *names;
     names = PyTuple_New(nkwelts);
@@ -4369,7 +4613,12 @@ codegen_call_simple_kw_helper(compiler *c, location loc,
         keyword_ty kw = asdl_seq_GET(keywords, i);
         PyTuple_SET_ITEM(names, i, Py_NewRef(kw->arg));
     }
+    if (_PyCompile_SoacCallKeywordNames(c, call_origin, names) < 0) {
+        Py_DECREF(names);
+        return ERROR;
+    }
     ADDOP_LOAD_CONST_NEW(c, loc, names);
+    RETURN_IF_ERROR(_PyCompile_SoacCallKeywordConstant(c, call_origin));
     return SUCCESS;
 }
 
@@ -4379,9 +4628,10 @@ codegen_call_helper_impl(compiler *c, location loc,
                          int n, /* Args already pushed */
                          asdl_expr_seq *args,
                          PyObject *injected_arg,
-                         asdl_keyword_seq *keywords)
+                         asdl_keyword_seq *keywords, uint32_t call_origin)
 {
     Py_ssize_t i, nseen, nelts, nkwelts;
+    int positional_kind;
 
     RETURN_IF_ERROR(codegen_validate_keywords(c, keywords));
 
@@ -4404,6 +4654,9 @@ codegen_call_helper_impl(compiler *c, location loc,
         }
     }
 
+    RETURN_IF_ERROR(_PyCompile_SoacCallInput(c, call_origin, Py_SOAC_CALL_NULL_CHANNEL,
+        n, Py_SOAC_POSITIONAL_VECTOR, args, injected_arg != NULL,
+        nkwelts ? Py_SOAC_KEYWORDS_NAMES_TUPLE : Py_SOAC_KEYWORDS_NONE, keywords));
     /* No * or ** args, so can use faster calling sequence */
     for (i = 0; i < nelts; i++) {
         expr_ty elt = asdl_seq_GET(args, i);
@@ -4417,24 +4670,30 @@ codegen_call_helper_impl(compiler *c, location loc,
     if (nkwelts) {
         VISIT_SEQ(c, keyword, keywords);
         RETURN_IF_ERROR(
-            codegen_call_simple_kw_helper(c, loc, keywords, nkwelts));
+            codegen_call_simple_kw_helper(c, loc, keywords, nkwelts, call_origin));
         ADDOP_I(c, loc, CALL_KW, n + nelts + nkwelts);
     }
     else {
         ADDOP_I(c, loc, CALL, n + nelts);
     }
+    RETURN_IF_ERROR(_PyCompile_SoacCallEmit(c, call_origin));
     return SUCCESS;
 
 ex_call:
 
     /* Do positional arguments. */
     if (n == 0 && nelts == 1 && ((expr_ty)asdl_seq_GET(args, 0))->kind == Starred_kind) {
+        positional_kind = Py_SOAC_POSITIONAL_SOLE_STAR;
         VISIT(c, expr, ((expr_ty)asdl_seq_GET(args, 0))->v.Starred.value);
     }
     else {
         RETURN_IF_ERROR(starunpack_helper_impl(c, loc, args, injected_arg, n,
-                                               BUILD_LIST, LIST_APPEND, LIST_EXTEND, 1));
+                                               BUILD_LIST, LIST_APPEND, LIST_EXTEND, 1,
+                                               call_origin, &positional_kind));
     }
+    RETURN_IF_ERROR(_PyCompile_SoacCallInput(c, call_origin, Py_SOAC_CALL_NULL_CHANNEL,
+        n, positional_kind, args, injected_arg != NULL,
+        nkwelts ? Py_SOAC_KEYWORDS_EXPANDED_GROUPS : Py_SOAC_KEYWORDS_NONE, keywords));
     /* Then keyword arguments */
     if (nkwelts) {
         /* Has a new dict been pushed */
@@ -4446,19 +4705,24 @@ ex_call:
             if (kw->arg == NULL) {
                 /* A keyword argument unpacking. */
                 if (nseen) {
-                    RETURN_IF_ERROR(codegen_subkwargs(c, loc, keywords, i - nseen, i));
+                    RETURN_IF_ERROR(codegen_subkwargs(c, loc, keywords, i - nseen, i, call_origin));
                     if (have_dict) {
                         ADDOP_I(c, loc, DICT_MERGE, 1);
+                        SOAC_CALL_PREP(c, call_origin);
                     }
                     have_dict = 1;
                     nseen = 0;
                 }
+                RETURN_IF_ERROR(_PyCompile_SoacCallGroup(c, call_origin,
+                    Py_SOAC_KEYWORD_GROUP_MAPPING, i, 1, -1));
                 if (!have_dict) {
                     ADDOP_I(c, loc, BUILD_MAP, 0);
+                    SOAC_CALL_PREP(c, call_origin);
                     have_dict = 1;
                 }
                 VISIT(c, expr, kw->value);
                 ADDOP_I(c, loc, DICT_MERGE, 1);
+                SOAC_CALL_PREP(c, call_origin);
             }
             else {
                 nseen++;
@@ -4466,9 +4730,10 @@ ex_call:
         }
         if (nseen) {
             /* Pack up any trailing keyword arguments. */
-            RETURN_IF_ERROR(codegen_subkwargs(c, loc, keywords, nkwelts - nseen, nkwelts));
+            RETURN_IF_ERROR(codegen_subkwargs(c, loc, keywords, nkwelts - nseen, nkwelts, call_origin));
             if (have_dict) {
                 ADDOP_I(c, loc, DICT_MERGE, 1);
+                SOAC_CALL_PREP(c, call_origin);
             }
             have_dict = 1;
         }
@@ -4476,8 +4741,10 @@ ex_call:
     }
     if (nkwelts == 0) {
         ADDOP(c, loc, PUSH_NULL);
+        SOAC_CALL_PREP(c, call_origin);
     }
     ADDOP(c, loc, CALL_FUNCTION_EX);
+    RETURN_IF_ERROR(_PyCompile_SoacCallEmit(c, call_origin));
     return SUCCESS;
 }
 
@@ -4485,9 +4752,9 @@ static int
 codegen_call_helper(compiler *c, location loc,
                     int n, /* Args already pushed */
                     asdl_expr_seq *args,
-                    asdl_keyword_seq *keywords)
+                    asdl_keyword_seq *keywords, uint32_t call_origin)
 {
-    return codegen_call_helper_impl(c, loc, n, args, NULL, keywords);
+    return codegen_call_helper_impl(c, loc, n, args, NULL, keywords, call_origin);
 }
 
 /* List and set comprehensions work by being inlined at the location where
@@ -5079,14 +5346,23 @@ codegen_comprehension(compiler *c, expr_ty e, int type,
         goto error;
     }
 
+    uint32_t call_origin = 0;
+    if (type == COMP_GENEXP &&
+        (_PyCompile_SoacCallStart(c, LOC(e), e, Py_SOAC_CALL_GENERATOR, -1, co, &call_origin) < 0 ||
+         _PyCompile_SoacCallInput(c, call_origin, Py_SOAC_CALL_LEADING_CHANNEL,
+             0, Py_SOAC_POSITIONAL_VECTOR, NULL, 0, Py_SOAC_KEYWORDS_NONE, NULL) < 0)) {
+        goto error;
+    }
     loc = LOC(e);
     if (codegen_make_closure(c, loc, co, 0) < 0) {
         goto error;
     }
     Py_CLEAR(co);
+    SOAC_CALL_PREP(c, call_origin);
 
     VISIT(c, expr, outermost->iter);
     ADDOP_I(c, loc, CALL, 0);
+    RETURN_IF_ERROR(_PyCompile_SoacCallEmit(c, call_origin));
 
     if (is_async_comprehension && type != COMP_GENEXP) {
         ADDOP_I(c, loc, GET_AWAITABLE, 0);
@@ -5219,6 +5495,11 @@ codegen_async_with_inner(compiler *c, stmt_ty s, int pos)
     NEW_JUMP_TARGET_LABEL(c, exit);
     NEW_JUMP_TARGET_LABEL(c, cleanup);
 
+    uint32_t enter_origin;
+    RETURN_IF_ERROR(_PyCompile_SoacCallStart(c, LOC(s), s, Py_SOAC_CALL_ASYNC_WITH_ENTER,
+        pos, NULL, &enter_origin));
+    RETURN_IF_ERROR(_PyCompile_SoacCallInput(c, enter_origin, Py_SOAC_CALL_METHOD_CHANNEL,
+        0, Py_SOAC_POSITIONAL_VECTOR, NULL, 0, Py_SOAC_KEYWORDS_NONE, NULL));
     /* Evaluate EXPR */
     VISIT(c, expr, item->context_expr);
     loc = LOC(item->context_expr);
@@ -5227,7 +5508,9 @@ codegen_async_with_inner(compiler *c, stmt_ty s, int pos)
     ADDOP_I(c, loc, SWAP, 2);
     ADDOP_I(c, loc, SWAP, 3);
     ADDOP_I(c, loc, LOAD_SPECIAL, SPECIAL___AENTER__);
+    SOAC_CALL_PREP(c, enter_origin);
     ADDOP_I(c, loc, CALL, 0);
+    RETURN_IF_ERROR(_PyCompile_SoacCallEmit(c, enter_origin));
     ADDOP_I(c, loc, GET_AWAITABLE, 1);
     ADDOP_LOAD_CONST(c, loc, Py_None);
     ADD_YIELD_FROM(c, loc, 1);
@@ -5237,6 +5520,7 @@ codegen_async_with_inner(compiler *c, stmt_ty s, int pos)
     /* SETUP_WITH pushes a finally block. */
     USE_LABEL(c, block);
     RETURN_IF_ERROR(_PyCompile_PushFBlock(c, loc, COMPILE_FBLOCK_ASYNC_WITH, block, final, s));
+    codegen_soac_fblock_owner(c, Py_SOAC_CONTEXT_ASYNC_WITH_EXIT, s, pos);
 
     if (item->optional_vars) {
         VISIT(c, expr, item->optional_vars);
@@ -5263,7 +5547,11 @@ codegen_async_with_inner(compiler *c, stmt_ty s, int pos)
     /* For successful outcome:
      * call __exit__(None, None, None)
      */
-    RETURN_IF_ERROR(codegen_call_exit_with_nones(c, loc));
+    Py_ssize_t previous_exit;
+    RETURN_IF_ERROR(codegen_soac_context(c, Py_SOAC_CONTEXT_ASYNC_WITH_EXIT, s, pos - 1,
+        Py_SOAC_CONTEXT_FALLTHROUGH, NULL, Py_SOAC_CONTEXT_NO_PAYLOAD, &previous_exit));
+    RETURN_IF_ERROR(codegen_call_exit_with_nones(c, loc, s, pos - 1));
+    _PyCompile_SoacPopContext(c, previous_exit);
     ADDOP_I(c, loc, GET_AWAITABLE, 2);
     ADDOP_LOAD_CONST(c, loc, Py_None);
     ADD_YIELD_FROM(c, loc, 1);
@@ -5327,6 +5615,11 @@ codegen_with_inner(compiler *c, stmt_ty s, int pos)
     NEW_JUMP_TARGET_LABEL(c, exit);
     NEW_JUMP_TARGET_LABEL(c, cleanup);
 
+    uint32_t enter_origin;
+    RETURN_IF_ERROR(_PyCompile_SoacCallStart(c, LOC(s), s, Py_SOAC_CALL_WITH_ENTER,
+        pos, NULL, &enter_origin));
+    RETURN_IF_ERROR(_PyCompile_SoacCallInput(c, enter_origin, Py_SOAC_CALL_METHOD_CHANNEL,
+        0, Py_SOAC_POSITIONAL_VECTOR, NULL, 0, Py_SOAC_KEYWORDS_NONE, NULL));
     /* Evaluate EXPR */
     VISIT(c, expr, item->context_expr);
     /* Will push bound __exit__ */
@@ -5336,12 +5629,15 @@ codegen_with_inner(compiler *c, stmt_ty s, int pos)
     ADDOP_I(c, loc, SWAP, 2);
     ADDOP_I(c, loc, SWAP, 3);
     ADDOP_I(c, loc, LOAD_SPECIAL, SPECIAL___ENTER__);
+    SOAC_CALL_PREP(c, enter_origin);
     ADDOP_I(c, loc, CALL, 0);
+    RETURN_IF_ERROR(_PyCompile_SoacCallEmit(c, enter_origin));
     ADDOP_JUMP(c, loc, SETUP_WITH, final);
 
     /* SETUP_WITH pushes a finally block. */
     USE_LABEL(c, block);
     RETURN_IF_ERROR(_PyCompile_PushFBlock(c, loc, COMPILE_FBLOCK_WITH, block, final, s));
+    codegen_soac_fblock_owner(c, Py_SOAC_CONTEXT_WITH_EXIT, s, pos);
 
     if (item->optional_vars) {
         VISIT(c, expr, item->optional_vars);
@@ -5368,7 +5664,11 @@ codegen_with_inner(compiler *c, stmt_ty s, int pos)
     /* For successful outcome:
      * call __exit__(None, None, None)
      */
-    RETURN_IF_ERROR(codegen_call_exit_with_nones(c, loc));
+    Py_ssize_t previous_exit;
+    RETURN_IF_ERROR(codegen_soac_context(c, Py_SOAC_CONTEXT_WITH_EXIT, s, pos - 1,
+        Py_SOAC_CONTEXT_FALLTHROUGH, NULL, Py_SOAC_CONTEXT_NO_PAYLOAD, &previous_exit));
+    RETURN_IF_ERROR(codegen_call_exit_with_nones(c, loc, s, pos - 1));
+    _PyCompile_SoacPopContext(c, previous_exit);
     ADDOP(c, loc, POP_TOP);
     ADDOP_JUMP(c, loc, JUMP, exit);
 
@@ -5490,6 +5790,7 @@ codegen_visit_expr(compiler *c, expr_ty e)
             int ret = can_optimize_super_call(c, e);
             RETURN_IF_ERROR(ret);
             if (ret) {
+                RETURN_IF_ERROR(codegen_soac_lowered_call(c, e->v.Attribute.value));
                 RETURN_IF_ERROR(load_args_for_super(c, e->v.Attribute.value));
                 int opcode = asdl_seq_LEN(e->v.Attribute.value->v.Call.args) ?
                     LOAD_SUPER_ATTR : LOAD_ZERO_SUPER_ATTR;
@@ -5514,6 +5815,7 @@ codegen_visit_expr(compiler *c, expr_ty e)
             ADDOP_NAME(c, loc, DELETE_ATTR, e->v.Attribute.attr, names);
             break;
         }
+        RETURN_IF_ERROR(codegen_soac_target_origin(c, e, e->v.Attribute.ctx));
         break;
     case Subscript_kind:
         return codegen_subscript(c, e);
@@ -5635,6 +5937,7 @@ codegen_augassign(compiler *c, stmt_ty s)
     default:
         Py_UNREACHABLE();
     }
+    RETURN_IF_ERROR(codegen_soac_target_origin(c, e, Store));
     return SUCCESS;
 }
 
@@ -5782,6 +6085,7 @@ codegen_subscript(compiler *c, expr_ty e)
                 break;
         }
     }
+    RETURN_IF_ERROR(codegen_soac_target_origin(c, e, ctx));
     return SUCCESS;
 }
 
@@ -5944,7 +6248,8 @@ codegen_pattern_helper_rotate(compiler *c, location loc, Py_ssize_t count)
 
 static int
 codegen_pattern_helper_store_name(compiler *c, location loc,
-                                  identifier n, pattern_context *pc)
+                                  identifier n, pattern_context *pc,
+                                  pattern_ty original, int leaf_kind)
 {
     if (n == NULL) {
         ADDOP(c, loc, POP_TOP);
@@ -5960,6 +6265,15 @@ codegen_pattern_helper_store_name(compiler *c, location loc,
     Py_ssize_t rotations = pc->on_top + PyList_GET_SIZE(pc->stores) + 1;
     RETURN_IF_ERROR(codegen_pattern_helper_rotate(c, loc, rotations));
     RETURN_IF_ERROR(PyList_Append(pc->stores, n));
+    if (pc->soac_store_origins != NULL) {
+        PyObject *leaf = _PyCompile_SoacPatternLeaf(c, original, leaf_kind);
+        if (leaf == NULL) {
+            return ERROR;
+        }
+        int result = PyList_Append(pc->soac_store_origins, leaf);
+        Py_DECREF(leaf);
+        RETURN_IF_ERROR(result);
+    }
     return SUCCESS;
 }
 
@@ -6078,7 +6392,7 @@ codegen_pattern_as(compiler *c, pattern_ty p, pattern_context *pc)
             const char *e = "wildcard makes remaining patterns unreachable";
             return _PyCompile_Error(c, LOC(p), e);
         }
-        return codegen_pattern_helper_store_name(c, LOC(p), p->v.MatchAs.name, pc);
+        return codegen_pattern_helper_store_name(c, LOC(p), p->v.MatchAs.name, pc, p, 0);
     }
     // Need to make a copy for (possibly) storing later:
     pc->on_top++;
@@ -6086,7 +6400,7 @@ codegen_pattern_as(compiler *c, pattern_ty p, pattern_context *pc)
     RETURN_IF_ERROR(codegen_pattern(c, p->v.MatchAs.pattern, pc));
     // Success! Store it:
     pc->on_top--;
-    RETURN_IF_ERROR(codegen_pattern_helper_store_name(c, LOC(p), p->v.MatchAs.name, pc));
+    RETURN_IF_ERROR(codegen_pattern_helper_store_name(c, LOC(p), p->v.MatchAs.name, pc, p, 0));
     return SUCCESS;
 }
 
@@ -6095,7 +6409,7 @@ codegen_pattern_star(compiler *c, pattern_ty p, pattern_context *pc)
 {
     assert(p->kind == MatchStar_kind);
     RETURN_IF_ERROR(
-        codegen_pattern_helper_store_name(c, LOC(p), p->v.MatchStar.name, pc));
+        codegen_pattern_helper_store_name(c, LOC(p), p->v.MatchStar.name, pc, p, 1));
     return SUCCESS;
 }
 
@@ -6305,7 +6619,7 @@ codegen_pattern_mapping(compiler *c, pattern_ty p,
             ADDOP_I(c, LOC(p), SWAP, 2);            // [copy, keys..., copy, key]
             ADDOP(c, LOC(p), DELETE_SUBSCR);        // [copy, keys...]
         }
-        RETURN_IF_ERROR(codegen_pattern_helper_store_name(c, LOC(p), star_target, pc));
+        RETURN_IF_ERROR(codegen_pattern_helper_store_name(c, LOC(p), star_target, pc, p, 2));
     }
     else {
         ADDOP(c, LOC(p), POP_TOP);  // Tuple of keys.
@@ -6324,10 +6638,12 @@ codegen_pattern_or(compiler *c, pattern_ty p, pattern_context *pc)
     // We're going to be messing with pc. Keep the original info handy:
     pattern_context old_pc = *pc;
     Py_INCREF(pc->stores);
+    Py_XINCREF(pc->soac_store_origins);
     // control is the list of names bound by the first alternative. It is used
     // for checking different name bindings in alternatives, and for correcting
     // the order in which extracted elements are placed on the stack.
     PyObject *control = NULL;
+    PyObject *control_origins = NULL;
     // NOTE: We can't use returning macros anymore! goto error on error.
     for (Py_ssize_t i = 0; i < size; i++) {
         pattern_ty alt = asdl_seq_GET(p->v.MatchOr.patterns, i);
@@ -6336,6 +6652,13 @@ codegen_pattern_or(compiler *c, pattern_ty p, pattern_context *pc)
             goto error;
         }
         Py_SETREF(pc->stores, pc_stores);
+        if (METADATA(c)->u_soac_bindings != NULL) {
+            PyObject *origins = PyList_New(0);
+            if (origins == NULL) {
+                goto error;
+            }
+            Py_XSETREF(pc->soac_store_origins, origins);
+        }
         // An irrefutable sub-pattern must be last, if it is allowed at all:
         pc->allow_irrefutable = (i == size - 1) && old_pc.allow_irrefutable;
         pc->fail_pop = NULL;
@@ -6353,6 +6676,7 @@ codegen_pattern_or(compiler *c, pattern_ty p, pattern_context *pc)
             // might need to be reordered):
             assert(control == NULL);
             control = Py_NewRef(pc->stores);
+            control_origins = Py_XNewRef(pc->soac_store_origins);
         }
         else if (nstores != PyList_GET_SIZE(control)) {
             goto diff;
@@ -6389,6 +6713,19 @@ codegen_pattern_or(compiler *c, pattern_ty p, pattern_context *pc)
                         goto error;
                     }
                     Py_DECREF(rotated);
+                    if (pc->soac_store_origins != NULL) {
+                        /* Follow the exact same indices just chosen by native
+                         * capture ordering; no independent name-based join. */
+                        PyObject *origins = PyList_GetSlice(pc->soac_store_origins, 0, rotations);
+                        if (origins == NULL ||
+                            PyList_SetSlice(pc->soac_store_origins, 0, rotations, NULL) < 0 ||
+                            PyList_SetSlice(pc->soac_store_origins, icontrol - istores,
+                                            icontrol - istores, origins) < 0) {
+                            Py_XDECREF(origins);
+                            goto error;
+                        }
+                        Py_DECREF(origins);
+                    }
                     // That just did:
                     // rotated = pc_stores[:rotations]
                     // del pc_stores[:rotations]
@@ -6403,6 +6740,17 @@ codegen_pattern_or(compiler *c, pattern_ty p, pattern_context *pc)
                 }
             }
         }
+        if (i != 0 && control_origins != NULL) {
+            assert(PyList_GET_SIZE(control_origins) == nstores);
+            assert(PyList_GET_SIZE(pc->soac_store_origins) == nstores);
+            for (Py_ssize_t captured = 0; captured < nstores; captured++) {
+                PyObject *joined = PySequence_Concat(PyList_GET_ITEM(control_origins, captured),
+                    PyList_GET_ITEM(pc->soac_store_origins, captured));
+                if (joined == NULL || PyList_SetItem(control_origins, captured, joined) < 0) {
+                    goto error;
+                }
+            }
+        }
         assert(control);
         if (codegen_addop_j(INSTR_SEQUENCE(c), LOC(alt), JUMP, end) < 0 ||
             emit_and_reset_fail_pop(c, LOC(alt), pc) < 0)
@@ -6411,8 +6759,10 @@ codegen_pattern_or(compiler *c, pattern_ty p, pattern_context *pc)
         }
     }
     Py_DECREF(pc->stores);
+    Py_XDECREF(pc->soac_store_origins);
     *pc = old_pc;
     Py_INCREF(pc->stores);
+    Py_XINCREF(pc->soac_store_origins);
     // Need to NULL this for the PyMem_Free call in the error block.
     old_pc.fail_pop = NULL;
     // No match. Pop the remaining copy of the subject and fail:
@@ -6449,9 +6799,15 @@ codegen_pattern_or(compiler *c, pattern_ty p, pattern_context *pc)
         if (PyList_Append(pc->stores, name)) {
             goto error;
         }
+        if (pc->soac_store_origins != NULL &&
+            PyList_Append(pc->soac_store_origins, PyList_GET_ITEM(control_origins, i)) < 0) {
+            goto error;
+        }
     }
     Py_DECREF(old_pc.stores);
+    Py_XDECREF(old_pc.soac_store_origins);
     Py_DECREF(control);
+    Py_XDECREF(control_origins);
     // NOTE: Returning macros are safe again.
     // Pop the copy of the subject:
     ADDOP(c, LOC(p), POP_TOP);
@@ -6461,7 +6817,9 @@ diff:
 error:
     PyMem_Free(old_pc.fail_pop);
     Py_DECREF(old_pc.stores);
+    Py_XDECREF(old_pc.soac_store_origins);
     Py_XDECREF(control);
+    Py_XDECREF(control_origins);
     return ERROR;
 }
 
@@ -6596,6 +6954,15 @@ codegen_match_inner(compiler *c, stmt_ty s, pattern_context *pc)
         if (pc->stores == NULL) {
             return ERROR;
         }
+        pc->soac_store_origins = NULL;
+        if (METADATA(c)->u_soac_bindings != NULL) {
+            pc->soac_store_origins = PyList_New(0);
+            if (pc->soac_store_origins == NULL) {
+                Py_DECREF(pc->stores);
+                Py_CLEAR(pc->soac_store_origins);
+                return ERROR;
+            }
+        }
         // Irrefutable cases must be either guarded, last, or both:
         pc->allow_irrefutable = m->guard != NULL || i == cases - 1;
         pc->fail_pop = NULL;
@@ -6604,6 +6971,7 @@ codegen_match_inner(compiler *c, stmt_ty s, pattern_context *pc)
         // NOTE: Can't use returning macros here (they'll leak pc->stores)!
         if (codegen_pattern(c, m->pattern, pc) < 0) {
             Py_DECREF(pc->stores);
+            Py_CLEAR(pc->soac_store_origins);
             return ERROR;
         }
         assert(!pc->on_top);
@@ -6611,12 +6979,16 @@ codegen_match_inner(compiler *c, stmt_ty s, pattern_context *pc)
         Py_ssize_t nstores = PyList_GET_SIZE(pc->stores);
         for (Py_ssize_t n = 0; n < nstores; n++) {
             PyObject *name = PyList_GET_ITEM(pc->stores, n);
-            if (codegen_nameop(c, LOC(m->pattern), name, Store) < 0) {
+            if (codegen_nameop(c, LOC(m->pattern), name, Store) < 0 ||
+                (pc->soac_store_origins != NULL && _PyCompile_SoacPatternStore(
+                    c, m->pattern, PyList_GET_ITEM(pc->soac_store_origins, n)) < 0)) {
                 Py_DECREF(pc->stores);
+                Py_CLEAR(pc->soac_store_origins);
                 return ERROR;
             }
         }
         Py_DECREF(pc->stores);
+        Py_CLEAR(pc->soac_store_origins);
         // NOTE: Returning macros are safe again.
         if (m->guard) {
             RETURN_IF_ERROR(ensure_fail_pop(c, pc, 0));
@@ -6658,7 +7030,7 @@ codegen_match_inner(compiler *c, stmt_ty s, pattern_context *pc)
 static int
 codegen_match(compiler *c, stmt_ty s)
 {
-    pattern_context pc;
+    pattern_context pc = {0};
     pc.fail_pop = NULL;
     int result = codegen_match_inner(c, s, &pc);
     PyMem_Free(pc.fail_pop);
