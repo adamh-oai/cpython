@@ -584,9 +584,9 @@ _PyCompile_SoacEnterComprehension(compiler *c, expr_ty expression,
     }
     comprehension_ty first = asdl_seq_GET(generators, 0);
     soac_binding_region region = {
-        .loc = LOC(expression), .parent = unit->active_region, .origin = original,
+        .loc = SRC_LOCATION_FROM_AST(expression), .parent = unit->active_region, .origin = original,
         .representative = unit->regions.count, .final_id = -1,
-        .expression = expression, .outer_loc = LOC(first->iter), .kind = kind,
+        .expression = expression, .outer_loc = SRC_LOCATION_FROM_AST(first->iter), .kind = kind,
         .is_async = original->ste_coroutine,
         .previous_phase = unit->scope_phase,
         .previous_binding_role = unit->scope_binding_role,
@@ -1991,7 +1991,7 @@ _PyCompile_SoacCallInput(compiler *c, uint32_t id, int channel,
     }
     for (Py_ssize_t i = 0; i < count; i++) {
         expr_ty argument = asdl_seq_GET(args, i);
-        PyObject *span = soac_source_span(LOC(argument));
+        PyObject *span = soac_source_span(SRC_LOCATION_FROM_AST(argument));
         PyObject *row = span == NULL ? NULL : Py_BuildValue("(iO)",
             argument->kind == Starred_kind ? Py_SOAC_POSITIONAL_STAR : Py_SOAC_POSITIONAL_SOURCE,
             span);
@@ -2010,7 +2010,7 @@ _PyCompile_SoacCallInput(compiler *c, uint32_t id, int channel,
     }
     for (Py_ssize_t i = 0; i < asdl_seq_LEN(keywords); i++) {
         keyword_ty keyword = asdl_seq_GET(keywords, i);
-        PyObject *span = soac_source_span(LOC(keyword));
+        PyObject *span = soac_source_span(SRC_LOCATION_FROM_AST(keyword));
         PyObject *row = span == NULL ? NULL : Py_BuildValue("(iOO)",
             keyword->arg == NULL ? Py_SOAC_KEYWORD_MAPPING : Py_SOAC_KEYWORD_NAMED,
             span, keyword->arg == NULL ? Py_None : keyword->arg);
@@ -2151,12 +2151,12 @@ _PyCompile_SoacPatternLeaf(compiler *c, pattern_ty pattern, int kind)
 {
     soac_code_bindings *unit = c->u->u_metadata.u_soac_bindings;
     assert(unit != NULL);
-    if (pattern == NULL || kind < 0 || kind > 2 || !soac_operation_location(LOC(pattern))) {
+    if (pattern == NULL || kind < 0 || kind > 2 || !soac_operation_location(SRC_LOCATION_FROM_AST(pattern))) {
         soac_binding_error("invalid original pattern capture leaf");
         return NULL;
     }
     soac_reference_origin origin = {
-        .origin = pattern, .loc = LOC(pattern), .kind = kind,
+        .origin = pattern, .loc = SRC_LOCATION_FROM_AST(pattern), .kind = kind,
         .family = SOAC_ORIGIN_PATTERN_LEAF, .context = Store,
         .initial_opcode = -1, .initial_slot = -1,
         .emission_context = unit->active_emission_context, .keyword_constant = -1,
@@ -2242,7 +2242,7 @@ _PyCompile_SoacPatternStore(compiler *c, pattern_ty owner, PyObject *leaf_origin
         PyTuple_SET_ITEM(detail, i, leaf);
         PyTuple_SET_ITEM(identities, i, Py_NewRef(PyTuple_GET_ITEM(row, 2)));
     }
-    if (_PyCompile_SoacBindingOrigin(c, LOC(owner), owner,
+    if (_PyCompile_SoacBindingOrigin(c, SRC_LOCATION_FROM_AST(owner), owner,
             Py_SOAC_BINDING_PATTERN_CAPTURE, Py_SOAC_BINDING_PUBLISH, Store) < 0) {
         goto error;
     }
