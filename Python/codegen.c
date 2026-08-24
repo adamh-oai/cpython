@@ -3244,8 +3244,11 @@ codegen_stmt_expr(compiler *c, location loc, expr_ty value)
         return SUCCESS;
     }
 
+    Py_ssize_t result_visit = _PyCompile_SoacScopeResultStart(c);
     VISIT(c, expr, value);
     ADDOP(c, NO_LOCATION, POP_TOP); /* artificial */
+    RETURN_IF_ERROR(_PyCompile_SoacScopeResultEnd(c, result_visit, value, NULL,
+        loc, Py_SOAC_SCOPE_RESULT_DISCARD));
     return SUCCESS;
 }
 
@@ -3276,6 +3279,7 @@ codegen_visit_stmt(compiler *c, stmt_ty s)
     case Assign_kind:
     {
         Py_ssize_t n = asdl_seq_LEN(s->v.Assign.targets);
+        Py_ssize_t result_visit = _PyCompile_SoacScopeResultStart(c);
         VISIT(c, expr, s->v.Assign.value);
         for (Py_ssize_t i = 0; i < n; i++) {
             if (i < n - 1) {
@@ -3284,6 +3288,10 @@ codegen_visit_stmt(compiler *c, stmt_ty s)
             VISIT(c, expr,
                   (expr_ty)asdl_seq_GET(s->v.Assign.targets, i));
         }
+        expr_ty result_target = n == 1 ? asdl_seq_GET(s->v.Assign.targets, 0) : NULL;
+        RETURN_IF_ERROR(_PyCompile_SoacScopeResultEnd(c, result_visit, s->v.Assign.value,
+            result_target, LOC(s), result_target != NULL && result_target->kind == Name_kind
+                ? Py_SOAC_SCOPE_RESULT_PUBLISH : -1));
         break;
     }
     case AugAssign_kind:
@@ -4874,6 +4882,7 @@ codegen_sync_comprehension_generator(compiler *c, location loc,
         USE_LABEL(c, start);
         depth += 1;
         ADDOP_JUMP(c, LOC(gen->iter), FOR_ITER, anchor);
+        RETURN_IF_ERROR(_PyCompile_SoacScopeEvent(c, Py_SOAC_SCOPE_ITERATOR_ADVANCE, gen_index));
     }
     RETURN_IF_ERROR(codegen_scope_binding_target(c, gen->target,
         Py_SOAC_SCOPE_BINDING_TARGET, gen_index));
@@ -4972,7 +4981,9 @@ codegen_sync_comprehension_generator(compiler *c, location loc,
         * but a non-generator will jump to a later instruction.
         */
         ADDOP(c, NO_LOCATION, END_FOR);
+        RETURN_IF_ERROR(_PyCompile_SoacScopeEvent(c, Py_SOAC_SCOPE_COMPLETION_VALUE_RETIRE, gen_index - 1));
         ADDOP(c, NO_LOCATION, POP_ITER);
+        RETURN_IF_ERROR(_PyCompile_SoacScopeEvent(c, Py_SOAC_SCOPE_ITERATOR_RETIRE, gen_index - 1));
     }
 
     return SUCCESS;
@@ -6059,8 +6070,15 @@ codegen_annassign(compiler *c, stmt_ty s)
 
     /* We perform the actual assignment first. */
     if (s->v.AnnAssign.value) {
+        Py_ssize_t result_visit = _PyCompile_SoacScopeResultStart(c);
         VISIT(c, expr, s->v.AnnAssign.value);
         VISIT(c, expr, targ);
+        /* Function-local simple annotations have no runtime annotation action.
+         * Other annotated receiving operations need their own complete proof. */
+        RETURN_IF_ERROR(_PyCompile_SoacScopeResultEnd(c, result_visit,
+            s->v.AnnAssign.value, targ, LOC(s),
+            targ->kind == Name_kind && SCOPE_TYPE(c) == COMPILE_SCOPE_FUNCTION
+                ? Py_SOAC_SCOPE_RESULT_PUBLISH : -1));
     }
     switch (targ->kind) {
     case Name_kind:

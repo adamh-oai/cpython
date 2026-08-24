@@ -37,6 +37,16 @@ typedef struct _PyCfgInstruction {
     struct _PyCfgBasicblock *i_except; /* target block when exception is raised */
 } cfg_instr;
 
+/* Private compile-only receipts. They refer to existing instruction origins,
+ * not Python values or another source-identity namespace. */
+typedef struct _PySoacCfgStaticSwap {
+    struct _PySoacCfgStaticSwap *next;
+    _PySoacReadOrigins rotation;
+    int depth;
+    _PySoacReadOrigins first;
+    _PySoacReadOrigins last;
+} soac_cfg_static_swap;
+
 typedef struct _PyCfgBasicblock {
     /* Each basicblock in a compilation unit is linked via b_list in the
        reverse order that the block are allocated.  b_list points to the next
@@ -47,6 +57,17 @@ typedef struct _PyCfgBasicblock {
     _PyJumpTargetLabel b_label;
     /* Exception stack at start of block, used by assembler to create the exception handling table */
     struct _PyCfgExceptStack *b_exceptstack;
+    /* Actual handler ancestry, retained before pseudo SETUP/POP are erased.
+     * An instruction's existing i_except transports this through native CFG
+     * rewrites. Ambiguous ancestry is never turned into a protected interval. */
+    struct _PyCfgBasicblock *b_soac_outer_handler;
+    _PySoacReadOrigins b_soac_setup_origins;
+    _PySoacReadOrigins b_soac_leave_origins;
+    unsigned b_soac_handler_seen : 1;
+    unsigned b_soac_leave_seen : 1;
+    unsigned b_soac_handler_ambiguous : 1;
+    int b_soac_final_ordinal;
+    soac_cfg_static_swap *b_soac_static_swaps;
     /* pointer to an array of instructions, initially NULL */
     cfg_instr *b_instr;
     /* If b_next is non-NULL, it is a pointer to the next
@@ -263,6 +284,14 @@ copy_basicblock(cfg_builder *g, basicblock *block)
     if (basicblock_append_instructions(result, block) < 0) {
         return NULL;
     }
+    result->b_soac_outer_handler = block->b_soac_outer_handler;
+    result->b_soac_setup_origins = block->b_soac_setup_origins;
+    result->b_soac_leave_origins = block->b_soac_leave_origins;
+    result->b_soac_handler_seen = block->b_soac_handler_seen;
+    result->b_soac_leave_seen = block->b_soac_leave_seen;
+    result->b_soac_handler_ambiguous = block->b_soac_handler_ambiguous;
+    /* The original block remains in g_block_list and owns rewrite receipts.
+     * Multiple physical copies of one origin are separately checked at export. */
     return result;
 }
 
@@ -460,6 +489,12 @@ _PyCfgBuilder_Free(cfg_builder *g)
     while (b != NULL) {
         if (b->b_instr) {
             PyMem_Free((void *)b->b_instr);
+        }
+        soac_cfg_static_swap *swap = b->b_soac_static_swaps;
+        while (swap != NULL) {
+            soac_cfg_static_swap *next_swap = swap->next;
+            PyMem_Free(swap);
+            swap = next_swap;
         }
         basicblock *next = b->b_list;
         PyMem_Free((void *)b);
@@ -894,6 +929,43 @@ error:
 }
 
 static int
+soac_same_origins(_PySoacReadOrigins a, _PySoacReadOrigins b)
+{
+    return a.lane[0] == b.lane[0] && a.lane[1] == b.lane[1];
+}
+
+static void
+soac_observe_handler_push(struct _PyCfgExceptStack *stack, cfg_instr *setup)
+{
+    basicblock *target = setup->i_target;
+    basicblock *outer = except_stack_top(stack);
+    if (target->b_soac_handler_seen &&
+        (target->b_soac_outer_handler != outer ||
+         !soac_same_origins(target->b_soac_setup_origins, setup->i_soac_origins))) {
+        target->b_soac_handler_ambiguous = 1;
+    }
+    if (!target->b_soac_handler_seen) {
+        target->b_soac_outer_handler = outer;
+        target->b_soac_setup_origins = setup->i_soac_origins;
+        target->b_soac_handler_seen = 1;
+    }
+}
+
+static void
+soac_observe_handler_pop(struct _PyCfgExceptStack *stack, cfg_instr *pop)
+{
+    basicblock *target = except_stack_top(stack);
+    if (target->b_soac_leave_seen &&
+        !soac_same_origins(target->b_soac_leave_origins, pop->i_soac_origins)) {
+        target->b_soac_handler_ambiguous = 1;
+    }
+    if (!target->b_soac_leave_seen) {
+        target->b_soac_leave_origins = pop->i_soac_origins;
+        target->b_soac_leave_seen = 1;
+    }
+}
+
+static int
 label_exception_targets(basicblock *entryblock) {
     basicblock **todo_stack = make_cfg_traversal_stack(entryblock);
     if (todo_stack == NULL) {
@@ -923,6 +995,7 @@ label_exception_targets(basicblock *entryblock) {
         for (int i = 0; i < b->b_iused; i++) {
             cfg_instr *instr = &b->b_instr[i];
             if (is_block_push(instr)) {
+                soac_observe_handler_push(except_stack, instr);
                 if (!instr->i_target->b_visited) {
                     struct _PyCfgExceptStack *copy = copy_except_stack(except_stack);
                     if (copy == NULL) {
@@ -936,6 +1009,7 @@ label_exception_targets(basicblock *entryblock) {
                 handler = push_except_block(except_stack, instr);
             }
             else if (instr->i_opcode == POP_BLOCK) {
+                soac_observe_handler_pop(except_stack, instr);
                 handler = pop_except_block(except_stack);
                 INSTR_SET_OP0(instr, NOP);
             }
@@ -2106,7 +2180,7 @@ next_swappable_instruction(basicblock *block, int i, int lineno)
 // Attempt to apply SWAPs statically by swapping *instructions* rather than
 // stack items. For example, we can replace SWAP(2), POP_TOP, STORE_FAST(42)
 // with the more efficient NOP, STORE_FAST(42), POP_TOP.
-static void
+static int
 apply_static_swaps(basicblock *block, int i)
 {
     // SWAPs are to our left, and potential swaperands are to our right:
@@ -2119,18 +2193,18 @@ apply_static_swaps(basicblock *block, int i)
                 continue;
             }
             // We can't reason about what this instruction does. Bail:
-            return;
+            return SUCCESS;
         }
         int j = next_swappable_instruction(block, i, -1);
         if (j < 0) {
-            return;
+            return SUCCESS;
         }
         int k = j;
         int lineno = block->b_instr[j].i_loc.lineno;
         for (int count = swap->i_oparg - 1; 0 < count; count--) {
             k = next_swappable_instruction(block, k, lineno);
             if (k < 0) {
-                return;
+                return SUCCESS;
             }
         }
         // The reordering is not safe if the two instructions to be swapped
@@ -2140,22 +2214,36 @@ apply_static_swaps(basicblock *block, int i)
         int store_k = STORES_TO(block->b_instr[k]);
         if (store_j >= 0 || store_k >= 0) {
             if (store_j == store_k) {
-                return;
+                return SUCCESS;
             }
             for (int idx = j + 1; idx < k; idx++) {
                 int store_idx = STORES_TO(block->b_instr[idx]);
                 if (store_idx >= 0 && (store_idx == store_j || store_idx == store_k)) {
-                    return;
+                    return SUCCESS;
                 }
             }
         }
 
-        // Success!
+        // Success! Preserve the actual transformation, before mutating it.
+        // Ordinary compilation has no origins and allocates no receipt.
+        if (swap->i_soac_origins.lane[0] || swap->i_soac_origins.lane[1]) {
+            soac_cfg_static_swap *receipt = PyMem_Malloc(sizeof(*receipt));
+            if (receipt == NULL) {
+                PyErr_NoMemory();
+                return ERROR;
+            }
+            *receipt = (soac_cfg_static_swap){
+                block->b_soac_static_swaps, swap->i_soac_origins, swap->i_oparg,
+                block->b_instr[j].i_soac_origins, block->b_instr[k].i_soac_origins,
+            };
+            block->b_soac_static_swaps = receipt;
+        }
         INSTR_SET_OP0(swap, NOP);
         cfg_instr temp = block->b_instr[j];
         block->b_instr[j] = block->b_instr[k];
         block->b_instr[k] = temp;
     }
+    return SUCCESS;
 }
 
 static int
@@ -2513,7 +2601,7 @@ optimize_basic_block(PyObject *const_cache, basicblock *bb, PyObject *consts)
             if (swaptimize(bb, &i) < 0) {
                 goto error;
             }
-            apply_static_swaps(bb, i);
+            RETURN_IF_ERROR(apply_static_swaps(bb, i));
         }
     }
     return SUCCESS;
@@ -4024,17 +4112,55 @@ _PyCfg_OptimizedCfgToInstructionSequence(cfg_builder *g,
     /* Observe actual final lanes only after native DUP/Borrow selection.
      * This does not modify the CFG, locations, or instruction scheduling. */
     if (umd->u_soac_bindings != NULL) {
+        for (basicblock *b = g->g_block_list; b != NULL; b = b->b_list) {
+            b->b_soac_final_ordinal = -1;
+            for (soac_cfg_static_swap *swap = b->b_soac_static_swaps;
+                 swap != NULL; swap = swap->next) {
+                RETURN_IF_ERROR(_PyCompile_SoacScopeStaticSwap(umd, swap->rotation,
+                    swap->depth, swap->first, swap->last));
+            }
+        }
+        int count = 0;
+        for (basicblock *b = g->g_entryblock; b != NULL; b = b->b_next) {
+            if (b->b_iused > INT_MAX - count) {
+                PyErr_SetString(PyExc_OverflowError, "native reference CFG is too large");
+                return ERROR;
+            }
+            b->b_soac_final_ordinal = count;
+            count += b->b_iused;
+        }
         int ordinal = 0;
         for (basicblock *b = g->g_entryblock; b != NULL; b = b->b_next) {
-            for (int i = 0; i < b->b_iused; i++) {
-                if (ordinal == INT_MAX) {
-                    PyErr_SetString(PyExc_OverflowError, "native reference CFG is too large");
-                    return ERROR;
-                }
+            for (int i = 0; i < b->b_iused; i++, ordinal++) {
                 cfg_instr *instruction = &b->b_instr[i];
+                int target = HAS_TARGET(instruction->i_opcode)
+                    ? instruction->i_target->b_soac_final_ordinal : -1;
+                int fallthrough = i + 1 < b->b_iused ? ordinal + 1 :
+                    BB_HAS_FALLTHROUGH(b) && b->b_next != NULL
+                    ? b->b_next->b_soac_final_ordinal : -1;
+                if (fallthrough == count) {
+                    fallthrough = -1;
+                }
                 RETURN_IF_ERROR(_PyCompile_SoacFinalReferenceInstruction(
-                    umd, ordinal++, instruction->i_opcode, instruction->i_oparg,
-                    instruction->i_soac_origins));
+                    umd, ordinal, instruction->i_opcode, instruction->i_oparg,
+                    instruction->i_soac_origins, target, fallthrough));
+                /* Enumerate the actual full private ancestry, including below
+                 * nested ordinary handlers. No source-range envelope. */
+                basicblock *handler = instruction->i_except;
+                int depth = 0;
+                while (handler != NULL && depth++ <= CO_MAXBLOCKS) {
+                    if (!handler->b_soac_handler_seen ||
+                        handler->b_soac_handler_ambiguous) {
+                        _PyCompile_SoacScopeProtectionUncertain(umd);
+                    }
+                    RETURN_IF_ERROR(_PyCompile_SoacScopeProtectionMember(
+                        umd, ordinal, handler->b_soac_setup_origins,
+                        handler->b_soac_leave_origins, handler->b_soac_final_ordinal));
+                    handler = handler->b_soac_outer_handler;
+                }
+                if (handler != NULL) {
+                    _PyCompile_SoacScopeProtectionUncertain(umd);
+                }
             }
         }
         RETURN_IF_ERROR(_PyCompile_SoacFinishReferences(umd, ordinal));

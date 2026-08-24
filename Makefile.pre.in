@@ -2254,6 +2254,8 @@ Python/compile.o Python/codegen.o Python/assemble.o Python/flowgraph.o Python/in
                 $(srcdir)/Include/internal/pycore_opcode_metadata.h \
                 $(srcdir)/Include/internal/pycore_opcode_utils.h
 
+Python/compile.o: $(srcdir)/Python/soac_scope_lifecycle_v5.inc
+
 Python/ceval.o: \
 		$(srcdir)/Python/ceval_macros.h \
 		$(srcdir)/Python/condvar.h \

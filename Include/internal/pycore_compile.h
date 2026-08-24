@@ -96,6 +96,12 @@ int _PyCompile_SoacSaveLocal(struct _PyCompiler *, int local_index);
 int _PyCompile_SoacMakeCell(struct _PyCompiler *, int deref_index);
 int _PyCompile_SoacRestoreComprehension(struct _PyCompiler *);
 int _PyCompile_SoacLeaveComprehension(struct _PyCompiler *);
+/* The bounded codegen invocation supplies the original result consumer.
+ * The returned count is compile-local, never a source or execution identity. */
+Py_ssize_t _PyCompile_SoacScopeResultStart(struct _PyCompiler *);
+int _PyCompile_SoacScopeResultEnd(struct _PyCompiler *, Py_ssize_t first_region,
+                                 expr_ty value, expr_ty target,
+                                 _Py_SourceLocation statement, int kind);
 int _PyCompile_SoacCapture(struct _PyCompiler *, PyCodeObject *,
                           _Py_SourceLocation, int free_ordinal, int deref_index);
 int _PyCompile_SoacClassInitializer(struct _PyCompiler *, PyObject *name, int role);
@@ -110,7 +116,15 @@ int _PyCompile_SoacReferenceOrigin(struct _PyCompiler *, _Py_SourceLocation,
                                   const void *original, int kind, expr_context_ty);
 int _PyCompile_SoacFinalReferenceInstruction(_PyCompile_CodeUnitMetadata *,
                                             int ordinal, int opcode, int oparg,
-                                            _PySoacReadOrigins);
+                                            _PySoacReadOrigins,
+                                             int target, int fallthrough);
+int _PyCompile_SoacScopeProtectionMember(_PyCompile_CodeUnitMetadata *,
+                                         int ordinal, _PySoacReadOrigins enter,
+                                         _PySoacReadOrigins leave, int handler);
+void _PyCompile_SoacScopeProtectionUncertain(_PyCompile_CodeUnitMetadata *);
+int _PyCompile_SoacScopeStaticSwap(_PyCompile_CodeUnitMetadata *,
+                                  _PySoacReadOrigins rotation, int depth,
+                                  _PySoacReadOrigins first, _PySoacReadOrigins last);
 int _PyCompile_SoacFinishReferences(_PyCompile_CodeUnitMetadata *, int count);
 
 /* Native ownership facts in the same compile-local source catalogue. */
@@ -160,9 +174,12 @@ int _PyCompile_SoacPushContext(struct _PyCompiler *, int owner_kind,
                               int payload, Py_ssize_t *previous);
 void _PyCompile_SoacPopContext(struct _PyCompiler *, Py_ssize_t previous);
 Py_ssize_t _PyCompile_SoacBeginUnwindContext(struct _PyCompiler *);
+int _PyCompile_SoacResolvedJump(_PyCompile_CodeUnitMetadata *, int ordinal,
+                                int original_opcode, int final_opcode, int target);
 int _PyCompile_SoacAssembledInstruction(_PyCompile_CodeUnitMetadata *,
                                       int ordinal, const _PyInstruction *,
-                                      Py_ssize_t opcode_offset);
+                                      Py_ssize_t opcode_offset,
+                                       Py_ssize_t first_byte, Py_ssize_t end_byte);
 int _PyCompile_SoacFinishAssembly(_PyCompile_CodeUnitMetadata *, int count,
                                  Py_ssize_t code_size);
 

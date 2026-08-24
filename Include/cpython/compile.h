@@ -54,7 +54,7 @@ PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSource(
     const char *source, Py_ssize_t length, PyObject *filename, int optimize);
 
 /* Compile the same authenticated source once, returning (code, strings,
- * (4, unchanged_CodeNodes, ScopeBindingRecipes, unchanged_OperationTables)).
+ * (5, unchanged_CodeNodes, ScopeBindingRecipes, unchanged_OperationTables)).
  * One exact immutable scope recipe belongs to every retained native code node.
  * This is native compiler/binder data, not projection or execution authority.
  * All containers are exact immutable tuples. Unchanged nodes are
@@ -68,7 +68,7 @@ PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSource(
  * seed=(final_slot, native_kind, FrameCleared0/BoundParameter1, ordinal_or_None)
  * owner=(id, kind, final_slot, native_kind, region_or_None)
  * region=(id,parent,kind,source_span,outer_iterable_span,is_async,protection,
- *         entry_ops,restores,source_bindings,events)
+ *         entry_ops,restores,source_bindings,events,lifecycle)
  * event=(phase,step,kind,slot_or_None,owner_or_None,auxiliary_or_None,emissions)
  * emission=(ordinal,lane,form,first_operand,second_or_None,native_opcode,
  *           actual_opcode_byte_offset,handler_or_None,wire3_context_or_None)
@@ -85,13 +85,22 @@ PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSource(
  * handler, so partial prefix failure does not acquire an invented rollback.
  * OperationTable compiler-origin and fused-restore gaps remain unchanged.
  * Native source-operation tuple/tag definitions below retain wire3 meanings.
- * Exact scope tuple/tag constraints are specified by the joint SCHEMA-V4.md.
+ * lifecycle=(protections,normal_completions)
+ * protection=(allocation_ordinal,context,enter_key,exit_key,handler_ordinal,spans)
+ * span=(first_ordinal,end_ordinal,first_byte,end_byte,effective_handler)
+ * normal=(allocation_ordinal,context,consumer,entries,trace,rewritten_rotations)
+ * entry=(generic0/generator1,advance_ordinal,first_ordinal)
+ * trace_step=(kind,event_key_or_None,actual_scope_emission)
+ * Span ends are exclusive; byte extents include EXTENDED_ARG and inline caches.
+ * Normal generator completion closes its return value at END_FOR before
+ * POP_ITER. Generic exhaustion skips END_FOR after consuming StopIteration.
+ * Exact lifecycle tuple/tag constraints are specified by joint SCHEMA-5.md.
  */
 PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSourceDetails(
     const char *source, Py_ssize_t length, PyObject *filename, int optimize);
 
 /* Fixed wire values, independent of internal compiler enum numbering. */
-#define Py_SOAC_CLASS_BINDINGS_SCHEMA 4
+#define Py_SOAC_CLASS_BINDINGS_SCHEMA 5
 /* Source-operation receipts share the SAME final code-node tree.
  * table = (code_id, instruction_count, code_size_bytes, exact_native_names,
  *          reads, stores, calls, gaps)
@@ -274,7 +283,7 @@ PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSourceDetails(
 #define Py_SOAC_CLASS_ACCESS_CELL_VALUE 1
 #define Py_SOAC_CLASS_ACCESS_NAMESPACE_OR_CELL 2
 
-/* Wire4: one shared ownership-data recipe per retained native CodeNode.
+/* Wire5: one shared ownership-data recipe per retained native CodeNode.
  * These tags describe native compiler/binder facts, never execution grants. */
 #define Py_SOAC_SCOPE_SEED_CLEARED 0
 #define Py_SOAC_SCOPE_SEED_PARAMETER 1
@@ -307,6 +316,9 @@ PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSourceDetails(
 #define Py_SOAC_SCOPE_RESTORE_ROTATION 13
 #define Py_SOAC_SCOPE_ENTRY_ROTATION 14
 #define Py_SOAC_SCOPE_COLLECTION_ROTATION 15
+#define Py_SOAC_SCOPE_COMPLETION_VALUE_RETIRE 16
+#define Py_SOAC_SCOPE_ITERATOR_RETIRE 17
+#define Py_SOAC_SCOPE_ITERATOR_ADVANCE 18
 #define Py_SOAC_SCOPE_FORM_DIRECT 0
 #define Py_SOAC_SCOPE_FORM_STORE_PAIR 1
 #define Py_SOAC_SCOPE_FORM_STORE_LOAD 2
@@ -319,6 +331,17 @@ PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSourceDetails(
 #define Py_SOAC_SCOPE_GAP_SUSPENSION 6
 #define Py_SOAC_SCOPE_GAP_PAIRED_RESTORE 7
 #define Py_SOAC_SCOPE_GAP_NONITERATOR 8
+#define Py_SOAC_SCOPE_GAP_NORMAL_COMPLETION 9
+#define Py_SOAC_SCOPE_RESULT_KEEP 0
+#define Py_SOAC_SCOPE_RESULT_DISCARD 1
+#define Py_SOAC_SCOPE_RESULT_PUBLISH 2
+#define Py_SOAC_SCOPE_ENTRY_GENERIC_EXHAUSTION 0
+#define Py_SOAC_SCOPE_ENTRY_GENERATOR_COMPLETION 1
+#define Py_SOAC_SCOPE_TRACE_TRANSPORT 0
+#define Py_SOAC_SCOPE_TRACE_RESTORE 1
+#define Py_SOAC_SCOPE_TRACE_RESULT 2
+#define Py_SOAC_SCOPE_TRACE_COMPLETION_VALUE 3
+#define Py_SOAC_SCOPE_TRACE_ITERATOR 4
 
 /* Execute SETUP_ANNOTATIONS against the explicit actual local namespace. */
 PyAPI_FUNC(int) PySoac_SetupAnnotations(PyObject *locals);
