@@ -23,7 +23,39 @@ enum {
     SOAC_LIFETIME_SCOPE_TERMINAL = 8,
     /* Nonowning managed executable view; not a generic token flag. */
     SOAC_LIFETIME_BORROWED_CODE = 16,
+    SOAC_LIFETIME_SYNC_BODY = 32,
+    SOAC_LIFETIME_SYNC_RESUMED = 64,
 };
+
+typedef struct {
+    uintptr_t version;
+    uintptr_t state;
+    uintptr_t storage;
+    uintptr_t thread;
+    uintptr_t frame;
+    uintptr_t previous;
+} SoacLifetimeScopeStateV1;
+
+enum {
+    SOAC_SCOPE_V1_LINKED = 1,
+    SOAC_SCOPE_V1_SUSPENDED = 2,
+    SOAC_SCOPE_V1_TERMINAL = 3,
+};
+
+
+/* Internal transport remains memcpy-based. The storage identity may name a
+ * six-word scope or the native prefix of a twelve-word body interval. */
+extern int _PyFrame_PrepareSoacScopeV1(
+    SoacLifetimeScopeStateV1 *state, uintptr_t storage, PyFrameObject *object,
+    PyObject *actual_function, PyObject *globals, PyObject *builtins);
+extern void _PyFrame_LinkSoacScopeV1(
+    const SoacLifetimeScopeStateV1 *state, void *storage,
+    PyObject *actual_function, PyObject *globals, PyObject *builtins,
+    uint16_t extra_flags);
+extern int _PyFrame_ValidateSoacScopeV1(
+    const SoacLifetimeScopeStateV1 *state, uintptr_t storage, uint16_t extra_flags);
+extern void _PyFrame_UnlinkSoacScopeV1(
+    SoacLifetimeScopeStateV1 *state, void *storage, int terminal);
 
 /* Detach first: clearing a captured mapping can run finalizers that recursively
  * clear this same frame or its traceback. Ordinary borrowed maps are untouched.

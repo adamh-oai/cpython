@@ -429,21 +429,6 @@ PyFrame_FinishSoacLifetimeWithReferencesV1(
 
 
 /* Caller-owned native source-parent scope storage. */
-typedef struct {
-    uintptr_t version;
-    uintptr_t state;
-    uintptr_t storage;
-    uintptr_t thread;
-    uintptr_t frame;
-    uintptr_t previous;
-} SoacLifetimeScopeStateV1;
-
-enum {
-    SOAC_SCOPE_V1_LINKED = 1,
-    SOAC_SCOPE_V1_SUSPENDED = 2,
-    SOAC_SCOPE_V1_TERMINAL = 3,
-};
-
 _Static_assert(sizeof(SoacLifetimeScopeStateV1) == sizeof(PySoacLifetimeScopeV1),
                "source-parent scope word count must match its public ABI");
 _Static_assert(_Alignof(SoacLifetimeScopeStateV1) == _Alignof(PySoacLifetimeScopeV1),
@@ -487,27 +472,13 @@ PyFrame_GetSoacLifetimeScopeLayoutV1(
 #endif
 }
 
+#ifndef Py_GIL_DISABLED
 int
-PyFrame_EnterSoacLifetimeScopeV1(
-    PySoacLifetimeScopeV1 *scope, size_t scope_size, PyFrameObject *object,
-    PyObject *actual_function, PyObject *captured_globals,
-    PyObject *captured_builtins)
+_PyFrame_PrepareSoacScopeV1(
+    SoacLifetimeScopeStateV1 *state, uintptr_t storage,
+    PyFrameObject *object, PyObject *actual_function,
+    PyObject *captured_globals, PyObject *captured_builtins)
 {
-#ifdef Py_GIL_DISABLED
-    PyErr_SetString(PyExc_NotImplementedError,
-                    "source-parent scopes require the selected GIL build");
-    return -1;
-#else
-    if (soac_scope_storage_valid(scope, scope_size) < 0) {
-        return -1;
-    }
-    for (size_t i = 0; i < PySoac_LIFETIME_SCOPE_V1_WORDS; i++) {
-        if (scope->_opaque[i] != 0) {
-            PyErr_SetString(PyExc_RuntimeError,
-                            "source-parent scope storage is one-use");
-            return -1;
-        }
-    }
     if (object == NULL || !PyFrame_Check(object) ||
         object->f_frame->owner != FRAME_OWNED_BY_SOAC_ACTIVE ||
         actual_function == NULL || !PyFunction_Check(actual_function)) {
@@ -531,80 +502,82 @@ PyFrame_EnterSoacLifetimeScopeV1(
         return -1;
     }
     PyThreadState *tstate = _PyThreadState_GET();
-    SoacLifetimeScopeStateV1 state = {
+    *state = (SoacLifetimeScopeStateV1) {
         .version = PySoac_LIFETIME_SCOPE_ABI_VERSION,
         .state = SOAC_SCOPE_V1_LINKED,
-        .storage = (uintptr_t)scope,
+        .storage = storage,
         .thread = (uintptr_t)tstate,
         .frame = (uintptr_t)frame,
         .previous = (uintptr_t)tstate->current_frame,
     };
-    /* No Python ownership edge. In STACKREF_DEBUG this creates the native
-     * borrowed handle, which must be closed before the external owner dies. */
+    return 0;
+}
+
+void
+_PyFrame_LinkSoacScopeV1(
+    const SoacLifetimeScopeStateV1 *state, void *storage,
+    PyObject *actual_function, PyObject *captured_globals,
+    PyObject *captured_builtins, uint16_t extra_flags)
+{
+    assert(state->storage == (uintptr_t)storage);
+    PyThreadState *tstate = (PyThreadState *)state->thread;
+    _PyInterpreterFrame *frame = (_PyInterpreterFrame *)state->frame;
+    assert(tstate == _PyThreadState_GET());
+    assert((uintptr_t)tstate->current_frame == state->previous);
+    /* A native borrowed handle, not a new Python ownership edge. */
     frame->f_funcobj = PyStackRef_FromPyObjectBorrow(actual_function);
     frame->f_globals = captured_globals;
     frame->f_builtins = captured_builtins;
     frame->previous = tstate->current_frame;
-    frame->soac_lifetime_owned_environment |= SOAC_LIFETIME_SCOPE_LINKED;
-    memcpy(scope, &state, sizeof(state));
-    /* Publish only after every field visible to asynchronous readers is ready. */
+    frame->soac_lifetime_owned_environment |= SOAC_LIFETIME_SCOPE_LINKED | extra_flags;
+    memcpy(storage, state, sizeof(*state));
     tstate->current_frame = frame;
-    return 0;
-#endif
 }
 
 int
-PyFrame_LeaveSoacLifetimeScopeV1(
-    PySoacLifetimeScopeV1 *scope, size_t scope_size, int reason)
+_PyFrame_ValidateSoacScopeV1(
+    const SoacLifetimeScopeStateV1 *state, uintptr_t storage,
+    uint16_t extra_flags)
 {
-#ifdef Py_GIL_DISABLED
-    PyErr_SetString(PyExc_NotImplementedError,
-                    "source-parent scopes require the selected GIL build");
-    return -1;
-#else
-    if (soac_scope_storage_valid(scope, scope_size) < 0) {
-        return -1;
-    }
-    if (reason != PySoac_LIFETIME_SCOPE_SUSPEND &&
-        reason != PySoac_LIFETIME_SCOPE_TERMINAL) {
-        PyErr_SetString(PyExc_ValueError, "invalid source-parent leave reason");
-        return -1;
-    }
-    SoacLifetimeScopeStateV1 state;
-    /* memcpy avoids accessing public uintptr storage through an aliased struct. */
-    memcpy(&state, scope, sizeof(state));
-    if (state.version != PySoac_LIFETIME_SCOPE_ABI_VERSION ||
-        state.state != SOAC_SCOPE_V1_LINKED || state.storage != (uintptr_t)scope) {
+    if (state->version != PySoac_LIFETIME_SCOPE_ABI_VERSION ||
+        state->state != SOAC_SCOPE_V1_LINKED || state->storage != storage) {
         PyErr_SetString(PyExc_RuntimeError,
                         "source-parent scope is inactive, copied, or already left");
         return -1;
     }
     PyThreadState *tstate = _PyThreadState_GET();
-    if (state.thread != (uintptr_t)tstate) {
+    if (state->thread != (uintptr_t)tstate) {
         PyErr_SetString(PyExc_RuntimeError,
                         "source-parent scope belongs to another thread state");
         return -1;
     }
-    /* Compare current identity before dereferencing the saved frame pointer. */
-    if (state.frame != (uintptr_t)tstate->current_frame) {
+    if (state->frame != (uintptr_t)tstate->current_frame) {
         PyErr_SetString(PyExc_RuntimeError,
                         "source-parent scopes must leave in stack order");
         return -1;
     }
     _PyInterpreterFrame *frame = tstate->current_frame;
-    if (frame->owner != FRAME_OWNED_BY_SOAC_ACTIVE ||
+    if (frame == NULL || frame->owner != FRAME_OWNED_BY_SOAC_ACTIVE ||
         (frame->soac_lifetime_owned_environment & ~SOAC_LIFETIME_BORROWED_CODE) !=
-            SOAC_LIFETIME_SCOPE_LINKED ||
-        (uintptr_t)frame->previous != state.previous) {
+            (SOAC_LIFETIME_SCOPE_LINKED | extra_flags) ||
+        (uintptr_t)frame->previous != state->previous) {
         PyErr_SetString(PyExc_RuntimeError, "invalid linked source-parent frame");
         return -1;
     }
+    return 0;
+}
+
+void
+_PyFrame_UnlinkSoacScopeV1(
+    SoacLifetimeScopeStateV1 *state, void *storage, int terminal)
+{
+    PyThreadState *tstate = (PyThreadState *)state->thread;
+    _PyInterpreterFrame *frame = (_PyInterpreterFrame *)state->frame;
+    assert(tstate == _PyThreadState_GET() && frame == tstate->current_frame);
     PyFrameObject *object = _PyFrame_GetSoacLifetimeObject(frame);
     _PyInterpreterFrame *previous = frame->previous;
-    int terminal = reason == PySoac_LIFETIME_SCOPE_TERMINAL;
 
-    /* Valid leave cannot fail after this point. Detach before allocation or
-     * any caller-owned primary cleanup, including reentrant finalizers. */
+    /* Validated by the caller before any recursion refund or mutation. */
     tstate->current_frame = previous;
     frame->previous = NULL;
     frame->soac_lifetime_owned_environment =
@@ -613,18 +586,16 @@ PyFrame_LeaveSoacLifetimeScopeV1(
     if (tstate->last_profiled_frame == frame) {
         tstate->last_profiled_frame = previous;
     }
-    state.state = terminal ? SOAC_SCOPE_V1_TERMINAL : SOAC_SCOPE_V1_SUSPENDED;
-    state.thread = state.frame = state.previous = 0;
-    memcpy(scope, &state, sizeof(state));
+    state->state = terminal ? SOAC_SCOPE_V1_TERMINAL : SOAC_SCOPE_V1_SUSPENDED;
+    state->thread = state->frame = state->previous = 0;
+    memcpy(storage, state, sizeof(*state));
 
     _PyStackRef function = frame->f_funcobj;
     frame->f_funcobj = PyStackRef_NULL;
     frame->f_globals = NULL;
     frame->f_builtins = NULL;
-    PyStackRef_CLOSE(function);  /* borrowed: closes debug handle, no DECREF */
+    PyStackRef_CLOSE(function);  /* close the borrowed debug handle */
 
-    /* Suspension must not retain the resume caller. At terminal, mirror the
-     * ordinary take_ownership predecessor link, including its OOM policy. */
     if (terminal && !_PyObject_IsUniquelyReferenced((PyObject *)object)) {
         assert(object->f_back == NULL);
         _PyInterpreterFrame *parent = _PyFrame_GetFirstComplete(previous);
@@ -644,6 +615,56 @@ PyFrame_LeaveSoacLifetimeScopeV1(
             PyErr_SetRaisedException(error);
         }
     }
+}
+#endif
+
+int
+PyFrame_EnterSoacLifetimeScopeV1(
+    PySoacLifetimeScopeV1 *scope, size_t scope_size, PyFrameObject *object,
+    PyObject *actual_function, PyObject *captured_globals,
+    PyObject *captured_builtins)
+{
+#ifdef Py_GIL_DISABLED
+    PyErr_SetString(PyExc_NotImplementedError,
+                    "source-parent scopes require the selected GIL build");
+    return -1;
+#else
+    if (soac_scope_storage_valid(scope, scope_size) < 0) return -1;
+    for (size_t i = 0; i < PySoac_LIFETIME_SCOPE_V1_WORDS; i++) {
+        if (scope->_opaque[i] != 0) {
+            PyErr_SetString(PyExc_RuntimeError,
+                            "source-parent scope storage is one-use");
+            return -1;
+        }
+    }
+    SoacLifetimeScopeStateV1 state;
+    if (_PyFrame_PrepareSoacScopeV1(&state, (uintptr_t)scope, object,
+            actual_function, captured_globals, captured_builtins) < 0) return -1;
+    _PyFrame_LinkSoacScopeV1(&state, scope, actual_function,
+                           captured_globals, captured_builtins, 0);
+    return 0;
+#endif
+}
+
+int
+PyFrame_LeaveSoacLifetimeScopeV1(
+    PySoacLifetimeScopeV1 *scope, size_t scope_size, int reason)
+{
+#ifdef Py_GIL_DISABLED
+    PyErr_SetString(PyExc_NotImplementedError,
+                    "source-parent scopes require the selected GIL build");
+    return -1;
+#else
+    if (soac_scope_storage_valid(scope, scope_size) < 0) return -1;
+    if (reason != PySoac_LIFETIME_SCOPE_SUSPEND &&
+        reason != PySoac_LIFETIME_SCOPE_TERMINAL) {
+        PyErr_SetString(PyExc_ValueError, "invalid source-parent leave reason");
+        return -1;
+    }
+    SoacLifetimeScopeStateV1 state;
+    memcpy(&state, scope, sizeof(state));
+    if (_PyFrame_ValidateSoacScopeV1(&state, (uintptr_t)scope, 0) < 0) return -1;
+    _PyFrame_UnlinkSoacScopeV1(&state, scope, reason == PySoac_LIFETIME_SCOPE_TERMINAL);
     return 0;
 #endif
 }

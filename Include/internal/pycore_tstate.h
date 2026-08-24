@@ -39,6 +39,10 @@ typedef struct _PyThreadStateImpl {
     // thread state during runtime finalization.
     Py_ssize_t refcount;
 
+    /* GIL-only native observer setter reservation. Scanned across actual
+       interpreter tstates; fork retains only surviving thread depth. */
+    uint32_t soac_observer_reservation_depth;
+
     // These are addresses, but we need to convert to ints to avoid UB.
     uintptr_t c_stack_top;
     uintptr_t c_stack_soft_limit;

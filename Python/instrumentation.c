@@ -1,4 +1,5 @@
 #include "Python.h"
+#include "pycore_soac_body_interval.h"
 #include "pycore_bitutils.h"      // _Py_popcount32()
 #include "pycore_call.h"          // _PyObject_VectorcallTstate()
 #include "pycore_ceval.h"         // _PY_EVAL_EVENTS_BITS
@@ -2017,6 +2018,11 @@ _PyMonitoring_SetEvents(int tool_id, _PyMonitoringEventSet events)
         return -1;
     }
 
+    /* Scalar-only refusal while stopped; the Python/legacy caller
+     * resolves it after releasing all mutation locks. */
+    if (events && _PySoacBody_HasProtectedInterval(interp, NULL)) {
+        return _Py_SOAC_OBSERVER_REFUSED;
+    }
     uint32_t existing_events = get_events(&interp->monitors, tool_id);
     if (existing_events == events) {
         return 0;
@@ -2034,8 +2040,9 @@ _PyMonitoring_SetEvents(int tool_id, _PyMonitoringEventSet events)
     return instrument_all_executing_code_objects(interp);
 }
 
-int
-_PyMonitoring_SetLocalEvents(PyCodeObject *code, int tool_id, _PyMonitoringEventSet events)
+static int
+soac_set_local_events(PyCodeObject *code, int tool_id,
+                      _PyMonitoringEventSet events, int thread_list_locked)
 {
     ASSERT_WORLD_STOPPED();
 
@@ -2049,6 +2056,11 @@ _PyMonitoring_SetLocalEvents(PyCodeObject *code, int tool_id, _PyMonitoringEvent
     if (check_tool(interp, tool_id)) {
         return -1;
     }
+
+    int protected = events && (thread_list_locked
+        ? _PySoacBody_HasProtectedIntervalThreadListLocked(interp, code)
+        : _PySoacBody_HasProtectedInterval(interp, code));
+    if (protected) return _Py_SOAC_OBSERVER_REFUSED;
 
     if (allocate_instrumentation_data(code)) {
         return -1;
@@ -2064,6 +2076,19 @@ _PyMonitoring_SetLocalEvents(PyCodeObject *code, int tool_id, _PyMonitoringEvent
     set_local_events(local, tool_id, events);
 
     return force_instrument_lock_held(code, interp);
+}
+
+int
+_PyMonitoring_SetLocalEvents(PyCodeObject *code, int tool_id, _PyMonitoringEventSet events)
+{
+    return soac_set_local_events(code, tool_id, events, 0);
+}
+
+int
+_PyMonitoring_SetLocalEventsThreadListLocked(PyCodeObject *code, int tool_id, uint32_t events)
+{
+    /* Existing all-thread trace caller already holds HEAD_LOCK. Same policy. */
+    return soac_set_local_events(code, tool_id, events, 1);
 }
 
 int
@@ -2341,6 +2366,7 @@ monitoring_set_events_impl(PyObject *module, int tool_id, int event_set)
     _PyEval_StopTheWorld(interp);
     int err = _PyMonitoring_SetEvents(tool_id, event_set);
     _PyEval_StartTheWorld(interp);
+    err = _PySoacBody_ResolveObserverStatus(err);
     if (err) {
         return NULL;
     }
@@ -2426,6 +2452,7 @@ monitoring_set_local_events_impl(PyObject *module, int tool_id,
     _PyEval_StopTheWorld(interp);
     int err = _PyMonitoring_SetLocalEvents((PyCodeObject*)code, tool_id, event_set);
     _PyEval_StartTheWorld(interp);
+    err = _PySoacBody_ResolveObserverStatus(err);
     if (err) {
         return NULL;
     }
@@ -2449,6 +2476,11 @@ monitoring_restart_events_impl(PyObject *module)
     PyInterpreterState *interp = tstate->interp;
 
     _PyEval_StopTheWorld(interp);
+    if (_PySoacBody_RestartWouldObserve(interp)) {
+        _PyEval_StartTheWorld(interp);
+        (void)_PySoacBody_ResolveObserverStatus(_Py_SOAC_OBSERVER_REFUSED);
+        return NULL;
+    }
     uint32_t restart_version = global_version(interp) + MONITORING_VERSION_INCREMENT;
     uint32_t new_version = restart_version + MONITORING_VERSION_INCREMENT;
     if (new_version <= MONITORING_VERSION_INCREMENT) {

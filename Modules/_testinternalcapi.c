@@ -10,6 +10,7 @@
 #undef NDEBUG
 
 #include "Python.h"
+#include "pycore_soac_body_interval.h"
 #include <string.h>
 #include "pycore_backoff.h"       // JUMP_BACKWARD_INITIAL_VALUE
 #include "pycore_bitutils.h"      // _Py_bswap32()
@@ -940,7 +941,8 @@ static PyObject *
 set_eval_frame_default(PyObject *self, PyObject *Py_UNUSED(args))
 {
     module_state *state = get_module_state(self);
-    _PyInterpreterState_SetEvalFrameFunc(_PyInterpreterState_GET(), _PyEval_EvalFrameDefault);
+    if (_PyInterpreterState_SetEvalFrameFuncChecked(
+            _PyInterpreterState_GET(), _PyEval_EvalFrameDefault) < 0) return NULL;
     Py_CLEAR(state->record_list);
     Py_RETURN_NONE;
 }
@@ -971,8 +973,15 @@ set_eval_frame_record(PyObject *self, PyObject *list)
         PyErr_SetString(PyExc_TypeError, "argument must be a list");
         return NULL;
     }
+    PyThreadState *tstate = _PyThreadState_GET();
+    if (_PySoacBody_BeginObserverReservation(tstate) < 0) return NULL;
+    /* Preserve the original release-before-hook order. Finalizers may run
+     * arbitrary Python or release the GIL, but cannot admit a source interval
+     * on any native tstate until this exact transaction finishes. */
     Py_XSETREF(state->record_list, Py_NewRef(list));
-    _PyInterpreterState_SetEvalFrameFunc(_PyInterpreterState_GET(), record_eval);
+    int status = _PyInterpreterState_SetEvalFrameFuncChecked(tstate->interp, record_eval);
+    _PySoacBody_EndObserverReservation(tstate);
+    if (status < 0) return NULL;
     Py_RETURN_NONE;
 }
 
@@ -1009,7 +1018,8 @@ get_eval_frame_stats(PyObject *self, PyObject *Py_UNUSED(args))
 static PyObject *
 set_eval_frame_interp(PyObject *self, PyObject *Py_UNUSED(args))
 {
-    _PyInterpreterState_SetEvalFrameFunc(_PyInterpreterState_GET(), Test_EvalFrame);
+    if (_PyInterpreterState_SetEvalFrameFuncChecked(
+            _PyInterpreterState_GET(), Test_EvalFrame) < 0) return NULL;
     Py_RETURN_NONE;
 }
 
