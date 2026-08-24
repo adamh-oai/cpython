@@ -181,6 +181,30 @@ soac_pending_type_admit(PyObject *module, PyObject *args)
     Py_RETURN_NONE;
 }
 
+/* A real C caller owns this one payload through the public admission call,
+ * then retires it before returning to Python. This tests the first C cleanup
+ * boundary, not an invented callback inside the exact-name input tuples. */
+static PyObject *
+soac_pending_type_admit_and_retire(PyObject *module, PyObject *args)
+{
+    PyObject *admission_args, *holder;
+    if (!PyArg_ParseTuple(args, "OO", &admission_args, &holder) ||
+        !PyTuple_CheckExact(admission_args) ||
+        !PyList_CheckExact(holder) || PyList_GET_SIZE(holder) != 1) {
+        if (!PyErr_Occurred()) {
+            PyErr_SetString(PyExc_TypeError, "expected actual admission args and one release holder");
+        }
+        return NULL;
+    }
+    PyObject *retired = PyList_GET_ITEM(holder, 0);  /* MOVE from actual slot */
+    PyList_SET_ITEM(holder, 0, Py_NewRef(Py_None));
+    PyObject *result = soac_pending_type_admit(module, admission_args);
+    PyObject *primary = PyErr_GetRaisedException();
+    Py_DECREF(retired);
+    PyErr_SetRaisedException(primary);
+    return result;
+}
+
 /* This attempted callback is deliberately different from the one captured
  * at construction. The equality preflight must reject without invoking it. */
 static int

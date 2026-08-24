@@ -3352,6 +3352,7 @@ soac_descriptor_birth_foreign(PyObject *self, PyObject *const *args,
 static PyMethodDef module_functions[] = {
     {"soac_pending_type_construct", soac_pending_type_construct, METH_VARARGS},
     {"soac_pending_type_admit", soac_pending_type_admit, METH_VARARGS},
+    {"soac_pending_type_admit_and_retire", soac_pending_type_admit_and_retire, METH_VARARGS},
     {"soac_pending_type_try_weaker_admission", soac_pending_type_try_weaker_admission, METH_VARARGS},
     {"soac_pending_type_preserve_error", soac_pending_type_preserve_error, METH_VARARGS},
     {"soac_pending_type_allocate", soac_pending_type_allocate, METH_VARARGS},
