@@ -62,6 +62,7 @@ enum {
     PyDict_SOAC_ATTRIBUTE_SET_EXISTING = 9
 };
 #define PyDict_SOAC_ALLOW_NONSTRING_KEYS 1u
+#define PyDict_SOAC_READ_ONLY 2u
 typedef int (*PyDict_SoacPolicyCallback)(
     PyObject *owner, PyObject *dict, PyObject *key, PyObject *value,
     int operation, PyObject *provenance);
@@ -70,6 +71,10 @@ PyAPI_FUNC(int) PyDict_SetSoacPolicy(
     unsigned int flags);
 PyAPI_FUNC(int) PyDict_SealSoacNamespace(PyObject *dict);
 PyAPI_FUNC(int) PyDict_HasSoacPolicy(PyObject *dict);
+PyAPI_FUNC(int) _PyDict_HasSoacBindingPolicy(PyObject *dict);
+/* Liveness only, not successful-registration or owner authentication. A
+   caller must already prove the read-only policy completed installation. */
+PyAPI_FUNC(int) _PyDict_HasLiveSoacReadOnlyPolicy(PyObject *dict);
 PyAPI_FUNC(int) PyDict_MatchesSoacPolicy(
     PyObject *dict, PyObject *owner, PyDict_SoacPolicyCallback validate,
     unsigned int flags);

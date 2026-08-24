@@ -95,6 +95,10 @@ PyAPI_FUNC(void *) PyFunction_GetSoacMetadata(PyObject *);
 PyAPI_FUNC(uint64_t) PyFunction_GetSoacFunctionId(PyObject *);
 PyAPI_FUNC(int) PyFunction_SealSoacStrict(PyObject *, uint64_t identity);
 PyAPI_FUNC(uint64_t) PyFunction_GetSoacStrictId(PyObject *);
+/* New-entry precondition before binding/using frozen keyword defaults.
+ * Returns 0, or -1 if a sealed mapping has become terminal/unavailable.
+ * Do not recheck already-bound activations or suspended-frame snapshots. */
+PyAPI_FUNC(int) PyFunction_CheckSoacStrictDefaults(PyObject *);
 /* Single assignment before sealing; the identical owner is idempotent.
  * Get returns a borrowed reference, NULL/no error when never attached, or
  * NULL/StrictRuntimeUnavailableError after irreversible GC clearing. */

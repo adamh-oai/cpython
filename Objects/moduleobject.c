@@ -1503,7 +1503,7 @@ static PyMethodDef module_methods[] = {
 static PyObject *
 module_get_dict(PyModuleObject *m)
 {
-    if (m->md_dict != NULL && PyDict_HasSoacPolicy(m->md_dict)) {
+    if (_PyDict_HasSoacBindingPolicy(m->md_dict)) {
         /* A Python-visible descriptor is never namespace authority. */
         return Py_NewRef(m->md_dict);
     }
@@ -1560,7 +1560,7 @@ module_set_annotate(PyObject *self, PyObject *value, void *Py_UNUSED(ignored))
         return -1;
     }
 
-    if (!Py_IsNone(value) && PyDict_HasSoacPolicy(dict)) {
+    if (!Py_IsNone(value) && _PyDict_HasSoacBindingPolicy(dict)) {
         int result = _PyDict_SetItemAndDeleteForModule(
             dict, &_Py_ID(__annotate__), value, &_Py_ID(__annotations__));
         Py_DECREF(dict);
@@ -1662,7 +1662,7 @@ module_set_annotations(PyObject *self, PyObject *value, void *Py_UNUSED(ignored)
         return -1;
     }
 
-    if (PyDict_HasSoacPolicy(dict)) {
+    if (_PyDict_HasSoacBindingPolicy(dict)) {
         int result = _PyDict_SetItemAndDeleteForModule(
             dict, &_Py_ID(__annotations__), value, &_Py_ID(__annotate__));
         Py_DECREF(dict);

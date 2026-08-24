@@ -133,6 +133,31 @@ func_soac_kwdefaults_policy(PyObject *owner, PyObject *dict, PyObject *key,
 }
 
 int
+PyFunction_CheckSoacStrictDefaults(PyObject *object)
+{
+    if (object == NULL || !PyFunction_Check(object)) {
+        PyErr_BadInternalCall();
+        return -1;
+    }
+    PyFunctionObject *func = (PyFunctionObject *)object;
+    if (func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_TERMINAL) {
+        func_soac_runtime_error("strict function owner is terminal");
+        return -1;
+    }
+    if (func->func_soac_strict_id == 0 || func->func_kwdefaults == NULL) {
+        return 0;
+    }
+    /* The irreversible function ID proves successful prior installation;
+       its keyword-default pointer and that policy cannot be replaced. Do
+       not mistake a rejected write's hash/equality guard for teardown. */
+    if (!_PyDict_HasLiveSoacReadOnlyPolicy(func->func_kwdefaults)) {
+        func_soac_runtime_error("sealed strict function keyword defaults are unavailable");
+        return -1;
+    }
+    return 0;
+}
+
+int
 PyFunction_SealSoacStrict(PyObject *object, uint64_t identity)
 {
     if (!PyFunction_Check(object) || identity == 0) {
@@ -147,7 +172,7 @@ PyFunction_SealSoacStrict(PyObject *object, uint64_t identity)
     }
     if (func->func_soac_strict_id != 0) {
         if (func->func_soac_strict_id == identity) {
-            return 0;
+            return PyFunction_CheckSoacStrictDefaults(object);
         }
         func_soac_mutation_error("strict function identity is already sealed");
         return -1;
@@ -159,15 +184,15 @@ PyFunction_SealSoacStrict(PyObject *object, uint64_t identity)
                             "strict keyword defaults require an exact dictionary");
             return -1;
         }
-        /* No function -> dictionary -> function cycle. The immutable owner and
-         * exact native policy predicate also permit legitimate shared defaults. */
+        /* Preserve the actual complete mapping, including arbitrary existing
+         * keys and their lookup behavior. This does not create a namespace or
+         * an instance layout. The shared immutable owner adds no function edge. */
         if (!PyDict_MatchesSoacPolicy(defaults, Py_None,
-                                     func_soac_kwdefaults_policy, 0) &&
+                                     func_soac_kwdefaults_policy,
+                                     PyDict_SOAC_READ_ONLY) &&
             PyDict_SetSoacPolicy(defaults, Py_None,
-                                 func_soac_kwdefaults_policy, 0) < 0) {
-            return -1;
-        }
-        if (PyDict_SealSoacNamespace(defaults) < 0) {
+                                 func_soac_kwdefaults_policy,
+                                 PyDict_SOAC_READ_ONLY) < 0) {
             return -1;
         }
     }

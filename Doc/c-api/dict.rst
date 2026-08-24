@@ -59,7 +59,8 @@ Dictionary Objects
    Empty an existing dictionary of all key-value pairs.
 
    In the SOAC interpreter, this non-rejectable API is unsupported on a live
-   sealed SOAC namespace.  A rejected SOAC clear terminates the process; it
+   sealed SOAC namespace or read-only dictionary. A rejected SOAC clear
+   terminates the process; it
    never silently ignores the write, leaves an exception behind this ``void``
    API, or removes the policy.  The Python :meth:`dict.clear` method instead
    raises an exception before mutation.  See :ref:`soac-dict-policies`.
@@ -461,8 +462,9 @@ They are not part of upstream CPython or its Stable ABI.  A per-interpreter
 side table owns policy metadata; the dictionary, not the interpreter, owns and
 traverses the policy's Python owner reference.
 
-The initial production boundary supports namespaces with exact :class:`str`
-keys.  Dictionary subclasses, free-threaded builds, and the interpreter-owned
+The production boundary distinguishes exact-string namespaces, indexed instance
+storage, and read-only dictionaries with arbitrary existing keys. Dictionary
+subclasses, free-threaded builds, and the interpreter-owned
 ``sys``, ``builtins``, and ``sys.modules`` dictionaries are rejected.  Use a
 loader-owned builtins snapshot.  A policy does not establish fixed instance
 layout, stable physical field indices, type immutability, or a compiled-code
@@ -541,7 +543,28 @@ capability.  Those require separately verified native owners.
    ``PyDict_SOAC_ALLOW_NONSTRING_KEYS`` (``1``) instead selects an instance
    dictionary policy and requires an existing stable-prefix dictionary. It
    permits ordinary arbitrary keys and overflow without revoking the fixed
-   prefix or renumbering its fields. Existing values are validated with ``PyDict_SOAC_VALIDATE_INITIAL``
+   prefix or renumbering its fields.
+
+   ``PyDict_SOAC_READ_ONLY`` (``2``) freezes the existing dictionary contents
+   without converting its storage or replacing, normalizing, hashing, or
+   comparing its keys. It accepts arbitrary existing keys, including string
+   subclasses, and preserves dictionary identity and insertion order. The
+   native kernel rejects every actual insertion, replacement, deletion, cache
+   write, and clear, even if the callback would approve it. Read-like operations
+   such as ``setdefault`` on a present key, ``pop`` with a missing-key default,
+   and empty/self updates can still succeed without changing contents. Normal
+   key-lookup errors precede rejection of a resolved write.
+
+   Read-only storage grants no namespace, instance-layout, or stable-lookup
+   authority. A custom key's equality can still change without dictionary
+   mutation; keyword binding must retain ordinary lookup and applicable value
+   checks. If the dictionary aliases an ordinary object's ``__dict__``, writes
+   through that object are also rejected, but replacing the object's dictionary
+   or making an otherwise valid ``__class__`` change remains permitted: the
+   old read-only dictionary retains its identity and contents.
+
+   These three policy modes are mutually exclusive. Existing values are
+   validated with ``PyDict_SOAC_VALIDATE_INITIAL``
    before installation succeeds, so an immutable owner needs no temporarily
    permissive state to distinguish initialization.  A failed initial scan
    publishes no policy.  Return ``0`` on success or ``-1`` with an exception.
@@ -558,13 +581,35 @@ capability.  Those require separately verified native owners.
    writes still require the native callback's approval, including allowed
    lexical mutable bindings and late appends.  Return ``0`` on success or
    ``-1`` with an exception.  Repeated sealing of a live sealed namespace is
-   harmless; terminal owners cannot be resealed or revived.
+   harmless; terminal owners cannot be resealed or revived. Instance and
+   read-only policies are not namespaces and cannot use this operation.
 
 .. c:function:: int PyDict_HasSoacPolicy(PyObject *dict)
 
    Return whether an exact dictionary has a policy marker.  This is a guard
    for native direct-write paths, not proof that any type, function, or
    optimized-storage capability has been published.
+
+.. c:function:: int _PyDict_HasSoacBindingPolicy(PyObject *dict)
+
+   The private native attachment guard returns true only for namespace or
+   instance policies, including their terminal markers. Read-only dictionaries
+   return false: freezing their contents does not make an ordinary receiver's
+   dictionary attachment or class identity authoritative. Direct-write and
+   specialization guards must continue using :c:func:`PyDict_HasSoacPolicy`
+   for all policy modes. Neither predicate authenticates an owner or source.
+
+.. c:function:: int _PyDict_HasLiveSoacReadOnlyPolicy(PyObject *dict)
+
+   The private liveness check returns true for a non-terminal read-only policy,
+   including while a rejected mutation executes key hash/equality callbacks.
+   It does not prove successful registration or authenticate an owner: initial
+   validation also runs while the mutation guard is set. A consumer must already
+   prove prior completed installation. For example, an irreversible sealed
+   function identity proves that installation succeeded for its now-immutable
+   keyword-default dictionary pointer. New calls then check liveness without
+   incorrectly rejecting benign read-only reentry. Already-bound activations
+   keep their captured argument values and do not repeat this new-entry check.
 
 .. c:function:: int PyDict_MatchesSoacPolicy(PyObject *dict, PyObject *owner, PyDict_SoacPolicyCallback validate, unsigned int flags)
 

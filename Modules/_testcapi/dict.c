@@ -101,7 +101,7 @@ soac_test_validate_value(SoacTestOwner *owner, PyObject *key, PyObject *value)
     PyObject *expected = PyUnicode_CheckExact(key)
         ? PyDict_GetItemWithError(owner->schema, key) : NULL;
     if (expected == NULL && !PyErr_Occurred() &&
-        (owner->flags & PyDict_SOAC_ALLOW_NONSTRING_KEYS)) {
+        (owner->flags & (PyDict_SOAC_ALLOW_NONSTRING_KEYS | PyDict_SOAC_READ_ONLY))) {
         expected = Py_None;
     }
     if (expected == NULL) {

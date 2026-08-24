@@ -4059,7 +4059,7 @@ _PyObject_SetDict(PyObject *obj, PyObject *value)
                         "This object has no __dict__");
         return -1;
     }
-    if (*dictptr != NULL && PyDict_HasSoacPolicy(*dictptr)) {
+    if (_PyDict_HasSoacBindingPolicy(*dictptr)) {
         PyObject *error = PySoac_GetStrictMutationError();
         if (error != NULL) {
             PyErr_SetString(error, "cannot replace an authoritative protected dictionary");
@@ -7744,7 +7744,7 @@ object_set_class(PyObject *self, PyObject *value, void *closure)
 {
     if (PyModule_Check(self)) {
         PyObject *dict = ((PyModuleObject *)self)->md_dict;
-        if (dict != NULL && PyDict_HasSoacPolicy(dict)) {
+        if (_PyDict_HasSoacBindingPolicy(dict)) {
             PyObject *error = PySoac_GetStrictMutationError();
             if (error != NULL) {
                 PyErr_SetString(error, "cannot replace a protected module's __class__");

@@ -195,6 +195,26 @@ PyDict_HasSoacPolicy(PyObject *dict)
 }
 
 int
+_PyDict_HasSoacBindingPolicy(PyObject *dict)
+{
+    return PyDict_HasSoacPolicy(dict) &&
+        soac_policy((PyDictObject *)dict)->flags != PyDict_SOAC_READ_ONLY;
+}
+
+int
+_PyDict_HasLiveSoacReadOnlyPolicy(PyObject *dict)
+{
+    if (!PyDict_HasSoacPolicy(dict)) {
+        return 0;
+    }
+    SoacDictPolicy *policy = soac_policy((PyDictObject *)dict);
+    /* A failed write's hash/equality callback may read already-frozen
+       bindings while mutating is set. This is not an installation proof:
+       INITIAL validation also runs under that guard. */
+    return policy->flags == PyDict_SOAC_READ_ONLY && !policy->terminal;
+}
+
+int
 PyDict_MatchesSoacPolicy(PyObject *dict, PyObject *owner,
                          PyDict_SoacPolicyCallback validate, unsigned int flags)
 {
@@ -211,7 +231,7 @@ static int
 soac_check_key(PyDictObject *dict, PyObject *key)
 {
     if (_PyDict_HasSoacPolicy(dict) &&
-        !(soac_policy(dict)->flags & PyDict_SOAC_ALLOW_NONSTRING_KEYS) &&
+        soac_policy(dict)->flags == 0 &&
         !PyUnicode_CheckExact(key)) {
         PyErr_SetString(soac_mutation_error(),
                         "SOAC dictionary writes require exact string keys");
@@ -243,6 +263,15 @@ soac_validate(SoacDictPolicy *policy, PyDictObject *dict,
               PyObject *key, PyObject *value, int operation, PyObject *provenance)
 {
     assert(policy->mutating && !policy->terminal && policy->owner != NULL);
+    if (policy->flags == PyDict_SOAC_READ_ONLY &&
+        operation != PyDict_SOAC_VALIDATE_INITIAL &&
+        operation != PyDict_SOAC_TERMINAL_TEARDOWN) {
+        /* This mode never permits the mutable non-indexed arbitrary-key
+           commit path, even if the owner's callback would approve it. */
+        PyErr_SetString(soac_mutation_error(),
+                        "cannot mutate a read-only SOAC dictionary");
+        return -1;
+    }
     if (operation == PyDict_SOAC_DELETE && soac_clear_key_pending(policy, key)) {
         /* Stock split clear has already subtracted these values from used.
            A reentrant deletion would underflow/corrupt that count. */
@@ -295,7 +324,9 @@ PyDict_SetSoacPolicy(PyObject *op, PyObject *owner,
     return -1;
 #else
     if (op == NULL || !PyDict_CheckExact(op) || owner == NULL ||
-        validate == NULL || (flags & ~PyDict_SOAC_ALLOW_NONSTRING_KEYS) != 0) {
+        validate == NULL ||
+        (flags != 0 && flags != PyDict_SOAC_ALLOW_NONSTRING_KEYS &&
+         flags != PyDict_SOAC_READ_ONLY)) {
         PyErr_SetString(PyExc_TypeError,
                         "SOAC policy requires an exact dict, owner, callback and supported flags");
         return -1;
@@ -321,8 +352,7 @@ PyDict_SetSoacPolicy(PyObject *op, PyObject *owner,
     Py_ssize_t pos = 0;
     PyObject *key, *value;
     while (PyDict_Next(op, &pos, &key, &value)) {
-        if (!(flags & PyDict_SOAC_ALLOW_NONSTRING_KEYS) &&
-            !PyUnicode_CheckExact(key)) {
+        if (flags == 0 && !PyUnicode_CheckExact(key)) {
             PyErr_SetString(PyExc_TypeError,
                             "SOAC dictionaries require exact string keys");
             return -1;
@@ -379,8 +409,8 @@ PyDict_SealSoacNamespace(PyObject *dict)
         return -1;
     }
     SoacDictPolicy *policy = soac_policy((PyDictObject *)dict);
-    if (policy->flags & PyDict_SOAC_ALLOW_NONSTRING_KEYS) {
-        PyErr_SetString(PyExc_TypeError, "an instance dictionary is not a namespace");
+    if (policy->flags != 0) {
+        PyErr_SetString(PyExc_TypeError, "only a SOAC namespace policy can be sealed");
         return -1;
     }
     if (soac_begin_mutation(policy) < 0) {
@@ -5763,7 +5793,7 @@ soac_merge(PyDictObject *dict, PyObject *source, int override, int sequence)
         result = 0;
         goto validated;
     }
-    int allow_nonstrings = (policy->flags & PyDict_SOAC_ALLOW_NONSTRING_KEYS) != 0;
+    int allow_nonstrings = policy->flags != 0;
     if (soac_stage_bulk(source, sequence, allow_nonstrings, &items, &hashes) < 0) {
         goto validation_error;
     }
@@ -9726,7 +9756,7 @@ _PyObject_SetManagedDict(PyObject *obj, PyObject *new_dict)
 {
     assert(Py_TYPE(obj)->tp_flags & Py_TPFLAGS_MANAGED_DICT);
     PyDictObject *protected_dict = _PyObject_GetManagedDict(obj);
-    if (protected_dict != NULL && _PyDict_HasSoacPolicy(protected_dict)) {
+    if (_PyDict_HasSoacBindingPolicy((PyObject *)protected_dict)) {
         PyErr_SetString(soac_mutation_error(),
                         "cannot replace a SOAC instance dictionary");
         return -1;
