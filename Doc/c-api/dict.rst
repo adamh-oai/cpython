@@ -524,6 +524,25 @@ capability.  Those require separately verified native owners.
    value. Attribute deletion and namespace policies retain their ordinary
    dictionary operations. It is not a runtime-cache or initialization permit.
 
+   ``PyDict_SOAC_CLASS_MEMBER_INSERT`` (``10``) and
+   ``PyDict_SOAC_CLASS_MEMBER_REPLACE`` (``11``) are reserved for
+   :c:func:`PyType_SetSoacDataclassMember`. Their non-``NULL`` *provenance* is
+   one opaque native member operation, bound to the actual invocation, class,
+   owner, name, and fresh function. They are not general mapping, attribute,
+   or cache permissions. The private dictionary entry accepts only the exact
+   class namespace and its indexed storage; it has no ordinary-dictionary
+   fallback.
+
+   The kernel validates that same operation before and after the last watcher,
+   even when the policy pointer is unchanged. A watcher can invalidate the
+   invocation without replacing the policy. No hash or equality lookup is
+   replayed. The shared type setter updates normal type versions and slots,
+   then finishes the operation before releasing displaced values. Reentrant
+   finalizers therefore cannot replay a pending operation. Failure never
+   removes existing class or function protection. Only authenticated frozen
+   setter/deleter roles may pass the corresponding pre-seal hook restriction;
+   sealed, terminal, final-method, and field-descriptor barriers still apply.
+
    ``PyDict_SOAC_TERMINAL_TEARDOWN`` is a non-rejectable, irreversible
    notification before unreachable-GC or terminal module cleanup invalidates
    contents.  The owner must prevent dependent execution before returning.

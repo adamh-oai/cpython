@@ -36,9 +36,50 @@
    and __phello__.spam.  Loading any will print some famous words... */
 
 #include "Python.h"
+#include "marshal.h"
 #include "pycore_import.h"
 
 #include <stdbool.h>
+
+/* Attestation recipes, not entries in any frozen import table. These build
+ * outputs are included only here: bootstrap/freezer executables omit frozen.o,
+ * so generation cannot create a compiler/library dependency cycle. */
+#include "frozen_modules/soac_dataclasses.h"
+#include "frozen_modules/soac_reprlib.h"
+
+PyObject *
+PySoac_GetDataclassRecipe(unsigned int kind)
+{
+    const unsigned char *data;
+    Py_ssize_t size;
+    switch (kind) {
+        case Py_SOAC_DATACLASS_RECIPE_DATACLASSES:
+            data = _Py_M__dataclasses;
+            size = sizeof(_Py_M__dataclasses);
+            break;
+        case Py_SOAC_DATACLASS_RECIPE_REPRLIB:
+            data = _Py_M__reprlib;
+            size = sizeof(_Py_M__reprlib);
+            break;
+        default:
+            PyErr_SetString(PyExc_ValueError, "invalid native dataclass recipe kind");
+            return NULL;
+    }
+    /* Decode cold for each requesting owner. No module is imported/executed,
+     * no runtime source path is read, and no global Python root is retained. */
+    PyObject *code = PyMarshal_ReadObjectFromString((const char *)data, size);
+    if (code == NULL) {
+        return NULL;
+    }
+    if (!PyCode_Check(code) ||
+        (((PyCodeObject *)code)->co_flags & CO_FUTURE_STRICT) ||
+        ((PyCodeObject *)code)->_co_soac_strict_source_id != 0) {
+        Py_DECREF(code);
+        PyErr_SetString(PyExc_SystemError, "native dataclass recipe is not ordinary code");
+        return NULL;
+    }
+    return code;
+}
 
 /* Includes for frozen modules: */
 #include "frozen_modules/importlib._bootstrap.h"

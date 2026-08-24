@@ -3939,7 +3939,8 @@ dummy_func(
                 callable,
                 arguments,
                 total_args,
-                PyStackRef_NULL);
+                PyStackRef_NULL,
+                frame);
             DEAD(args);
             DEAD(self_or_null);
             DEAD(callable);
@@ -4018,10 +4019,8 @@ dummy_func(
             tstate->py_recursion_remaining--;
             LOAD_SP();
             LOAD_IP(0);
-            if (_PyFrame_GetCode(frame)->co_flags & CO_FUTURE_STRICT) {
-                int allowed = _PyFrame_CheckSoacExecution(frame);
-                ERROR_IF(allowed < 0);
-            }
+            int allowed = _PyFrame_CheckSoacExecution(frame);
+            ERROR_IF(allowed < 0);
             LLTRACE_RESUME_FRAME();
         }
 
@@ -4293,6 +4292,9 @@ dummy_func(
             PyObject *callable_o = PyStackRef_AsPyObjectBorrow(callable);
             DEOPT_IF(!PyCFunction_CheckExact(callable_o));
             DEOPT_IF(PyCFunction_GET_FLAGS(callable_o) != METH_FASTCALL);
+            /* A call site warmed with another FASTCALL builtin may later
+             * receive a native dataclass helper; keep its explicit parent. */
+            DEOPT_IF(_PySOAC_DataclassIsBridgeImplementation(callable_o));
             STAT_INC(CALL, hit);
             PyObject *res_o = _Py_BuiltinCallFast_StackRefSteal(
                 callable,
@@ -4324,6 +4326,7 @@ dummy_func(
             PyObject *callable_o = PyStackRef_AsPyObjectBorrow(callable);
             DEOPT_IF(!PyCFunction_CheckExact(callable_o));
             DEOPT_IF(PyCFunction_GET_FLAGS(callable_o) != (METH_FASTCALL | METH_KEYWORDS));
+            DEOPT_IF(_PySOAC_DataclassIsBridgeImplementation(callable_o));
             STAT_INC(CALL, hit);
             PyObject *res_o = _Py_BuiltinCallFastWithKeywords_StackRefSteal(callable, arguments, total_args);
             DEAD(args);
@@ -4821,7 +4824,8 @@ dummy_func(
                 callable,
                 arguments,
                 total_args,
-                kwnames);
+                kwnames,
+                frame);
             DEAD(kwnames);
             DEAD(args);
             DEAD(self_or_null);
@@ -4881,7 +4885,8 @@ dummy_func(
                 if (err) {
                     ERROR_NO_POP();
                 }
-                result_o = PyObject_Call(func, callargs, kwargs);
+                result_o = _PySOAC_DataclassObjectCallFromFrame(
+                    frame, func, callargs, kwargs);
 
                 if (!PyFunction_Check(func) && !PyMethod_Check(func)) {
                     if (result_o == NULL) {
@@ -4928,7 +4933,8 @@ dummy_func(
                 assert(PyTuple_CheckExact(callargs));
                 PyObject *kwargs = PyStackRef_AsPyObjectBorrow(kwargs_st);
                 assert(kwargs == NULL || PyDict_CheckExact(kwargs));
-                result_o = PyObject_Call(func, callargs, kwargs);
+                result_o = _PySOAC_DataclassObjectCallFromFrame(
+                    frame, func, callargs, kwargs);
             }
             PyStackRef_XCLOSE(kwargs_st);
             PyStackRef_CLOSE(callargs_st);
@@ -5007,7 +5013,8 @@ dummy_func(
             assert(PyTuple_CheckExact(callargs));
             PyObject *kwargs = PyStackRef_AsPyObjectBorrow(kwargs_st);
             assert(kwargs == NULL || PyDict_CheckExact(kwargs));
-            PyObject *result_o = PyObject_Call(func, callargs, kwargs);
+            PyObject *result_o = _PySOAC_DataclassObjectCallFromFrame(
+                frame, func, callargs, kwargs);
             PyStackRef_XCLOSE(kwargs_st);
             PyStackRef_CLOSE(callargs_st);
             DEAD(null);
@@ -5033,7 +5040,7 @@ dummy_func(
             PyObject *codeobj = PyStackRef_AsPyObjectBorrow(codeobj_st);
 
             PyFunctionObject *func_obj = (PyFunctionObject *)
-                PyFunction_New(codeobj, GLOBALS());
+                _PySOAC_FunctionFromFrame(codeobj, GLOBALS(), frame);
 
             PyStackRef_CLOSE(codeobj_st);
             ERROR_IF(func_obj == NULL);

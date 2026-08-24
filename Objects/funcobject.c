@@ -1,10 +1,13 @@
 /* Function object implementation */
 
 #include "Python.h"
+#include "pycore_call.h"          // _PyStack_UnpackDict()
+#include "pycore_ceval.h"         // _PyEval_EnsureBuiltins()
 #include "pycore_code.h"          // _PyCode_VerifyStateless()
 #include "pycore_descrobject.h"   // propertyobject
 #include "pycore_dict.h"          // _Py_INCREF_DICT()
 #include "pycore_function.h"      // _PyFunction_Vectorcall
+#include "pycore_interpframe.h"   // Native dataclass frame views
 #include "pycore_long.h"          // _PyLong_GetOne()
 #include "pycore_modsupport.h"    // _PyArg_NoKeywords()
 #include "pycore_object.h"        // _PyObject_GC_UNTRACK()
@@ -12,7 +15,9 @@
 #include "pycore_pyerrors.h"      // _PyErr_Occurred()
 #include "pycore_setobject.h"     // _PySet_NextEntry()
 #include "pycore_stats.h"
+#include "pycore_tuple.h"         // _PyTuple_ITEMS()
 #include "pycore_weakref.h"       // FT_CLEAR_WEAKREFS()
+#include "pycore_unicodeobject.h" // _PyUnicode_Equal()
 #include "pycore_optimizer.h"     // _PyJit_Tracer_InvalidateDependency
 
 static const char *
@@ -342,6 +347,8 @@ PySoac_CloneAnnotationReplayCode(PyObject *provider, PyObject *expected_owner,
     return result;
 }
 
+#include "soac_dataclass.inc"
+
 int
 PyFunction_AddWatcher(PyFunction_WatchCallback callback)
 {
@@ -424,8 +431,9 @@ _PyFunction_FromConstructor(PyFrameConstructor *constr)
     return op;
 }
 
-PyObject *
-PyFunction_NewWithQualName(PyObject *code, PyObject *globals, PyObject *qualname)
+static PyObject *
+func_new_with_qualname(PyObject *code, PyObject *globals, PyObject *qualname,
+                       _PyInterpreterFrame *producer)
 {
     assert(globals != NULL);
     assert(PyDict_Check(globals));
@@ -461,6 +469,7 @@ PyFunction_NewWithQualName(PyObject *code, PyObject *globals, PyObject *qualname
     // __module__: Use globals['__name__'] if it exists, or NULL.
     PyObject *module;
     PyObject *builtins = NULL;
+    SoacDataclassRecord *record = NULL;
     if (PyDict_GetItemRef(globals, &_Py_ID(__name__), &module) < 0) {
         goto error;
     }
@@ -469,13 +478,17 @@ PyFunction_NewWithQualName(PyObject *code, PyObject *globals, PyObject *qualname
     if (builtins == NULL) {
         goto error;
     }
+    record = soac_dataclass_new_record(producer, code);
+    if (record == NULL && PyErr_Occurred()) {
+        goto error;
+    }
 
     PyFunctionObject *op = PyObject_GC_New(PyFunctionObject, &PyFunction_Type);
     if (op == NULL) {
         goto error;
     }
-    /* Note: No failures from this point on, since func_dealloc() does not
-       expect a partially-created object. */
+    /* Initialize every field before validating an optional native record.
+       An unpublished failure frees the untracked allocation directly. */
 
     op->func_globals = globals;
     op->func_builtins = builtins;
@@ -501,6 +514,14 @@ PyFunction_NewWithQualName(PyObject *code, PyObject *globals, PyObject *qualname
     op->func_soac_strict_owner = NULL;
     op->func_soac_strict_owner_state = FUNC_SOAC_OWNER_NONE;
     op->func_soac_required_boundary = 0;
+    if (record != NULL && soac_dataclass_attach_record(op, record, producer) < 0) {
+        /* The object was never tracked or published to CREATE watchers.
+         * Its component references are still the locals released at error. */
+        PyObject_GC_Del(op);
+        goto error;
+    }
+    Py_XDECREF(record);
+    record = NULL;
     if (((code_obj->co_flags & CO_NESTED) == 0) ||
         (code_obj->co_flags & CO_METHOD)) {
         // Use deferred reference counting for top-level functions, but not
@@ -516,6 +537,7 @@ PyFunction_NewWithQualName(PyObject *code, PyObject *globals, PyObject *qualname
     return (PyObject *)op;
 
 error:
+    Py_XDECREF(record);
     Py_DECREF(globals);
     Py_DECREF(code_obj);
     Py_DECREF(name);
@@ -524,6 +546,19 @@ error:
     Py_XDECREF(module);
     Py_XDECREF(builtins);
     return NULL;
+}
+
+PyObject *
+PyFunction_NewWithQualName(PyObject *code, PyObject *globals, PyObject *qualname)
+{
+    return func_new_with_qualname(code, globals, qualname, NULL);
+}
+
+PyObject *
+_PySOAC_FunctionFromFrame(PyObject *code, PyObject *globals,
+                         _PyInterpreterFrame *producer)
+{
+    return func_new_with_qualname(code, globals, NULL, producer);
 }
 
 /*
@@ -1512,6 +1547,7 @@ static int
 func_clear(PyObject *self)
 {
     PyFunctionObject *op = _PyFunction_CAST(self);
+    soac_dataclass_function_clear(op);
     /* Mark terminal before globals, defaults, owner, or metadata DECREFs can
      * run callbacks. Clearing never makes an assigned owner reinstallable and
      * never revokes the function's permanent semantic identity. */
@@ -1560,6 +1596,7 @@ func_dealloc(PyObject *self)
     if (_PyObject_ResurrectEnd(self)) {
         return;
     }
+    soac_dataclass_function_clear(op);
 #if _Py_TIER2
     _Py_Executors_InvalidateDependency(_PyInterpreterState_GET(), self, 1);
     _PyJit_Tracer_InvalidateDependency(_PyThreadState_GET(), self);

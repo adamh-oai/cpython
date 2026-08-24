@@ -15,6 +15,7 @@
 #include "pycore_pyerrors.h"      // _PyErr_NoMemory()
 #include "pycore_pystate.h"       // _PyThreadState_GET()
 #include "pycore_pythonrun.h"     // _Py_SourceAsString()
+#include "pycore_soac_dataclass.h" // Native builtin creation witnesses
 #include "pycore_tuple.h"         // _PyTuple_Recycle()
 
 #include "clinic/bltinmodule.c.h"
@@ -3568,6 +3569,38 @@ static PyMethodDef builtin_methods[] = {
     {NULL,              NULL},
 };
 
+int
+PySoac_MatchesBuiltinFunction(PyObject *actual, const char *name,
+                             Py_ssize_t name_length)
+{
+    if (actual == NULL || name == NULL || name_length < 0) {
+        PyErr_BadInternalCall();
+        return -1;
+    }
+    if (!PyCFunction_CheckExact(actual)) {
+        return 0;
+    }
+    PyCFunctionObject *function = (PyCFunctionObject *)actual;
+    for (PyMethodDef *entry = builtin_methods; entry->ml_name != NULL; entry++) {
+        if ((size_t)name_length != strlen(entry->ml_name) ||
+            memcmp(name, entry->ml_name, (size_t)name_length) != 0) {
+            continue;
+        }
+        if (function->m_ml != entry || !_PyCFunction_HasDefaultVectorcall(actual)) {
+            return 0;
+        }
+        /* The native creation witness owns no extra Python root. In
+         * particular, neither sys.modules nor a replaced builtins binding
+         * can introduce a different module as the expected bound self. */
+        PyObject *original = PySoac_GetDataclassBuiltin(Py_SOAC_DATACLASS_BUILTIN_EXEC);
+        if (original == NULL) {
+            return PyErr_Occurred() ? -1 : 0;
+        }
+        return function->m_self == ((PyCFunctionObject *)original)->m_self;
+    }
+    return 0;
+}
+
 enum soac_context_builtin {
     SOAC_CONTEXT_NONE,
     SOAC_CONTEXT_GLOBALS,
@@ -3719,6 +3752,32 @@ _PyBuiltin_Init(PyInterpreterState *interp)
     PyUnstable_Module_SetGIL(mod, Py_MOD_GIL_NOT_USED);
 #endif
     dict = PyModule_GetDict(mod);
+
+    /* Capture these exact native objects before the newly-created builtins
+     * module is published. A later _types import or Python binding lookup
+     * cannot bless a replacement, even one with the same C implementation. */
+    PyObject *soac_exec = PyDict_GetItemString(dict, "exec");
+    PyObject *soac_setattr = PyDict_GetItemString(dict, "setattr");
+    if (soac_exec == NULL || soac_setattr == NULL ||
+        !PyCFunction_CheckExact(soac_exec) ||
+        !PyCFunction_CheckExact(soac_setattr) ||
+        PyCFunction_GET_SELF(soac_exec) != mod ||
+        PyCFunction_GET_SELF(soac_setattr) != mod ||
+        PyCFunction_GET_FUNCTION(soac_exec) != _PyCFunction_CAST(builtin_exec) ||
+        PyCFunction_GET_FUNCTION(soac_setattr) != _PyCFunction_CAST(builtin_setattr)) {
+        Py_DECREF(mod);
+        if (!PyErr_Occurred()) {
+            PyErr_SetString(PyExc_SystemError, "builtins native creation identity mismatch");
+        }
+        return NULL;
+    }
+    if (_PySOAC_DataclassCaptureBuiltin(
+            interp, Py_SOAC_DATACLASS_BUILTIN_EXEC, soac_exec) < 0 ||
+        _PySOAC_DataclassCaptureBuiltin(
+            interp, Py_SOAC_DATACLASS_BUILTIN_SETATTR, soac_setattr) < 0) {
+        Py_DECREF(mod);
+        return NULL;
+    }
 
 #ifdef Py_TRACE_REFS
     /* "builtins" exposes a number of statically allocated objects

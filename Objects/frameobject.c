@@ -1946,6 +1946,8 @@ frame_dealloc(PyObject *op)
 
     /* Kill all local variables including specials, if we own them */
     if (f->f_frame == frame && frame->owner == FRAME_OWNED_BY_FRAME_OBJECT) {
+        frame->soac_dataclass_role = 0;
+        Py_CLEAR(frame->soac_dataclass_invocation);
         PyStackRef_CLEAR(frame->f_executable);
         PyStackRef_CLEAR(frame->f_funcobj);
         Py_CLEAR(frame->f_locals);
@@ -1984,6 +1986,8 @@ static int
 frame_tp_clear(PyObject *op)
 {
     PyFrameObject *f = PyFrameObject_CAST(op);
+    f->f_frame->soac_dataclass_role = 0;
+    Py_CLEAR(f->f_frame->soac_dataclass_invocation);
     Py_CLEAR(f->f_trace);
     Py_CLEAR(f->f_extra_locals);
     Py_CLEAR(f->f_locals_cache);

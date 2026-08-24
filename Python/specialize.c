@@ -1767,6 +1767,12 @@ specialize_py_call_kw(PyFunctionObject *func, _Py_CODEUNIT *instr, int nargs,
 static int
 specialize_c_call(PyObject *callable, _Py_CODEUNIT *instr, int nargs)
 {
+    /* These private helpers require the actual opcode parent/operand, not a
+     * context-free specialized call into their ordinary C implementation. */
+    if (_PySOAC_DataclassIsBridgeImplementation(callable)) {
+        SPECIALIZATION_FAIL(CALL, SPEC_FAIL_OTHER);
+        return 1;
+    }
     if (PyCFunction_GET_FUNCTION(callable) == NULL) {
         SPECIALIZATION_FAIL(CALL, SPEC_FAIL_OTHER);
         return 1;

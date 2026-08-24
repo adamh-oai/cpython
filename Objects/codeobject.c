@@ -2873,6 +2873,45 @@ PyCode_GetSoacStrictSourceId(PyObject *object)
     return ((PyCodeObject *)object)->_co_soac_strict_source_id;
 }
 
+int
+PySoac_GetCodeView(PyObject *object, PySoacCodeView *out, size_t out_size)
+{
+    if (object == NULL || !PyCode_Check(object)) {
+        PyErr_SetString(PyExc_TypeError, "native code view requires an exact code object");
+        return -1;
+    }
+    if (out == NULL || out_size != sizeof(*out)) {
+        PyErr_SetString(PyExc_ValueError, "native code view has an incompatible output layout");
+        return -1;
+    }
+    PyCodeObject *code = (PyCodeObject *)object;
+    memset(out, 0, sizeof(*out));
+    out->abi_version = Py_SOAC_CODE_VIEW_ABI;
+    out->flags = code->co_flags;
+    out->argcount = code->co_argcount;
+    out->posonlyargcount = code->co_posonlyargcount;
+    out->kwonlyargcount = code->co_kwonlyargcount;
+    out->stacksize = code->co_stacksize;
+    out->firstlineno = code->co_firstlineno;
+    out->nlocalsplus = code->co_nlocalsplus;
+    out->framesize = code->co_framesize;
+    out->nlocals = code->co_nlocals;
+    out->ncellvars = code->co_ncellvars;
+    out->nfreevars = code->co_nfreevars;
+    out->code_units = Py_SIZE(code);
+    out->strict_source_id = code->_co_soac_strict_source_id;
+    out->consts = code->co_consts;
+    out->names = code->co_names;
+    out->localsplusnames = code->co_localsplusnames;
+    out->localspluskinds = code->co_localspluskinds;
+    out->filename = code->co_filename;
+    out->name = code->co_name;
+    out->qualname = code->co_qualname;
+    out->linetable = code->co_linetable;
+    out->exceptiontable = code->co_exceptiontable;
+    return 0;
+}
+
 static int
 soac_replay_code_error(const char *message)
 {

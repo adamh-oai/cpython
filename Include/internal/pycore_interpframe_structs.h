@@ -48,6 +48,11 @@ struct _PyInterpreterFrame {
 #else
     uint8_t visited;
 #endif
+    /* Native adapter provenance, never original-strict-bytecode permission.
+     * The scalar occupies existing GIL-build padding. The GC edge is cleared
+     * when execution ends, even if a Python traceback retains the frame. */
+    unsigned int soac_dataclass_role;
+    PyObject *soac_dataclass_invocation;
     /* Locals and stack */
     _PyStackRef localsplus[1];
 };

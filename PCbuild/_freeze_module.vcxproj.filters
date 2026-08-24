@@ -589,5 +589,12 @@
       <Filter>Python Files</Filter>
     </None>
     <!-- END frozen modules -->
+    <!-- Private SOAC recipes are not part of the frozen import registry. -->
+    <None Include="..\Lib\dataclasses.py">
+      <Filter>Python Files</Filter>
+    </None>
+    <None Include="..\Lib\reprlib.py">
+      <Filter>Python Files</Filter>
+    </None>
   </ItemGroup>
 </Project>

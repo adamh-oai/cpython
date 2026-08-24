@@ -110,6 +110,113 @@ PyAPI_FUNC(PyObject *) PyFunction_GetSoacStrictOwner(PyObject *);
 PyAPI_FUNC(int) PyFunction_MarkSoacRequiredBoundary(PyObject *, PyObject *);
 /* Permanent metadata only, not owner authentication or execution authority. */
 PyAPI_FUNC(int) PyFunction_HasSoacRequiredBoundary(PyObject *);
+/* Exact native generated-function provenance, not source/JIT/check authority.
+ * Has is a role query: 0 for unrelated functions, 1 for this exact attached
+ * record, -1 for a cleared or replayed record. Expired adoption provenance
+ * does not prevent ordinary execution or mutation of an unsealed function.
+ * Matches additionally requires the active invocation, original code, and
+ * producer-assigned role. The caller pins the actual function. */
+PyAPI_FUNC(int) PyFunction_HasSoacDataclassCreation(PyObject *function);
+PyAPI_FUNC(int) PyFunction_MatchesSoacDataclassCreation(
+    PyObject *function, PyObject *invocation, unsigned int role);
+
+/* Private native adapter protocol. Callback views are valid only for the
+ * duration of that callback, never Python objects or reusable capabilities.
+ * Offsets count _Py_CODEUNIT entries, including inline caches, from the
+ * executed code's first instruction (not bytes or instruction ordinals).
+ * Callbacks must not execute Python; successful validation must not allocate.
+ * Enter runs after ordinary argument binding and returns 1 for an explicit
+ * privileged edge, 0 for an ordinary child, or -1 on an invalid transition.
+ * Create has the same return convention and precedes CREATE watchers.
+ * ValidateMember returns 0 for success and -1 for failure.
+ * Bridge also returns 0/-1. SOURCE publishes one reached fragment; EXEC and
+ * MEMBER must support repeated validation across native allocation/audit
+ * boundaries. Compiled receives the exact native compiler result and a
+ * C-allocated weak-only tree: (weakref(code), ((const_index, child_tree), ...)).
+ * It publishes this one compilation without retaining a code/co_consts tree.
+ * The owner must authenticate source fragments/call edges, never accept a
+ * public tuple or a helper name as production authority. */
+#define Py_SOAC_DATACLASS_ABI 1
+#define Py_SOAC_DATACLASS_ROOT_FACTORY 1
+#define Py_SOAC_DATACLASS_ROOT_APPLY 2
+/* Callback-only stage; never accepted by the public root vectorcall. */
+#define Py_SOAC_DATACLASS_GENERATED_EXEC 3
+#define Py_SOAC_DATACLASS_BRIDGE_SOURCE 1
+#define Py_SOAC_DATACLASS_BRIDGE_EXEC 2
+#define Py_SOAC_DATACLASS_BRIDGE_MEMBER 3
+#define Py_SOAC_DATACLASS_BUILTIN_EXEC 4
+#define Py_SOAC_DATACLASS_BUILTIN_SETATTR 5
+#define Py_SOAC_DATACLASS_MEMBER 1
+#define Py_SOAC_DATACLASS_FROZEN_SETATTR 2
+#define Py_SOAC_DATACLASS_FROZEN_DELATTR 3
+#define Py_SOAC_DATACLASS_DECORATOR 256
+#define Py_SOAC_DATACLASS_GENERATED_FACTORY 257
+#define Py_SOAC_DATACLASS_ANNOTATION_PROVIDER 258
+typedef struct _PySoacDataclassFrameView PySoacDataclassFrameView;
+typedef struct {
+    unsigned int abi_version;
+    int (*enter)(PyObject *, unsigned int,
+                 const PySoacDataclassFrameView *,
+                 const PySoacDataclassFrameView *, unsigned int *);
+    int (*create)(PyObject *, const PySoacDataclassFrameView *,
+                  PyObject *, unsigned int *);
+    int (*validate_member)(PyObject *, PyObject *, PyObject *,
+                           PyObject *, PyObject *, unsigned int);
+    int (*bridge)(PyObject *, const PySoacDataclassFrameView *, PyObject *,
+                  unsigned int, PyObject *const *, Py_ssize_t);
+    int (*compiled)(PyObject *, const PySoacDataclassFrameView *, PyObject *,
+                    PyObject *, PyObject *);
+} PySoacDataclassCallbacks;
+
+/* One immutable callback table per interpreter, closed before teardown. */
+PyAPI_FUNC(int) PySoac_SetDataclassCallbacks(const PySoacDataclassCallbacks *);
+PyAPI_FUNC(PyObject *) PySoac_NewDataclassInvocation(PyObject *owner);
+PyAPI_FUNC(PyObject *) PySoac_DataclassVectorcall(
+    PyObject *invocation, unsigned int root_stage, PyObject *callable,
+    PyObject *const *args, size_t nargsf, PyObject *kwnames);
+/* Called exactly once after the native class contract is installed, before
+ * PyType_Ready callbacks. No allocation or Python call on success. */
+PyAPI_FUNC(int) PySoac_DataclassBindClass(
+    PyObject *invocation, PyObject *actual_type, PyObject *expected_class_owner);
+PyAPI_FUNC(int) PySoac_CompleteDataclassInvocation(PyObject *invocation);
+PyAPI_FUNC(int) PySoac_FailDataclassInvocation(PyObject *invocation);
+/* Only before BindClass: permanently disable adoption, but preserve ordinary
+ * decorator execution and unsealed generated-function metadata semantics. */
+PyAPI_FUNC(int) PySoac_DeclineDataclassInvocation(PyObject *invocation);
+/* Borrowed canonical native object, NULL/no error if absent/dead. The weak
+ * witnesses are captured at native creation, not from mutable module attrs;
+ * an expired witness is never replaced. Invalid kind raises ValueError. */
+PyAPI_FUNC(PyObject *) PySoac_GetDataclassBuiltin(unsigned int kind);
+/* Fresh ordinary code decoded from a native-build frozen recipe. No module
+ * execution, mutable __file__ lookup, or persistent Python code roots.
+ * Recipes use optimize=0 and <frozen NAME> filenames; consumers project the
+ * filename explicitly and attest the rest of the complete graph/environment. */
+#define Py_SOAC_DATACLASS_RECIPE_DATACLASSES 1
+#define Py_SOAC_DATACLASS_RECIPE_REPRLIB 2
+PyAPI_FUNC(PyObject *) PySoac_GetDataclassRecipe(unsigned int kind);
+/* Semantic builtin implementation match for a trusted counted native name.
+ * Requires the private builtin method-table entry, its default native entry,
+ * and the creation-witnessed current builtin-module self. Equivalent copies
+ * of that native function may match; this never grants a privileged bridge's
+ * canonical-object authority. Returns 1/0, or -1 for invalid/closed state.
+ * Successful matching is allocation/callback-free; no Python attrs are read. */
+PyAPI_FUNC(int) PySoac_MatchesBuiltinFunction(
+    PyObject *actual, const char *name, Py_ssize_t name_length);
+
+/* Borrowed results. Local returns NULL/no error for an unbound slot; a bound
+ * Python None is Py_None. CellValue distinguishes an empty actual cell
+ * (NULL/no error) from a non-cell slot (NULL/TypeError). Invalid indices
+ * raise IndexError. No accessor materializes f_locals or calls Python. */
+PyAPI_FUNC(PyObject *) PySoac_DataclassFrameFunction(const PySoacDataclassFrameView *);
+PyAPI_FUNC(PyObject *) PySoac_DataclassFrameCode(const PySoacDataclassFrameView *);
+PyAPI_FUNC(PyObject *) PySoac_DataclassFrameGlobals(const PySoacDataclassFrameView *);
+PyAPI_FUNC(PyObject *) PySoac_DataclassFrameBuiltins(const PySoacDataclassFrameView *);
+PyAPI_FUNC(PyObject *) PySoac_DataclassFrameLocal(
+    const PySoacDataclassFrameView *, Py_ssize_t);
+PyAPI_FUNC(PyObject *) PySoac_DataclassFrameCellValue(
+    const PySoacDataclassFrameView *, Py_ssize_t);
+PyAPI_FUNC(unsigned int) PySoac_DataclassFrameRole(const PySoacDataclassFrameView *);
+PyAPI_FUNC(Py_ssize_t) PySoac_DataclassFrameInstruction(const PySoacDataclassFrameView *);
 /* The trusted caller must authenticate the provider's source role, logical
  * owner, and complete capture layout. This checks the actual native function
  * owner/code identity and recursively clones ordinary code with no SOAC IDs.

@@ -250,6 +250,124 @@ before the companion clear. It does not roll back the first write, delay the
 finalizer, or mutate metadata after sealing. A missing companion requires no
 write and does not cause this partial-progress error.
 
+The internal builtin-descriptor seals compare the actual static/class method
+callable or every property accessor before freezing those component bindings.
+They are mechanical seals, not proofs of source ownership. Reinitializing a
+sealed descriptor is rejected even with identical components. If releasing
+an earlier property component runs a finalizer that seals it, already visible
+writes remain visible and the initializer rejects each later component write.
+Ordinary property name/doc metadata and newly returned accessor copies do not
+acquire a component seal from the original descriptor.
+
+
+SOAC Dataclass Invocations
+-------------------------
+
+The private dataclass protocol authorizes one explicit adapter invocation,
+not arbitrary execution of strict code. The trusted runtime installs one
+``PySoacDataclassCallbacks`` table by value in the current interpreter.
+Registration is single assignment; only the identical callback values can
+be registered again. Interpreter teardown closes the table before clearing
+references. Free-threaded builds do not support this protocol.
+
+``PySoac_NewDataclassInvocation`` owns the active, GC-visible catalog owner.
+``PySoac_DataclassVectorcall`` invokes an individually authenticated ordinary
+Python root through normal argument binding. The factory stage precedes class
+construction; the application stage requires ``PySoac_DataclassBindClass``
+with the actual native class and contract owner. Before binding, explicit
+decline releases active catalog edges and preserves ordinary decorator
+behavior. After binding, an incompatible transition fails permanently; it
+does not downgrade or revoke installed restrictions. Successful completion
+also releases active catalog edges. An inert invocation retained by a
+generated function does not retain the class, builder, or helper graph.
+
+The runtime must independently attest the actual ordinary stdlib helper
+graph against verified source, including nested code, call-site offsets,
+flags/layout, globals, builtins, defaults, closure values, and native entry.
+An equivalent pre-catalog function copy can be an attested helper for this
+one invocation; this does not give it strict-source, JIT, or immutability
+authority. Dynamically created decorators, factories, and members instead
+require their exact native creation records. Names or code similarity alone
+cannot authenticate those objects.
+
+``PySoac_MatchesBuiltinFunction(actual, name, name_length)`` matches a trusted
+counted native name against the compiled builtin method table. It requires
+the exact builtin-function type, the private method-table entry and its
+default native calling-convention entry, and the current builtin-module self
+captured through the original native ``exec`` witness. It does not read
+Python attributes or consult a mutable module binding. An equivalent copy
+using the same native method entry, self, and default vectorcall may match;
+this identifies a calling implementation, not a source or optimization
+capability. Privileged exec/member bridges still require their exact
+canonical builtin objects. Missing/dead witnesses return zero; invalid
+operands or a closed interpreter protocol return minus one with an error.
+Success performs no allocation or Python callback.
+
+``PySoac_GetDataclassRecipe`` supplies a fresh ordinary root code object for
+``Py_SOAC_DATACLASS_RECIPE_DATACLASSES`` or
+``Py_SOAC_DATACLASS_RECIPE_REPRLIB``. The selected native library embeds
+build-generated marshal bytes; retrieval never consults ``__file__``, reads a
+runtime source path, executes a module, or stores a persistent Python root.
+The recipes use optimization level zero and ``<frozen NAME>`` filenames.
+Consumers must handle that filename projection explicitly; differently
+optimized or otherwise unmatched actual graphs must decline before binding.
+``make regen-soac-dataclass-recipes`` regenerates these build-directory headers
+with the same bootstrap compiler as normal frozen modules. The recipe names
+are not registered as frozen imports.
+
+``PySoac_GetCodeView(code, out, out_size)`` exposes the exact code's borrowed
+immutable fields and scalar layout without allocation or Python calls.
+``out_size`` must be ``sizeof(PySoacCodeView)``; the returned view has ABI
+version ``Py_SOAC_CODE_VIEW_ABI``. The caller keeps the code alive. The view
+includes names/constants, locals-plus names and kinds, line/exception tables,
+flags and argument/frame counts, and the native strict source ID. Mutable
+quickening, monitoring, version, and executor state is not structural source
+authority. ``PyCode_GetCode`` may materialize bytecode during cold preparation;
+it must not run in effect-free role callbacks. Neither API authenticates an
+arbitrary actual function, globals, closure, or helper class by itself.
+
+Callbacks receive borrowed, callback-duration frame views. Instruction
+offsets count code units including inline caches, not byte offsets or
+instruction ordinals. Local and cell accessors do not materialize locals or
+invoke Python. Callbacks must not call Python; successful validation must not
+allocate. Entry runs after binding, with exact executed code and actual
+callee/environment operands. Only a direct opcode-dispatched Python edge
+can carry an immediate parent's context. Public C call APIs, C proxies,
+ordinary callbacks, and type-call trampolines do not inherit that context.
+Monitoring and specialized call paths preserve this boundary explicitly.
+
+Native ``MAKE_FUNCTION`` publishes a creation record before GC tracking and
+CREATE watchers. It uses the existing single-assignment function owner slot.
+The record has a callback-free weak code witness and no strong edge back to
+its function. Deallocation tombstones the nonowning function identity before
+weak-reference callbacks and reference releases. ``PyFunction_HasSoacDataclassCreation``
+identifies that exact attached role, even after ordinary decline;
+``PyFunction_MatchesSoacDataclassCreation`` additionally requires the live
+invocation, unchanged original code, and expected creation role. Public
+constructors and function/code copies do not copy these records.
+
+The three ``_types`` bridges record reached source fragments, execute the
+exact verified generated text, and install one generated member. Their
+ordinary C entries delegate normally and grant no context. Opcode dispatch
+requires the exact canonical helper object and its implementation. Canonical
+helpers and the original ``exec``/``setattr`` objects have weak witnesses
+captured at native creation; late Python bindings cannot register replacements,
+and dead witnesses are never regranted. The compiled callback receives a
+C-allocated recursive weak-code tree rather than retaining the compiled root
+or its ``co_consts`` graph. The generated factory keeps its ordinary direct
+``CALL_FUNCTION_EX``; no extra C factory wrapper changes argument lifetimes.
+
+Generated-member installation consumes one fresh record, freezes function
+metadata before commit watchers, and passes an explicit operation through the
+normal type/dictionary transaction. Only an exact frozen-setter/deleter role
+can install its corresponding protected hook. Final members, field
+descriptors, sealed classes, and terminal owners remain protected. Operation
+completion precedes displaced-reference finalizers. A generated method still
+has ordinary bytecode and no source/JIT or checked-entry capability. Admission
+must decline if it requires a generated checked-signature policy that the
+runtime has not implemented. Original ``CO_FUTURE_STRICT`` code remains denied
+at every frame entry; no dataclass context relaxes that guard.
+
 
 SOAC Annotation Replay
 ----------------------

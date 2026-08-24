@@ -1901,7 +1901,18 @@ property_init_impl(propertyobject *self, PyObject *fget, PyObject *fset,
         fdel = NULL;
 
     Py_XSETREF(self->prop_get, Py_XNewRef(fget));
+    /* Releasing an earlier component can run a finalizer that adopts and
+     * permanently seals this exact property. Preserve the completed write,
+     * but never commit another component after that callback boundary. */
+    if (self->prop_soac_sealed) {
+        property_soac_mutation_error("cannot reinitialize a sealed strict property");
+        return -1;
+    }
     Py_XSETREF(self->prop_set, Py_XNewRef(fset));
+    if (self->prop_soac_sealed) {
+        property_soac_mutation_error("cannot reinitialize a sealed strict property");
+        return -1;
+    }
     Py_XSETREF(self->prop_del, Py_XNewRef(fdel));
     Py_XSETREF(self->prop_doc, NULL);
     Py_XSETREF(self->prop_name, NULL);

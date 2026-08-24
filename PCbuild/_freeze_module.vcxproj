@@ -402,6 +402,19 @@
     <!-- END frozen modules -->
   </ItemGroup>
   <ItemGroup>
+    <!-- Private SOAC attestation recipes, not frozen importable modules. -->
+    <None Include="..\Lib\dataclasses.py">
+      <ModName>dataclasses</ModName>
+      <IntFile>$(IntDir)soac_dataclasses.g.h</IntFile>
+      <OutFile>$(GeneratedFrozenModulesDir)Python\frozen_modules\soac_dataclasses.h</OutFile>
+    </None>
+    <None Include="..\Lib\reprlib.py">
+      <ModName>reprlib</ModName>
+      <IntFile>$(IntDir)soac_reprlib.g.h</IntFile>
+      <OutFile>$(GeneratedFrozenModulesDir)Python\frozen_modules\soac_reprlib.h</OutFile>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
     <!-- We manually freeze getpath.py rather than through freeze_modules -->
     <GetPath Include="..\Modules\getpath.py">
       <ModName>getpath</ModName>

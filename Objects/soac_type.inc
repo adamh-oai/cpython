@@ -307,10 +307,22 @@ soac_final_override(PyTypeObject *type, PyObject *name)
     return 0;
 }
 
-int
-_PySOAC_CheckClassWrite(PyTypeObject *type, PyObject *name, PyObject *value)
+static int
+soac_check_class_write(PyTypeObject *type, PyObject *name, PyObject *value,
+                       PyObject *member_operation)
 {
     SoacTypeContract *state = soac_type_contract(type);
+    if (member_operation != NULL) {
+        if (state == NULL || state->owner == NULL ||
+            _PySOAC_DataclassCheckMember(member_operation, (PyObject *)type,
+                                         state->owner, name, value) < 0) {
+            if (!PyErr_Occurred()) {
+                PyErr_SetString(soac_type_mutation_error(),
+                                "generated member requires its actual strict class");
+            }
+            return -1;
+        }
+    }
     if (state != NULL) {
         if (soac_contract_live(state) < 0) {
             return -1;
@@ -324,8 +336,9 @@ _PySOAC_CheckClassWrite(PyTypeObject *type, PyObject *name, PyObject *value)
              _PyUnicode_EqualToASCIIString(name, "__class__") ||
              _PyUnicode_EqualToASCIIString(name, "__getattribute__") ||
              _PyUnicode_EqualToASCIIString(name, "__getattr__") ||
-             _PyUnicode_EqualToASCIIString(name, "__setattr__") ||
-             _PyUnicode_EqualToASCIIString(name, "__delattr__"))) {
+             (member_operation == NULL &&
+              (_PyUnicode_EqualToASCIIString(name, "__setattr__") ||
+               _PyUnicode_EqualToASCIIString(name, "__delattr__"))))) {
             PyErr_SetString(soac_type_mutation_error(), "cannot change installed strict class lookup or identity");
             return -1;
         }
@@ -345,6 +358,12 @@ _PySOAC_CheckClassWrite(PyTypeObject *type, PyObject *name, PyObject *value)
         }
     }
     return soac_final_override(type, name);
+}
+
+int
+_PySOAC_CheckClassWrite(PyTypeObject *type, PyObject *name, PyObject *value)
+{
+    return soac_check_class_write(type, name, value, NULL);
 }
 
 /* Dict policies also protect authoritative tp_dict aliases held by native
@@ -367,6 +386,18 @@ soac_class_dictionary_policy(PyObject *owner, PyObject *dict, PyObject *key,
     }
     if (soac_contract_live(state) < 0) {
         return -1;
+    }
+    if (operation == PyDict_SOAC_CLASS_MEMBER_INSERT ||
+        operation == PyDict_SOAC_CLASS_MEMBER_REPLACE) {
+        if (provenance == NULL || state->type == NULL ||
+            dict != state->type->tp_dict) {
+            PyErr_SetString(soac_type_mutation_error(),
+                            "invalid generated-member namespace operation");
+            return -1;
+        }
+        /* Only the exact fresh native role may install frozen setattr/delattr.
+         * Sealed, terminal, final, and field-descriptor barriers still apply. */
+        return soac_check_class_write(state->type, key, value, provenance);
     }
     if (operation == PyDict_SOAC_CACHE_INSERT || operation == PyDict_SOAC_CACHE_REPLACE) {
         if (!state->sealed || provenance == NULL || provenance != state->annotation_provider ||

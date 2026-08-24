@@ -573,6 +573,7 @@ NON_ESCAPING_FUNCTIONS = (
     "PyCFunction_GET_FLAGS",
     "PyCFunction_GET_FUNCTION",
     "PyCFunction_GET_SELF",
+    "_PySOAC_DataclassIsBridgeImplementation",
     "PyCell_GetRef",
     "PyCell_New",
     "PyCell_SwapTakeRef",

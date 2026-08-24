@@ -4,6 +4,7 @@
 #include "pycore_descrobject.h"   // _PyMethodWrapper_Type
 #include "pycore_namespace.h"     // _PyNamespace_Type
 #include "pycore_object.h"        // _PyNone_Type, _PyNotImplemented_Type
+#include "pycore_soac_dataclass.h" // _PySOAC_DataclassAddHelpers()
 #include "pycore_unionobject.h"   // _PyUnion_Type
 
 static int
@@ -48,7 +49,7 @@ _types_exec(PyObject *m)
     EXPORT_STATIC_TYPE("UnionType", _PyUnion_Type);
     EXPORT_STATIC_TYPE("WrapperDescriptorType", PyWrapperDescr_Type);
 #undef EXPORT_STATIC_TYPE
-    return 0;
+    return _PySOAC_DataclassAddHelpers(m);
 }
 
 static struct PyModuleDef_Slot _typesmodule_slots[] = {

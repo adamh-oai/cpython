@@ -20,6 +20,7 @@
 #include "pycore_pystate.h"       // _PyThreadState_GET()
 #include "pycore_setobject.h"    // _PySet_Update()
 #include "pycore_soac_type.h"    // permanent native type policies
+#include "pycore_soac_dataclass.h" // explicit generated-member operations
 #include "pycore_symtable.h"      // _Py_Mangle()
 #include "pycore_typeobject.h"    // struct type_cache
 #include "pycore_unicodeobject.h" // _PyUnicode_Copy
@@ -6602,7 +6603,7 @@ done:
 // the type versions.
 static int
 type_update_dict(PyTypeObject *type, PyDictObject *dict, PyObject *name,
-                 PyObject *value, PyObject **old_value)
+                 PyObject *value, PyObject **old_value, PyObject *member_operation)
 {
     // We don't want any re-entrancy between when we update the dict
     // and call type_modified_unlocked, including running the destructor
@@ -6621,7 +6622,17 @@ type_update_dict(PyTypeObject *type, PyDictObject *dict, PyObject *name,
         recursing into subclasses. */
     type_modified_unlocked(type);
 
-    if (_PyDict_SetItem_LockHeld(dict, name, value) < 0) {
+    int result = member_operation == NULL
+        ? _PyDict_SetItem_LockHeld(dict, name, value)
+        : _PyDict_SetItemForSoacDataclassMember(
+            (PyObject *)dict, name, value, member_operation,
+            PyType_GetSoacContractOwner((PyObject *)type));
+    if (result < 0) {
+        if (member_operation != NULL) {
+            /* A failed exact provenance/phase check is not a missing
+               attribute. Keep the strict exception for the adapter caller. */
+            return -1;
+        }
         PyErr_Format(PyExc_AttributeError,
                      "type object '%.50s' has no attribute '%U'",
                      ((PyTypeObject*)type)->tp_name, name);
@@ -6657,11 +6668,12 @@ update_slot_after_setattr(PyTypeObject *type, PyObject *name)
 }
 
 static int
-type_setattro(PyObject *self, PyObject *name, PyObject *value)
+type_setattro_with_member(PyObject *self, PyObject *name, PyObject *value,
+                          PyObject *member_operation)
 {
     PyTypeObject *type = PyTypeObject_CAST(self);
     int res;
-    if (_PySOAC_CheckClassWrite(type, name, value) < 0) {
+    if (soac_check_class_write(type, name, value, member_operation) < 0) {
         return -1;
     }
     if (type->tp_flags & Py_TPFLAGS_IMMUTABLETYPE) {
@@ -6718,6 +6730,12 @@ type_setattro(PyObject *self, PyObject *name, PyObject *value)
     if (descr != NULL) {
         descrsetfunc f = Py_TYPE(descr)->tp_descr_set;
         if (f != NULL) {
+            if (member_operation != NULL) {
+                PyErr_SetString(soac_type_mutation_error(),
+                                "generated member cannot replace a metaclass descriptor");
+                res = -1;
+                goto done;
+            }
             res = f(descr, (PyObject *)type, value);
             goto done;
         }
@@ -6725,6 +6743,12 @@ type_setattro(PyObject *self, PyObject *name, PyObject *value)
 
     PyObject *dict = type->tp_dict;
     if (dict == NULL) {
+        if (member_operation != NULL) {
+            PyErr_SetString(soac_type_mutation_error(),
+                            "generated member class namespace is unavailable");
+            res = -1;
+            goto done;
+        }
         // This is an unlikely case.  PyType_Ready has not yet been done and
         // we need to initialize tp_dict.  We don't just do PyType_Ready
         // because we could already be readying.
@@ -6741,7 +6765,8 @@ type_setattro(PyObject *self, PyObject *name, PyObject *value)
     }
 
     BEGIN_TYPE_DICT_LOCK(dict);
-    res = type_update_dict(type, (PyDictObject *)dict, name, value, &old_value);
+    res = type_update_dict(type, (PyDictObject *)dict, name, value, &old_value,
+                            member_operation);
     assert(_PyType_CheckConsistency(type));
     if (res == 0) {
         if (is_dunder_name(name) && has_slotdef(name)) {
@@ -6752,10 +6777,41 @@ type_setattro(PyObject *self, PyObject *name, PyObject *value)
     END_TYPE_DICT_LOCK();
 
 done:
+    /* The ordinary displaced-value finalizer can reenter an independent
+       generated-member installation. Retire this operation before releasing
+       it, while retaining the shared version/slot update ordering above. */
+    if (member_operation != NULL) {
+        _PySOAC_DataclassFinishMember(member_operation, res == 0);
+    }
     Py_DECREF(name);
     Py_XDECREF(descr);
     Py_XDECREF(old_value);
     return res;
+}
+
+static int
+type_setattro(PyObject *self, PyObject *name, PyObject *value)
+{
+    return type_setattro_with_member(self, name, value, NULL);
+}
+
+int
+PyType_SetSoacDataclassMember(PyObject *invocation, PyObject *actual_type,
+                              PyObject *name, PyObject *function)
+{
+    PyObject *owner = actual_type != NULL && PyType_Check(actual_type)
+        ? PyType_GetSoacContractOwner(actual_type) : NULL;
+    PyObject *operation = _PySOAC_DataclassBeginMember(
+        invocation, actual_type, owner, name, function);
+    if (operation == NULL) {
+        return -1;
+    }
+    int result = type_setattro_with_member(actual_type, name, function, operation);
+    /* Also close early type/name/allocation failures that never reached the
+       shared setter's displaced-reference cleanup. Finish is idempotent. */
+    _PySOAC_DataclassFinishMember(operation, result == 0);
+    Py_DECREF(operation);
+    return result;
 }
 
 

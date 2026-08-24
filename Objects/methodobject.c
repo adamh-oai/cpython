@@ -43,13 +43,12 @@ PyCFunction_NewEx(PyMethodDef *ml, PyObject *self, PyObject *module)
     return PyCMethod_New(ml, self, module, NULL);
 }
 
-PyObject *
-PyCMethod_New(PyMethodDef *ml, PyObject *self, PyObject *module, PyTypeObject *cls)
+static int
+cfunction_vectorcall_for_flags(int flags, vectorcallfunc *result)
 {
-    /* Figure out correct vectorcall function to use */
     vectorcallfunc vectorcall;
-    switch (ml->ml_flags & (METH_VARARGS | METH_FASTCALL | METH_NOARGS |
-                            METH_O | METH_KEYWORDS | METH_METHOD))
+    switch (flags & (METH_VARARGS | METH_FASTCALL | METH_NOARGS |
+                    METH_O | METH_KEYWORDS | METH_METHOD))
     {
         case METH_VARARGS:
         case METH_VARARGS | METH_KEYWORDS:
@@ -73,9 +72,32 @@ PyCMethod_New(PyMethodDef *ml, PyObject *self, PyObject *module, PyTypeObject *c
             vectorcall = cfunction_vectorcall_FASTCALL_KEYWORDS_METHOD;
             break;
         default:
-            PyErr_Format(PyExc_SystemError,
-                         "%s() method: bad call flags", ml->ml_name);
-            return NULL;
+            return -1;
+    }
+    *result = vectorcall;
+    return 0;
+}
+
+int
+_PyCFunction_HasDefaultVectorcall(PyObject *callable)
+{
+    if (callable == NULL || !PyCFunction_CheckExact(callable)) {
+        return 0;
+    }
+    PyCFunctionObject *function = (PyCFunctionObject *)callable;
+    vectorcallfunc expected;
+    return cfunction_vectorcall_for_flags(function->m_ml->ml_flags, &expected) == 0 &&
+           function->vectorcall == expected;
+}
+
+PyObject *
+PyCMethod_New(PyMethodDef *ml, PyObject *self, PyObject *module, PyTypeObject *cls)
+{
+    vectorcallfunc vectorcall;
+    if (cfunction_vectorcall_for_flags(ml->ml_flags, &vectorcall) < 0) {
+        PyErr_Format(PyExc_SystemError,
+                     "%s() method: bad call flags", ml->ml_name);
+        return NULL;
     }
 
     PyCFunctionObject *op = NULL;

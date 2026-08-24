@@ -336,6 +336,11 @@ PyAPI_FUNC(int) PyType_IsSoacSealed(PyObject *);
 /* Borrowed owner; NULL/no error for ordinary types, runtime-unavailable error
  * for an irreversibly terminal or foreign-interpreter contract. */
 PyAPI_FUNC(PyObject *) PyType_GetSoacContractOwner(PyObject *);
+/* Consume one authenticated dataclass-generated member installation. This
+ * does not unseal a class or authorize unrelated namespace writes. */
+PyAPI_FUNC(int) PyType_SetSoacDataclassMember(
+    PyObject *invocation, PyObject *actual_type, PyObject *name,
+    PyObject *function);
 
 /* Class construction pieces, not authentication capabilities. Preparation is
  * the exact tuple (metaclass, namespace, resolved_bases, keywords, classcell).

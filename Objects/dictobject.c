@@ -3005,19 +3005,31 @@ soac_preflight_split_clear_insert(PyDictObject *dict, SoacDictPolicy *policy,
 static int
 indexed_commit(PyDictObject *mp, PyObject *key, Py_hash_t hash,
                PyObject *value, Py_ssize_t index, PyObject *old_value,
-               SoacDictPolicy *validated_policy)
+               SoacDictPolicy *validated_policy, PyObject *member_operation)
 {
+    assert(member_operation == NULL || validated_policy != NULL);
     SoacDictCommitGuard guard = {validated_policy, 0};
     PyObject *canonical = old_value == NULL ? key : dict_key_at(mp->ma_keys, index);
-    int operation = old_value == NULL ? PyDict_SOAC_SET : PyDict_SOAC_SET_EXISTING;
+    int operation = member_operation == NULL
+        ? (old_value == NULL ? PyDict_SOAC_SET : PyDict_SOAC_SET_EXISTING)
+        : (old_value == NULL ? PyDict_SOAC_CLASS_MEMBER_INSERT : PyDict_SOAC_CLASS_MEMBER_REPLACE);
     if (soac_commit_begin(mp, &guard, key, canonical, value, operation) < 0) {
         return -1;
     }
     if (old_value != NULL) {
         assert(index >= 0);
         if (old_value != value) {
-            if (soac_commit_notify(mp, &guard, PyDict_EVENT_MODIFIED,
-                                   key, canonical, value, operation) < 0) {
+            /* A watcher can fail the invocation without replacing the dict
+               policy. Recheck this SAME opaque operation, not an ambient
+               permission inferred from the still-identical policy pointer. */
+            if ((member_operation != NULL &&
+                 soac_validate(validated_policy, mp, canonical, value,
+                               operation, member_operation) < 0) ||
+                soac_commit_notify(mp, &guard, PyDict_EVENT_MODIFIED,
+                                   key, canonical, value, operation) < 0 ||
+                (member_operation != NULL &&
+                 soac_validate(validated_policy, mp, canonical, value,
+                               operation, member_operation) < 0)) {
                 goto fail;
             }
             soac_commit_end(&guard);
@@ -3073,8 +3085,16 @@ indexed_commit(PyDictObject *mp, PyObject *key, Py_hash_t hash,
             policy->baseline_promoted = 1;
         }
     }
-    if (soac_commit_notify(mp, &guard, PyDict_EVENT_ADDED,
-                           key, key, value, PyDict_SOAC_SET) < 0) {
+    /* Prefix growth can allocate, so authenticate before notifying watchers
+       as well as after the final watcher immediately before physical stores. */
+    if ((member_operation != NULL &&
+         soac_validate(validated_policy, mp, key, value,
+                       operation, member_operation) < 0) ||
+        soac_commit_notify(mp, &guard, PyDict_EVENT_ADDED,
+                           key, key, value, operation) < 0 ||
+        (member_operation != NULL &&
+         soac_validate(validated_policy, mp, key, value,
+                       operation, member_operation) < 0)) {
         goto fail;
     }
     soac_commit_end(&guard);
@@ -3108,7 +3128,7 @@ insert_indexed_dict(PyDictObject *mp,
     PyObject *old_value;
     Py_ssize_t index = _Py_dict_lookup(mp, key, hash, &old_value);
     if (index == DKIX_ERROR ||
-        indexed_commit(mp, key, hash, value, index, old_value, validated_policy) < 0) {
+        indexed_commit(mp, key, hash, value, index, old_value, validated_policy, NULL) < 0) {
         return -1;
     }
     return 1;
@@ -4258,7 +4278,8 @@ soac_setitem_resolved(PyDictObject *dict, PyObject *key, PyObject *value,
         goto done;
     }
     assert(operation == PyDict_SOAC_SET || operation == PyDict_SOAC_CACHE_INSERT ||
-           operation == PyDict_SOAC_ATTRIBUTE_SET);
+           operation == PyDict_SOAC_ATTRIBUTE_SET ||
+           operation == PyDict_SOAC_CLASS_MEMBER_INSERT);
     assert((operation == PyDict_SOAC_SET) == (provenance == NULL));
     if (old_value != NULL) {
         switch (operation) {
@@ -4271,6 +4292,9 @@ soac_setitem_resolved(PyDictObject *dict, PyObject *key, PyObject *value,
             case PyDict_SOAC_ATTRIBUTE_SET:
                 operation = PyDict_SOAC_ATTRIBUTE_SET_EXISTING;
                 break;
+            case PyDict_SOAC_CLASS_MEMBER_INSERT:
+                operation = PyDict_SOAC_CLASS_MEMBER_REPLACE;
+                break;
         }
     }
     if (soac_validate(policy, dict, canonical, value, operation, provenance) < 0) {
@@ -4278,11 +4302,20 @@ soac_setitem_resolved(PyDictObject *dict, PyObject *key, PyObject *value,
     }
     if (_PyDict_HasIndexedTable(dict)) {
         PyObject *owned_key = Py_NewRef(key), *owned_value = Py_NewRef(value);
-        result = indexed_commit(dict, owned_key, hash, owned_value, index, old_value, policy);
+        PyObject *member_operation =
+            (operation == PyDict_SOAC_CLASS_MEMBER_INSERT ||
+             operation == PyDict_SOAC_CLASS_MEMBER_REPLACE) ? provenance : NULL;
+        result = indexed_commit(dict, owned_key, hash, owned_value, index,
+                                 old_value, policy, member_operation);
         if (result < 0) {
             Py_DECREF(owned_key);
             Py_DECREF(owned_value);
         }
+    }
+    else if (operation == PyDict_SOAC_CLASS_MEMBER_INSERT ||
+             operation == PyDict_SOAC_CLASS_MEMBER_REPLACE) {
+        PyErr_SetString(soac_mutation_error(),
+                        "generated member requires indexed class namespace storage");
     }
     else {
         result = dict->ma_keys == Py_EMPTY_KEYS
@@ -4400,6 +4433,26 @@ _PyDict_SetItemForRuntimeCache(PyObject *dict, PyObject *key, PyObject *value,
     }
     return soac_setitem_lock_held((PyDictObject *)dict, key, value,
                                   PyDict_SOAC_CACHE_INSERT, provider);
+}
+
+int
+_PyDict_SetItemForSoacDataclassMember(PyObject *dict, PyObject *key,
+                                     PyObject *value, PyObject *operation,
+                                     PyObject *expected_class_owner)
+{
+    int match = PyDict_MatchesSoacClassNamespace(dict, expected_class_owner);
+    if (match < 0) {
+        return -1;
+    }
+    if (match != 1 || operation == NULL || key == NULL || value == NULL ||
+        !_PyDict_HasIndexedTable((PyDictObject *)dict)) {
+        PyErr_SetString(soac_mutation_error(),
+                        "generated member requires its exact class namespace operation");
+        return -1;
+    }
+    ASSERT_DICT_LOCKED(dict);
+    return soac_setitem_lock_held((PyDictObject *)dict, key, value,
+                                  PyDict_SOAC_CLASS_MEMBER_INSERT, operation);
 }
 
 int
@@ -6886,7 +6939,7 @@ dict_setdefault_ref_lock_held(PyObject *d, PyObject *key, PyObject *default_valu
             int inserted;
             if (_PyDict_HasIndexedTable(mp)) {
                 PyObject *owned_key = Py_NewRef(key), *owned_value = Py_NewRef(default_value);
-                inserted = indexed_commit(mp, owned_key, hash, owned_value, ix, NULL, policy);
+                inserted = indexed_commit(mp, owned_key, hash, owned_value, ix, NULL, policy, NULL);
                 if (inserted < 0) {
                     Py_DECREF(owned_key);
                     Py_DECREF(owned_value);
@@ -6945,7 +6998,7 @@ protected_done:
         int present = value != NULL;
         if (!present) {
             PyObject *owned_key = Py_NewRef(key), *owned_value = Py_NewRef(default_value);
-            if (indexed_commit(mp, owned_key, hash, owned_value, ix, NULL, NULL) < 0) {
+            if (indexed_commit(mp, owned_key, hash, owned_value, ix, NULL, NULL, NULL) < 0) {
                 Py_DECREF(owned_key);
                 Py_DECREF(owned_value);
                 if (result) {

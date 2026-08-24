@@ -12,6 +12,7 @@ _PyFrame_Traverse(_PyInterpreterFrame *frame, visitproc visit, void *arg)
 {
     Py_VISIT(frame->frame_obj);
     Py_VISIT(frame->f_locals);
+    Py_VISIT(frame->soac_dataclass_invocation);
     _Py_VISIT_STACKREF(frame->f_funcobj);
     _Py_VISIT_STACKREF(frame->f_executable);
     return _PyGC_VisitFrameStack(frame, visit, arg);
@@ -113,6 +114,8 @@ _PyFrame_ClearExceptCode(_PyInterpreterFrame *frame)
     // GH-99729: Clearing this frame can expose the stack (via finalizers). It's
     // crucial that this frame has been unlinked, and is no longer visible:
     assert(_PyThreadState_GET()->current_frame != frame);
+    frame->soac_dataclass_role = 0;
+    Py_CLEAR(frame->soac_dataclass_invocation);
     if (frame->frame_obj) {
         PyFrameObject *f = frame->frame_obj;
         frame->frame_obj = NULL;

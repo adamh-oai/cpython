@@ -703,7 +703,8 @@ _Py_VectorCall_StackRefSteal(
     _PyStackRef callable,
     _PyStackRef *arguments,
     int total_args,
-    _PyStackRef kwnames)
+    _PyStackRef kwnames,
+    _PyInterpreterFrame *frame)
 {
     PyObject *res;
     STACKREFS_TO_PYOBJECTS(arguments, total_args, args_o);
@@ -717,8 +718,8 @@ _Py_VectorCall_StackRefSteal(
     if (kwnames_o != NULL) {
         positional_args -= (int)PyTuple_GET_SIZE(kwnames_o);
     }
-    res = PyObject_Vectorcall(
-        callable_o, args_o,
+    res = _PySOAC_DataclassVectorcallFromFrame(
+        frame, callable_o, args_o,
         positional_args | PY_VECTORCALL_ARGUMENTS_OFFSET,
         kwnames_o);
     STACKREFS_TO_PYOBJECTS_CLEANUP(args_o);
@@ -759,8 +760,8 @@ _Py_VectorCallInstrumentation_StackRefSteal(
     if (kwnames_o != NULL) {
         positional_args -= (int)PyTuple_GET_SIZE(kwnames_o);
     }
-    res = PyObject_Vectorcall(
-        callable_o, args_o,
+    res = _PySOAC_DataclassVectorcallFromFrame(
+        frame, callable_o, args_o,
         positional_args | PY_VECTORCALL_ARGUMENTS_OFFSET,
         kwnames_o);
     STACKREFS_TO_PYOBJECTS_CLEANUP(args_o);
@@ -1228,6 +1229,8 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int 
     entry.frame.stackpointer = entry.stack;
     entry.frame.owner = FRAME_OWNED_BY_INTERPRETER;
     entry.frame.visited = 0;
+    entry.frame.soac_dataclass_role = 0;
+    entry.frame.soac_dataclass_invocation = NULL;
     entry.frame.return_offset = 0;
 #ifdef Py_DEBUG
     entry.frame.lltrace = 0;
@@ -2082,11 +2085,12 @@ error:
     return NULL;
 }
 
-PyObject *
-_PyEval_Vector(PyThreadState *tstate, PyFunctionObject *func,
+static PyObject *
+eval_vector_with_dataclass(PyThreadState *tstate, PyFunctionObject *func,
                PyObject *locals,
                PyObject* const* args, size_t argcount,
-               PyObject *kwnames)
+               PyObject *kwnames, PyObject *invocation, unsigned int stage,
+               _PyInterpreterFrame *parent)
 {
     size_t total_args = argcount;
     if (kwnames) {
@@ -2124,8 +2128,32 @@ _PyEval_Vector(PyThreadState *tstate, PyFunctionObject *func,
     if (frame == NULL) {
         return NULL;
     }
+    if (invocation != NULL &&
+        _PySOAC_DataclassEnterExplicit(invocation, stage, parent, frame) < 0) {
+        _PyEval_FrameClearAndPop(tstate, frame);
+        return NULL;
+    }
     EVAL_CALL_STAT_INC(EVAL_CALL_VECTOR);
     return _PyEval_EvalFrame(tstate, frame, 0);
+}
+
+PyObject *
+_PyEval_Vector(PyThreadState *tstate, PyFunctionObject *func,
+               PyObject *locals, PyObject *const *args, size_t argcount,
+               PyObject *kwnames)
+{
+    return eval_vector_with_dataclass(tstate, func, locals, args, argcount,
+                                     kwnames, NULL, 0, NULL);
+}
+
+PyObject *
+_PySOAC_DataclassEvalVector(PyThreadState *tstate, PyFunctionObject *func,
+               PyObject *locals, PyObject *const *args, size_t argcount,
+               PyObject *kwnames, PyObject *invocation, unsigned int stage,
+               _PyInterpreterFrame *parent)
+{
+    return eval_vector_with_dataclass(tstate, func, locals, args, argcount,
+                                     kwnames, invocation, stage, parent);
 }
 
 /* Legacy API */

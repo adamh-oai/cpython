@@ -8,6 +8,10 @@ extern "C" {
 #  error "this header requires Py_BUILD_CORE define"
 #endif
 
+/* Exact native C function, unchanged calling-convention entry. No allocation
+ * or Python call; a NULL vectorcall is the default for METH_VARARGS. */
+extern int _PyCFunction_HasDefaultVectorcall(PyObject *callable);
+
 #include "pycore_code.h"          // EVAL_CALL_STAT_INC_IF_FUNCTION()
 #include "pycore_pystate.h"       // _PyThreadState_GET()
 #include "pycore_stats.h"

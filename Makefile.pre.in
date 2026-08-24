@@ -1418,6 +1418,7 @@ PYTHON_HEADERS= \
 		$(srcdir)/Include/internal/pycore_setobject.h \
 		$(srcdir)/Include/internal/pycore_signal.h \
 		$(srcdir)/Include/internal/pycore_sliceobject.h \
+		$(srcdir)/Include/internal/pycore_soac_dataclass.h \
 		$(srcdir)/Include/internal/pycore_stats.h \
 		$(srcdir)/Include/internal/pycore_strhex.h \
 		$(srcdir)/Include/internal/pycore_stackref.h \
@@ -1852,6 +1853,23 @@ Python/frozen_modules/frozen_only.h: Tools/freeze/flag.py $(FREEZE_MODULE_DEPS)
 
 # END: freezing modules
 
+# Private native-image attestation data, not frozen importable modules. Keep
+# these rules outside the auto-generated frozen-module registry sections.
+SOAC_DATACLASS_RECIPES = \
+	Python/frozen_modules/soac_dataclasses.h \
+	Python/frozen_modules/soac_reprlib.h
+
+Python/frozen_modules/soac_dataclasses.h: Lib/dataclasses.py $(FREEZE_MODULE_DEPS)
+	$(FREEZE_MODULE) dataclasses $(srcdir)/Lib/dataclasses.py $@
+
+Python/frozen_modules/soac_reprlib.h: Lib/reprlib.py $(FREEZE_MODULE_DEPS)
+	$(FREEZE_MODULE) reprlib $(srcdir)/Lib/reprlib.py $@
+
+.PHONY: regen-soac-dataclass-recipes
+regen-soac-dataclass-recipes: $(FREEZE_MODULE_DEPS)
+	$(FREEZE_MODULE) dataclasses $(srcdir)/Lib/dataclasses.py Python/frozen_modules/soac_dataclasses.h
+	$(FREEZE_MODULE) reprlib $(srcdir)/Lib/reprlib.py Python/frozen_modules/soac_reprlib.h
+
 Tools/build/freeze_modules.py: $(FREEZE_MODULE)
 
 .PHONY: regen-frozen
@@ -2256,7 +2274,7 @@ Python/optimizer_analysis.o: \
 		$(srcdir)/Include/internal/pycore_optimizer.h \
 		$(srcdir)/Python/optimizer_cases.c.h
 
-Python/frozen.o: $(FROZEN_FILES_OUT)
+Python/frozen.o: $(FROZEN_FILES_OUT) $(SOAC_DATACLASS_RECIPES)
 
 # Generate DTrace probe macros, then rename them (PYTHON_ -> PyDTrace_) to
 # follow our naming conventions. dtrace(1) uses the output filename to generate
@@ -2277,6 +2295,8 @@ Python/pydtrace.o: $(srcdir)/Include/pydtrace.d $(DTRACE_DEPS)
 
 Objects/typeobject.o: Objects/typeslots.inc
 Objects/typeobject.o: $(srcdir)/Objects/soac_type.inc $(srcdir)/Include/internal/pycore_soac_type.h
+Objects/funcobject.o: $(srcdir)/Objects/soac_dataclass.inc $(srcdir)/Objects/soac_dataclass_bridge.inc $(srcdir)/Include/internal/pycore_soac_dataclass.h
+Modules/_testinternalcapi.o: $(srcdir)/Modules/_testinternalcapi/soac_dataclass.inc $(srcdir)/Modules/_testinternalcapi/soac_dataclass_bridges.inc
 
 .PHONY: regen-typeslots
 regen-typeslots:

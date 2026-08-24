@@ -8,6 +8,7 @@ import itertools
 import annotationlib
 import abc
 from reprlib import recursive_repr
+from _types import _dataclass_record_source, _dataclass_exec, _dataclass_set_member
 
 
 __all__ = ['dataclass',
@@ -473,7 +474,8 @@ class _FuncBuilder:
         body = '\n'.join(body)
 
         # Compute the text of the entire function, add it to the text we're generating.
-        self.src.append(f'{f' {decorator}\n' if decorator else ''} def {name}({args}):\n{body}')
+        self.src.append(_dataclass_record_source(
+            f'{f' {decorator}\n' if decorator else ''} def {name}({args}):\n{body}'))
 
     def add_fns_to_class(self, cls):
         # The source to all of the functions we're generating.
@@ -503,7 +505,7 @@ class _FuncBuilder:
 
         txt = f"def __create_fn__({local_vars}):\n{fns_src}\n return {return_names}"
         ns = {}
-        exec(txt, self.globals, ns)
+        _dataclass_exec(exec, txt, self.globals, ns)
         fns = ns['__create_fn__'](**self.locals)
 
         # Now that we've generated the functions, assign them into cls.
@@ -519,7 +521,7 @@ class _FuncBuilder:
                 fn.__annotate__ = annotate_fn
 
             if self.unconditional_adds.get(name, False):
-                setattr(cls, name, fn)
+                _dataclass_set_member(setattr, cls, name, fn)
             else:
                 already_exists = _set_new_attribute(cls, name, fn)
 
@@ -924,7 +926,7 @@ def _set_new_attribute(cls, name, value):
     # attribute already exists.
     if name in cls.__dict__:
         return True
-    setattr(cls, name, value)
+    _dataclass_set_member(setattr, cls, name, value)
     return False
 
 

@@ -27,6 +27,11 @@ extern int _PyDict_SetItemForTeardown(
    never a temporary permission flag available to reentrant public writes. */
 extern int _PyDict_SetItemForRuntimeCache(
     PyObject *dict, PyObject *key, PyObject *value, PyObject *provider);
+/* One exact native member operation, restricted to the actual class namespace.
+   The caller holds the type/dict lock. No ordinary-dictionary fallback. */
+extern int _PyDict_SetItemForSoacDataclassMember(
+    PyObject *dict, PyObject *key, PyObject *value, PyObject *operation,
+    PyObject *expected_class_owner);
 /* Attribute provenance belongs to this one lookup/validation/commit, not a
    precheck or ambient permit.  Mapping writes never emit ATTRIBUTE_SET. */
 PyAPI_FUNC(int) _PyDict_SetItemForAttribute(

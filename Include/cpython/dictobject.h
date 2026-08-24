@@ -45,6 +45,9 @@ typedef struct {
  * provenance is NULL for mapping writes.  Private CACHE_INSERT/CACHE_REPLACE
  * carry their provider; ATTRIBUTE_SET/ATTRIBUTE_SET_EXISTING carry the original
  * Unicode attribute name, separately from the once-resolved canonical key.
+ * CLASS_MEMBER_INSERT/CLASS_MEMBER_REPLACE carry one opaque native dataclass
+ * member operation. They are never emitted by mapping or attribute writes;
+ * the exact operation is checked again after the last dictionary watcher.
  *
  * TERMINAL_TEARDOWN is an irreversible notification from unreachable GC or
  * module destruction: the owner must make dependent execution unavailable
@@ -61,7 +64,9 @@ enum {
     PyDict_SOAC_CACHE_INSERT = 6,
     PyDict_SOAC_CACHE_REPLACE = 7,
     PyDict_SOAC_ATTRIBUTE_SET = 8,
-    PyDict_SOAC_ATTRIBUTE_SET_EXISTING = 9
+    PyDict_SOAC_ATTRIBUTE_SET_EXISTING = 9,
+    PyDict_SOAC_CLASS_MEMBER_INSERT = 10,
+    PyDict_SOAC_CLASS_MEMBER_REPLACE = 11
 };
 #define PyDict_SOAC_ALLOW_NONSTRING_KEYS 1u
 #define PyDict_SOAC_READ_ONLY 2u

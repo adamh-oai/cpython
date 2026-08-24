@@ -9,6 +9,7 @@
 #include "pycore_interpframe_structs.h" // _PyInterpreterFrame
 #include "pycore_stackref.h"      // PyStackRef_AsPyObjectBorrow()
 #include "pycore_stats.h"         // CALL_STAT_INC()
+#include "pycore_soac_dataclass.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -32,6 +33,11 @@ static inline int
 _PyFrame_CheckSoacExecution(_PyInterpreterFrame *frame)
 {
     if (!(_PyFrame_GetCode(frame)->co_flags & CO_FUTURE_STRICT)) {
+        if (frame->soac_dataclass_invocation != NULL ||
+            (frame->previous != NULL &&
+             frame->previous->soac_dataclass_invocation != NULL)) {
+            return _PySOAC_DataclassEnterFrame(frame);
+        }
         return 0;
     }
     PyObject *exception = PySoac_GetStrictRuntimeUnavailableError();
@@ -160,6 +166,10 @@ static inline void _PyFrame_Copy(_PyInterpreterFrame *src, _PyInterpreterFrame *
     dest->f_locals = src->f_locals;
     dest->frame_obj = src->frame_obj;
     dest->instr_ptr = src->instr_ptr;
+    dest->soac_dataclass_role = src->soac_dataclass_role;
+    dest->soac_dataclass_invocation = src->soac_dataclass_invocation;
+    src->soac_dataclass_role = 0;
+    src->soac_dataclass_invocation = NULL;
 #ifdef Py_GIL_DISABLED
     dest->tlbc_index = src->tlbc_index;
 #endif
@@ -219,6 +229,8 @@ _PyFrame_Initialize(
     frame->return_offset = 0;
     frame->owner = FRAME_OWNED_BY_THREAD;
     frame->visited = 0;
+    frame->soac_dataclass_role = 0;
+    frame->soac_dataclass_invocation = NULL;
 #ifdef Py_DEBUG
     frame->lltrace = 0;
 #endif
@@ -400,6 +412,8 @@ _PyFrame_PushTrampolineUnchecked(PyThreadState *tstate, PyCodeObject *code, int 
 #endif
     frame->owner = FRAME_OWNED_BY_THREAD;
     frame->visited = 0;
+    frame->soac_dataclass_role = 0;
+    frame->soac_dataclass_invocation = NULL;
 #ifdef Py_DEBUG
     frame->lltrace = 0;
 #endif

@@ -159,6 +159,39 @@ struct PyCodeObject _PyCode_DEF(1);
 
 PyAPI_FUNC(uint64_t) PyCode_GetSoacStrictSourceId(PyObject *);
 
+/* Borrowed immutable code data for effect-free native attestation. The caller
+ * pins the exact code object for the view's lifetime. This does not authorize
+ * execution or authenticate source. Materialize PyCode_GetCode only during
+ * cold preparation, not from no-allocation role callbacks. */
+#define Py_SOAC_CODE_VIEW_ABI 1
+typedef struct {
+    unsigned int abi_version;
+    int flags;
+    int argcount;
+    int posonlyargcount;
+    int kwonlyargcount;
+    int stacksize;
+    int firstlineno;
+    int nlocalsplus;
+    int framesize;
+    int nlocals;
+    int ncellvars;
+    int nfreevars;
+    Py_ssize_t code_units;
+    uint64_t strict_source_id;
+    PyObject *consts;
+    PyObject *names;
+    PyObject *localsplusnames;
+    PyObject *localspluskinds;
+    PyObject *filename;
+    PyObject *name;
+    PyObject *qualname;
+    PyObject *linetable;
+    PyObject *exceptiontable;
+} PySoacCodeView;
+PyAPI_FUNC(int) PySoac_GetCodeView(
+    PyObject *code, PySoacCodeView *out, size_t out_size);
+
 /* This should be defined if a future statement modifies the syntax.
    For example, when a keyword is added.
 */

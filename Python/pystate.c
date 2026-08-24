@@ -775,6 +775,12 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
      * or reference clearing can re-enter application code. */
     interp->soac.annotation_replay_closed = 1;
     interp->soac.annotation_replay_resolver = NULL;
+    interp->soac.dataclass_closed = 1;
+    memset(&interp->soac.dataclass_callbacks, 0,
+           sizeof(interp->soac.dataclass_callbacks));
+    for (size_t i = 0; i < Py_ARRAY_LENGTH(interp->soac.dataclass_builtins); i++) {
+        Py_CLEAR(interp->soac.dataclass_builtins[i]);
+    }
     _PyRuntimeState *runtime = interp->runtime;
 
     /* XXX Conditions we need to enforce:
@@ -1559,6 +1565,8 @@ init_threadstate(_PyThreadStateImpl *_tstate,
     _tstate->base_frame.return_offset = 0;
     _tstate->base_frame.owner = FRAME_OWNED_BY_INTERPRETER;
     _tstate->base_frame.visited = 0;
+    _tstate->base_frame.soac_dataclass_role = 0;
+    _tstate->base_frame.soac_dataclass_invocation = NULL;
 #ifdef Py_DEBUG
     _tstate->base_frame.lltrace = 0;
 #endif

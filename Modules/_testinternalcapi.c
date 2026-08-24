@@ -14,6 +14,7 @@
 #include "pycore_backoff.h"       // JUMP_BACKWARD_INITIAL_VALUE
 #include "pycore_bitutils.h"      // _Py_bswap32()
 #include "pycore_bytesobject.h"   // _PyBytes_Find()
+#include "pycore_call.h"          // Native dataclass fixture argument unpacking
 #include "pycore_ceval.h"         // _PyEval_AddPendingCall()
 #include "pycore_code.h"          // _PyCode_GetTLBCFast()
 #include "pycore_compile.h"       // _PyCompile_CodeGen()
@@ -37,6 +38,7 @@
 #include "pycore_pylifecycle.h"   // _PyInterpreterConfig_InitFromDict()
 #include "pycore_pystate.h"       // _PyThreadState_GET()
 #include "pycore_runtime_structs.h" // _PY_NSMALLPOSINTS
+#include "pycore_tuple.h"         // _PyTuple_ITEMS()
 #include "pycore_unicodeobject.h" // _PyUnicode_TransformDecimalAndSpaceToASCII()
 
 #include "clinic/_testinternalcapi.c.h"
@@ -3217,7 +3219,16 @@ test_threadstate_set_stack_protection(PyObject *self, PyObject *Py_UNUSED(args))
 }
 
 
+#include "_testinternalcapi/soac_dataclass.inc"
+
 static PyMethodDef module_functions[] = {
+    {"soac_dataclass_fixture", soac_dataclass_fixture, METH_VARARGS},
+    {"soac_dataclass_fixture_call", soac_dataclass_fixture_call, METH_VARARGS},
+    {"soac_dataclass_fixture_c_proxy", soac_dataclass_fixture_c_proxy, METH_O},
+    {"soac_dataclass_fixture_c_forward", _PyCFunction_CAST(soac_dataclass_fixture_c_forward), METH_FASTCALL},
+    {"soac_dataclass_fixture_copy_builtin", soac_dataclass_fixture_copy_builtin, METH_VARARGS},
+    {"soac_code_view", soac_code_view, METH_VARARGS},
+    {"soac_dataclass_frame_offsets", soac_dataclass_frame_offsets, METH_NOARGS},
     {"get_configs", get_configs, METH_NOARGS},
     {"get_eval_frame_stats", get_eval_frame_stats, METH_NOARGS, NULL},
     {"get_recursion_depth", get_recursion_depth, METH_NOARGS},
