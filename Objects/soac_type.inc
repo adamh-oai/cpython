@@ -50,6 +50,40 @@ soac_type_contract(PyTypeObject *type)
     return (SoacTypeContract *)((PyHeapTypeObject *)type)->ht_soac_contract;
 }
 
+/* An ordinary descendant has no own strict receiver capability, but changing
+ * its ancestry or an instance's actual class still requires admission. Read
+ * the actual native MRO rather than only the direct base's own contract: an
+ * intermediate ordinary class must not hide installed inherited invariants.
+ * This query does not grant or install a dictionary/dispatch policy. */
+static int
+soac_mro_has_contract(PyObject *mro)
+{
+    for (Py_ssize_t i = 0; mro != NULL && i < PyTuple_GET_SIZE(mro); ++i) {
+        if (soac_type_contract((PyTypeObject *)PyTuple_GET_ITEM(mro, i)) != NULL) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int
+soac_type_has_contract_in_mro(PyTypeObject *type)
+{
+    return soac_type_contract(type) != NULL ||
+        soac_mro_has_contract(lookup_tp_mro(type));
+}
+
+static int
+soac_mro_contains_type(PyObject *mro, PyTypeObject *type)
+{
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(mro); ++i) {
+        if (PyTuple_GET_ITEM(mro, i) == (PyObject *)type) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* Ordinary subclasses do not acquire a strict dispatch capability. They do
  * retain inherited physical dictionary invariants. The trusted factory sees
  * the actual instance and can compose the policies of its actual MRO. */
@@ -755,9 +789,8 @@ _PySOAC_CheckInstanceWrite(PyObject *object, PyObject *name, PyObject *value)
 int
 _PySOAC_CheckClassAssignment(PyTypeObject *old_type, PyTypeObject *new_type)
 {
-    if (soac_type_contract(old_type) != NULL || soac_type_contract(new_type) != NULL ||
-        _PySOAC_UsesInstanceDictionaryPolicy(old_type) ||
-        _PySOAC_UsesInstanceDictionaryPolicy(new_type)) {
+    if (soac_type_has_contract_in_mro(old_type) ||
+        soac_type_has_contract_in_mro(new_type)) {
         PyErr_SetString(soac_type_mutation_error(), "cannot reassign __class__ across an installed strict contract");
         return -1;
     }
@@ -782,23 +815,72 @@ _PySOAC_CheckTypeBases(PyTypeObject *type, PyObject *bases)
         PyErr_SetString(soac_type_mutation_error(), "cannot replace bases of an installed strict class");
         return -1;
     }
-    PyObject *old_mro = lookup_tp_mro(type);
-    for (Py_ssize_t i = 1; old_mro != NULL && i < PyTuple_GET_SIZE(old_mro); ++i) {
-        if (soac_type_contract((PyTypeObject *)PyTuple_GET_ITEM(old_mro, i)) != NULL) {
-            PyErr_SetString(soac_type_mutation_error(), "base reassignment cannot discard installed strict inheritance restrictions");
-            return -1;
-        }
+    if (soac_type_has_contract_in_mro(type)) {
+        PyErr_SetString(soac_type_mutation_error(), "base reassignment cannot discard installed strict inheritance restrictions");
+        return -1;
     }
     if (bases != NULL && PyTuple_Check(bases)) {
         for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(bases); ++i) {
             PyObject *base = PyTuple_GET_ITEM(bases, i);
-            if (PyType_Check(base) && soac_type_contract((PyTypeObject *)base) != NULL) {
+            if (PyType_Check(base) && soac_type_has_contract_in_mro((PyTypeObject *)base)) {
                 PyErr_SetString(soac_type_mutation_error(), "base reassignment requires strict inheritance admission");
                 return -1;
             }
         }
     }
     return 0;
+}
+
+int
+_PySOAC_CheckTypeMro(PyTypeObject *type, PyObject *new_mro, int initial)
+{
+    /* mro_invoke has validated this exact tuple of types. No Python equality,
+     * attribute lookup, allocation, or callback occurs at this commit guard. */
+    int has_contract = soac_type_contract(type) != NULL ||
+        soac_mro_has_contract(new_mro);
+    if (!initial) {
+        if (has_contract || soac_type_has_contract_in_mro(type)) {
+            PyErr_SetString(soac_type_mutation_error(),
+                            "MRO reassignment requires strict inheritance admission");
+            return -1;
+        }
+        return 0;
+    }
+
+    /* A custom initial MRO may add ordinary ancestors, but cannot hide an
+     * installed contract inherited through a real base. The physical layout
+     * and inherited finality must remain represented by the actual MRO. */
+    PyObject *bases = lookup_tp_bases(type);
+    for (Py_ssize_t i = 0; bases != NULL && i < PyTuple_GET_SIZE(bases); ++i) {
+        PyTypeObject *base = (PyTypeObject *)PyTuple_GET_ITEM(bases, i);
+        if (soac_type_contract(base) != NULL) {
+            has_contract = 1;
+            if (!soac_mro_contains_type(new_mro, base)) {
+                goto hidden;
+            }
+        }
+        PyObject *base_mro = lookup_tp_mro(base);
+        for (Py_ssize_t j = 0; base_mro != NULL && j < PyTuple_GET_SIZE(base_mro); ++j) {
+            PyTypeObject *ancestor = (PyTypeObject *)PyTuple_GET_ITEM(base_mro, j);
+            if (soac_type_contract(ancestor) != NULL) {
+                has_contract = 1;
+                if (!soac_mro_contains_type(new_mro, ancestor)) {
+                    goto hidden;
+                }
+            }
+        }
+    }
+    if (has_contract && PyTuple_GET_ITEM(new_mro, 0) != (PyObject *)type) {
+        PyErr_SetString(soac_type_mutation_error(),
+                        "strict inheritance requires the actual class first in its MRO");
+        return -1;
+    }
+    return 0;
+
+hidden:
+    PyErr_SetString(soac_type_mutation_error(),
+                    "custom MRO cannot hide an installed strict base contract");
+    return -1;
 }
 
 static int

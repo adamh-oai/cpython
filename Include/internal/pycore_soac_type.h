@@ -9,6 +9,7 @@ extern int _PySOAC_ProtectedName(PyTypeObject *, PyObject *);
 extern int _PySOAC_CheckInstanceWrite(PyObject *, PyObject *, PyObject *);
 extern int _PySOAC_CheckClassWrite(PyTypeObject *, PyObject *, PyObject *);
 extern int _PySOAC_CheckTypeBases(PyTypeObject *, PyObject *);
+extern int _PySOAC_CheckTypeMro(PyTypeObject *, PyObject *, int);
 extern int _PySOAC_CheckClassAssignment(PyTypeObject *, PyTypeObject *);
 extern int _PySOAC_CheckDictionaryReplacement(PyObject *);
 extern int _PySOAC_ReadyTypeInheritance(PyTypeObject *);

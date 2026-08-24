@@ -2036,6 +2036,11 @@ type_set_bases(PyObject *tp, PyObject *new_bases, void *Py_UNUSED(closure))
     int res;
     BEGIN_TYPE_LOCK();
     res = type_check_new_bases(type, new_bases, &best_base);
+    /* type_check_new_bases includes an audit callback. Validate the actual
+     * ancestry again before publishing even the provisional new bases. */
+    if (res == 0) {
+        res = _PySOAC_CheckTypeBases(type, new_bases);
+    }
     if (res == 0) {
         res = type_set_bases_unlocked(type, new_bases, best_base);
     }
@@ -3704,6 +3709,15 @@ mro_internal(PyTypeObject *type, int initial, PyObject **p_old_mro)
     if (reent) {
         Py_DECREF(new_mro);
         return 0;
+    }
+
+    /* A custom mro() can manufacture ancestors absent from the requested
+     * bases, or hide a real strict base during initial construction. */
+    if (_PySOAC_CheckTypeMro(type, new_mro, initial) < 0) {
+        PyObject *error = PyErr_GetRaisedException();
+        Py_DECREF(new_mro);
+        PyErr_SetRaisedException(error);
+        return -1;
     }
 
     set_tp_mro(type, new_mro, initial);

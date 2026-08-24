@@ -709,3 +709,28 @@ The following functions and structs are used to create
       Expands to ``NULL``.
 
       .. versionadded:: 3.14
+
+
+SOAC native inheritance contracts
+---------------------------------
+
+An ordinary subclass of a SOAC strict class does not acquire its own strict
+receiver or dispatch authority. It still retains inherited physical-field and
+finality constraints. Native ``__bases__`` and instance ``__class__`` setters
+therefore reject changes that gain or discard an installed strict ancestor,
+including ancestors reached through intermediate ordinary classes. These
+checks do not install an instance dictionary policy on an otherwise ordinary
+class.
+
+Base reassignment checks the actual bases again after the audit callback. The
+computed MRO is checked after a custom metaclass's ``mro()`` returns and before
+the new MRO is published. An incompatible callback result fails without
+replacing the previous MRO; ordinary provisional-base rollback and callback
+exceptions are preserved.
+
+Initial custom MROs that involve strict contracts must retain every strict
+ancestor inherited through the actual bases and place the actual new class
+first. An ordinary initial custom MRO may include a strict ancestor without
+gaining its own strict authority, but its inherited constraints are enforced
+before type readiness completes. Custom MROs containing only ordinary classes
+retain their normal behavior, including reordered MROs.
