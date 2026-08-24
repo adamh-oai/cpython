@@ -15,6 +15,10 @@ extern "C" {
 #include "pycore_typedefs.h"      // _PyInterpreterFrame
 
 
+#if !defined(Py_GIL_DISABLED) && defined(Py_STACKREF_DEBUG)
+struct _PyStackRefFrameTupleEntry;
+#endif
+
 struct _frame {
     PyObject_HEAD
     PyFrameObject *f_back;      /* previous frame, or NULL */
@@ -34,6 +38,10 @@ struct _frame {
      * "support" for the borrowed references, ensuring that they remain valid.
      */
     PyObject *f_overwritten_fast_locals;
+#if !defined(Py_GIL_DISABLED) && defined(Py_STACKREF_DEBUG)
+    /* Diagnostic identities backed by the tuple, not extra Python edges. */
+    struct _PyStackRefFrameTupleEntry *f_overwritten_fast_locals_debug;
+#endif
     /* The frame data, if this frame object owns the frame */
     PyObject *_f_frame_data[1];
 };

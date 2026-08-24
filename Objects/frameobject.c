@@ -290,7 +290,11 @@ framelocalsproxy_setitem(PyObject *self, PyObject *key, PyObject *value)
                 if (add_overwritten_fast_local(frame, old_obj) < 0) {
                     return -1;
                 }
+#if !defined(Py_GIL_DISABLED) && defined(Py_STACKREF_DEBUG)
+                _Py_stackref_transfer_overwritten_local(frame, i, __FILE__, __LINE__);
+#else
                 PyStackRef_CLOSE(fast[i]);
+#endif
             }
             fast[i] = PyStackRef_FromPyObjectNew(value);
         }
@@ -2003,6 +2007,9 @@ frame_dealloc(PyObject *op)
     Py_CLEAR(f->f_trace);
     Py_CLEAR(f->f_extra_locals);
     Py_CLEAR(f->f_locals_cache);
+#if !defined(Py_GIL_DISABLED) && defined(Py_STACKREF_DEBUG)
+    _Py_stackref_release_overwritten_locals(f, __FILE__, __LINE__);
+#endif
     Py_CLEAR(f->f_overwritten_fast_locals);
     PyObject_GC_Del(f);
 }
@@ -2042,6 +2049,9 @@ frame_tp_clear(PyObject *op)
     Py_CLEAR(f->f_trace);
     Py_CLEAR(f->f_extra_locals);
     Py_CLEAR(f->f_locals_cache);
+#if !defined(Py_GIL_DISABLED) && defined(Py_STACKREF_DEBUG)
+    _Py_stackref_release_overwritten_locals(f, __FILE__, __LINE__);
+#endif
     Py_CLEAR(f->f_overwritten_fast_locals);
 
     /* locals and stack */
@@ -2199,6 +2209,9 @@ _PyFrame_New_NoTrack(PyCodeObject *code)
     f->f_extra_locals = NULL;
     f->f_locals_cache = NULL;
     f->f_overwritten_fast_locals = NULL;
+#if !defined(Py_GIL_DISABLED) && defined(Py_STACKREF_DEBUG)
+    f->f_overwritten_fast_locals_debug = NULL;
+#endif
     return f;
 }
 
