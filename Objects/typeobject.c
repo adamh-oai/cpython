@@ -4453,10 +4453,8 @@ type_new_alloc(type_new_ctx *ctx)
     PyTypeObject *metatype = ctx->metatype;
     PyTypeObject *type;
     SoacConstructionHandle *handle = (SoacConstructionHandle *)ctx->soac_handle;
-    SoacTypeContract *pending_state = soac_take_pending_state(handle);
-    if (handle != NULL &&
-        handle->spec.construction_mode == Py_SOAC_TYPE_CONSTRUCT_PENDING &&
-        pending_state == NULL) return NULL;
+    SoacTypeContract *pending_state = soac_take_construction_state(handle);
+    if (handle != NULL && pending_state == NULL) return NULL;
 
     // Allocate the type object
     type = (PyTypeObject *)metatype->tp_alloc(metatype, ctx->nslot);
@@ -4500,8 +4498,8 @@ type_new_alloc(type_new_ctx *ctx)
     et->unique_id = _PyObject_AssignUniqueId((PyObject *)et);
 #endif
 
-    soac_attach_pending_type(type, handle, pending_state);
-    if (soac_pending_constructor_live(type) < 0) {
+    soac_attach_construction_type(type, handle, pending_state);
+    if (soac_constructor_live(type) < 0) {
         _PySOAC_FailPendingType(type);
         Py_DECREF(type);
         return NULL;
@@ -4910,7 +4908,7 @@ type_new_set_attrs(const type_new_ctx *ctx, PyTypeObject *type)
     type_new_set_slots(ctx, type);
 
     if (type_new_set_classcell(type, dict) < 0 ||
-        soac_pending_constructor_live(type) < 0) {
+        soac_constructor_live(type) < 0) {
         return -1;
     }
     if (type_new_set_classdictcell(dict) < 0) {
@@ -5018,14 +5016,14 @@ type_new_impl(type_new_ctx *ctx)
         goto error;
     }
 
-    if (soac_pending_constructor_live(type) < 0) goto error;
+    if (soac_constructor_live(type) < 0) goto error;
 
     /* Initialize the rest */
     if (PyType_Ready(type) < 0) {
         goto error;
     }
 
-    if (soac_pending_constructor_live(type) < 0) goto error;
+    if (soac_constructor_live(type) < 0) goto error;
 
     // Put the proper slots in place
     fixup_slot_dispatchers(type);
@@ -5049,7 +5047,7 @@ type_new_impl(type_new_ctx *ctx)
         goto error;
     }
 
-    if (soac_pending_constructor_live(type) < 0) goto error;
+    if (soac_constructor_live(type) < 0) goto error;
     assert(_PyType_CheckConsistency(type));
 #if defined(Py_GIL_DISABLED) && defined(Py_DEBUG) && SIZEOF_VOID_P > 4
     // After this point, other threads can potentally use this type.
@@ -12360,7 +12358,7 @@ type_new_set_names(PyTypeObject *type)
         }
         else {
             Py_DECREF(res);
-            if (soac_pending_constructor_live(type) < 0) goto error;
+            if (soac_constructor_live(type) < 0) goto error;
         }
     }
 
@@ -12399,7 +12397,7 @@ type_new_init_subclass(PyTypeObject *type, PyObject *kwds)
     }
 
     Py_DECREF(result);
-    return soac_pending_constructor_live(type);
+    return soac_constructor_live(type);
 }
 
 

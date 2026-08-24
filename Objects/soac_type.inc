@@ -121,6 +121,15 @@ soac_construction_root(SoacConstructionHandle *handle)
     return handle->root == NULL ? handle : handle->root;
 }
 
+/* A transient ENFORCED constructor uses the same early barrier/state, but
+ * never receives the separate pending final-adoption/adapter authority. */
+static int
+soac_has_pending_construction(SoacTypeContract *state)
+{
+    return state != NULL && state->construction != NULL &&
+        state->construction->spec.construction_mode == Py_SOAC_TYPE_CONSTRUCT_PENDING;
+}
+
 static unsigned int
 soac_type_phase(SoacTypeContract *state)
 {
@@ -145,8 +154,7 @@ soac_type_state_error(const char *message)
 static void
 soac_fail_construction(SoacConstructionHandle *handle)
 {
-    if (handle != NULL &&
-        handle->spec.construction_mode == Py_SOAC_TYPE_CONSTRUCT_PENDING) {
+    if (handle != NULL) {
         SoacConstructionHandle *root = soac_construction_root(handle);
         if (root->lineage_phase != SOAC_LINEAGE_RESOLVED) {
             root->lineage_phase = SOAC_LINEAGE_FAILED;
@@ -155,7 +163,7 @@ soac_fail_construction(SoacConstructionHandle *handle)
 }
 
 static int
-soac_pending_constructor_live(PyTypeObject *type)
+soac_constructor_live(PyTypeObject *type)
 {
     SoacTypeContract *state = soac_type_state(type);
     if (state == NULL || state->construction == NULL ||
@@ -232,8 +240,17 @@ _PySOAC_FailPendingType(PyTypeObject *type)
     if (state != NULL && state->construction != NULL &&
         state->phase != Py_SOAC_TYPE_STATE_ENFORCED &&
         state->phase != Py_SOAC_TYPE_STATE_DYNAMIC) {
-        soac_fail_construction(state->construction);
+        SoacConstructionHandle *handle = state->construction;
+        soac_fail_construction(handle);
         state->phase = Py_SOAC_TYPE_STATE_FAILED;
+        if (handle->spec.construction_mode == Py_SOAC_TYPE_CONSTRUCT_ENFORCED) {
+            /* Publish failure before retiring the transient metadata edge.
+             * An escaped failed type must not extend the legacy caller's
+             * namespace-function/namespace/keyword input lifetime. */
+            PyObject *error = PyErr_GetRaisedException();
+            Py_CLEAR(state->construction);
+            PyErr_SetRaisedException(error);
+        }
     }
 }
 
@@ -642,15 +659,16 @@ soac_new_construction_handle(const PySoacTypeConstructionSpec *spec,
     Py_XINCREF(spec->contract.object_slot_fields);
     Py_XINCREF(spec->contract.protected_names);
     Py_XINCREF(spec->contract.final_methods);
-    if (spec->construction_mode == Py_SOAC_TYPE_CONSTRUCT_PENDING) {
-        handle->reserved_state = soac_new_type_state(spec->owner, Py_SOAC_TYPE_STATE_PENDING);
-        if (handle->reserved_state == NULL) {
-            Py_DECREF(handle);
-            return NULL;
-        }
-        handle->reserved_state->commit_final = captured.commit_final;
-        PyObject_GC_Track(handle->reserved_state);
+    /* Both modes reserve the sole sidecar before actual type allocation.
+     * ENFORCED opens it only after its existing full-policy/bind phase;
+     * PENDING keeps it for the separately authenticated final admission. */
+    handle->reserved_state = soac_new_type_state(spec->owner, Py_SOAC_TYPE_STATE_PENDING);
+    if (handle->reserved_state == NULL) {
+        Py_DECREF(handle);
+        return NULL;
     }
+    handle->reserved_state->commit_final = captured.commit_final;
+    PyObject_GC_Track(handle->reserved_state);
     PyObject_GC_Track(handle);
     return (PyObject *)handle;
 #endif
@@ -845,7 +863,7 @@ soac_class_dictionary_policy(PyObject *owner, PyObject *dict, PyObject *key,
         if (soac_object_slot_name_index(state, key) >= 0) {
             return soac_validate_existing_slot_descriptor(state, key, value);
         }
-        if (!state->sealed && state->construction != NULL &&
+        if (!state->sealed && soac_has_pending_construction(state) &&
             value != NULL && key != NULL && PyUnicode_CheckExact(key)) {
             unsigned int role = _PyUnicode_Equal(key, &_Py_ID(__setattr__))
                 ? Py_SOAC_DATACLASS_FROZEN_SETATTR
@@ -973,8 +991,8 @@ _PySOAC_MatchesClassNamespacePolicy(PyObject *policy_owner,
 
 /* The same immutable policy preparation serves legacy construction and
  * pending final admission. Its temporary, untracked result is not attached to
- * a second type slot; pending admission MOVE-transfers its policy payload to
- * the one previously published state. No execution primary is added. */
+ * a second type slot; both paths MOVE-transfer its policy payload to the one
+ * preallocated published state. No execution primary is added. */
 static SoacTypeContract *
 soac_prepare_type_contract(PyTypeObject *type, PyObject *owner,
                            const PySoacTypeContractSpecV4 *spec)
@@ -1067,26 +1085,101 @@ soac_prepare_type_contract(PyTypeObject *type, PyObject *owner,
     return state;
 }
 
+static void
+soac_move_prepared_policy(SoacTypeContract *state, SoacTypeContract *prepared)
+{
+    /* The preallocated state has no previous own policy. Any inherited-only
+     * dictionary owner remains this exact state, never removed/replaced. */
+    assert(state->fields == NULL && state->protected_names == NULL &&
+           state->final_methods == NULL && state->object_slots == NULL);
+    state->fields = prepared->fields; prepared->fields = NULL;
+    state->object_slot_fields = prepared->object_slot_fields; prepared->object_slot_fields = NULL;
+    state->protected_names = prepared->protected_names; prepared->protected_names = NULL;
+    state->final_methods = prepared->final_methods; prepared->final_methods = NULL;
+    state->object_slots = prepared->object_slots; prepared->object_slots = NULL;
+    state->object_slot_count = prepared->object_slot_count; prepared->object_slot_count = 0;
+    state->flags = prepared->flags;
+    state->dictionary_mode = prepared->dictionary_mode;
+    state->prepare_instance_dictionary_policy = prepared->prepare_instance_dictionary_policy;
+    state->check_instance_write = prepared->check_instance_write;
+    state->new_instance_dict = prepared->new_instance_dict;
+}
+
+/* Ready may have run reentrantly before the ENFORCED bind, or normally
+ * before PENDING admission. In both cases strengthen the same inherited-only
+ * policy; never replace it or normalize the namespace a second time. */
+static int
+soac_install_class_dictionary_policy(PyTypeObject *type, SoacTypeContract *state)
+{
+    if (state->class_dictionary_policy_installed) {
+        if (!PyDict_MatchesSoacPolicy(type->tp_dict, (PyObject *)state,
+                                      soac_class_dictionary_policy, 0)) {
+            return soac_type_state_error("inherited type dictionary policy changed");
+        }
+        Py_ssize_t pos = 0;
+        PyObject *key, *value;
+        while (PyDict_Next(type->tp_dict, &pos, &key, &value)) {
+            if (soac_class_dictionary_policy((PyObject *)state, type->tp_dict,
+                    key, value, PyDict_SOAC_VALIDATE_INITIAL, NULL) < 0) return -1;
+        }
+        return 0;
+    }
+    if (PyDict_SetSoacPolicy(type->tp_dict, (PyObject *)state,
+                             soac_class_dictionary_policy, 0) < 0) return -1;
+    state->class_dictionary_policy_installed = 1;
+    return 0;
+}
+
+static int
+soac_legacy_binding_live(PyTypeObject *type, SoacTypeContract *state,
+                         SoacConstructionHandle *handle, PyObject *owner)
+{
+    if (PyErr_Occurred()) return -1;
+    /* Compare the current owning slot before dereferencing the borrowed state
+     * again. Registered bind/policy callbacks may reenter native teardown. */
+    if (state == NULL || soac_type_state(type) != state ||
+        state->type != type || state->owner != owner ||
+        state->construction != handle || handle->spec.owner != owner ||
+        handle->spec.construction_mode != Py_SOAC_TYPE_CONSTRUCT_ENFORCED ||
+        soac_constructor_live(type) < 0) {
+        return soac_type_state_error("legacy native owner binding was invalidated");
+    }
+    return 0;
+}
+
 static int
 soac_install_type_contract(PyTypeObject *type, SoacConstructionHandle *handle,
                            _PySoacDataclassSlotsContext *slots_context)
 {
     if (handle->spec.construction_mode == Py_SOAC_TYPE_CONSTRUCT_PENDING) {
-        return soac_pending_constructor_live(type);
+        return soac_constructor_live(type);
     }
     PySoacTypeConstructionSpec *spec = &handle->spec;
-    SoacTypeContract *state = soac_prepare_type_contract(type, spec->owner, &spec->contract);
-    if (state == NULL) return -1;
+    PyObject *owner = spec->owner;
+    SoacTypeContract *state = soac_type_state(type);
+    SoacTypeContract *prepared = NULL;
+    if (soac_legacy_binding_live(type, state, handle, owner) < 0) goto failed_binding;
+    prepared = soac_prepare_type_contract(type, owner, &spec->contract);
+    if (prepared == NULL ||
+        soac_legacy_binding_live(type, state, handle, owner) < 0) goto failed_binding;
+    soac_move_prepared_policy(state, prepared);
     state->permanent_contract_published = 1;
-    state->type = type;
-    ((PyHeapTypeObject *)type)->ht_soac_contract = (PyObject *)state;
     type->tp_flags |= Py_TPFLAGS_SOAC_CONTRACT;
-    PyObject_GC_Track(state);
+    Py_CLEAR(prepared);
+    /* Public Ready may already have run from classcell/GC callbacks. Publish
+     * the full native policy before invalidating any warmed type caches; the
+     * allocation barrier remains closed through notification/revalidation. */
+    if (type->tp_flags & Py_TPFLAGS_READY) PyType_Modified(type);
+    if (PyErr_Occurred() ||
+        soac_legacy_binding_live(type, state, handle, owner) < 0) goto failed_binding;
     if (slots_context != NULL &&
         _PySOAC_DataclassBindSlotsType(slots_context, (PyObject *)type, spec->owner) < 0) {
         goto failed_binding;
     }
-    if (spec->bind_type != NULL && spec->bind_type(spec->owner, (PyObject *)type) < 0) {
+    if (soac_legacy_binding_live(type, state, handle, owner) < 0) goto failed_binding;
+    int binding_status = spec->bind_type == NULL ? 0
+        : spec->bind_type(owner, (PyObject *)type);
+    if (binding_status != 0 || PyErr_Occurred()) {
         if (!PyErr_Occurred()) {
             PyObject *error = PySoac_GetStrictRuntimeUnavailableError();
             if (error != NULL) {
@@ -1095,10 +1188,12 @@ soac_install_type_contract(PyTypeObject *type, SoacConstructionHandle *handle,
         }
         goto failed_binding;
     }
+    if (soac_legacy_binding_live(type, state, handle, owner) < 0) goto failed_binding;
     if (slots_context != NULL &&
         _PySOAC_DataclassBindSlotsType(slots_context, (PyObject *)type, spec->owner) < 0) {
         goto failed_binding;
     }
+    if (soac_legacy_binding_live(type, state, handle, owner) < 0) goto failed_binding;
     if (slots_context != NULL) {
         PyObject *hooks[] = {&_Py_ID(__setattr__), &_Py_ID(__delattr__)};
         PyObject **slots[] = {&state->initial_frozen_setattr,
@@ -1113,22 +1208,37 @@ soac_install_type_contract(PyTypeObject *type, SoacConstructionHandle *handle,
             *slots[i] = value;
         }
     }
-    int policy_status = PyDict_SetSoacPolicy(type->tp_dict, (PyObject *)state,
-                                            soac_class_dictionary_policy, 0);
+    if (soac_legacy_binding_live(type, state, handle, owner) < 0) goto failed_binding;
+    int policy_status = soac_install_class_dictionary_policy(type, state);
+    if (soac_legacy_binding_live(type, state, handle, owner) < 0) goto failed_binding;
     state->initial_frozen_setattr = NULL;
     state->initial_frozen_delattr = NULL;
-    if (policy_status == 0) state->class_dictionary_policy_installed = 1;
-    if (policy_status < 0 ||
+    if (policy_status < 0 || PyErr_Occurred() ||
         (slots_context != NULL &&
-         _PySOAC_DataclassBindSlotsType(slots_context, (PyObject *)type, spec->owner) < 0)) {
+         _PySOAC_DataclassBindSlotsType(slots_context, (PyObject *)type, owner) < 0) ||
+        soac_legacy_binding_live(type, state, handle, owner) < 0) {
         goto failed_binding;
     }
+    /* Full native policy and the actual legacy binding now exist. Preserve
+     * the original allocation boundary before Ready/set_name/init_subclass,
+     * and release only the new transient state-to-handle edge. The legacy
+     * caller still owns its handle and input retirement exactly as before. */
+    soac_construction_root(handle)->lineage_phase = SOAC_LINEAGE_RESOLVED;
+    state->phase = Py_SOAC_TYPE_STATE_ENFORCED;
+    Py_CLEAR(state->construction);
     return 0;
 
 failed_binding:
-    state->terminal = 1;
-    state->initial_frozen_setattr = NULL;
-    state->initial_frozen_delattr = NULL;
+    soac_fail_construction(handle);
+    if (state != NULL && soac_type_state(type) == state) {
+        state->terminal = 1;
+        state->initial_frozen_setattr = NULL;
+        state->initial_frozen_delattr = NULL;
+    }
+    _PySOAC_FailPendingType(type);
+    PyObject *error = PyErr_GetRaisedException();
+    Py_XDECREF(prepared);
+    PyErr_SetRaisedException(error);
     if (slots_context != NULL) {
         _PySOAC_DataclassFailSlots(slots_context,
                                    "replacement contract failed before Ready");
@@ -1213,10 +1323,9 @@ soac_retire_pending_handle_inputs(SoacConstructionHandle *handle)
 /* Reserve before allocation, then move through a C local. A collecting type
  * allocator may fail the lineage but cannot release this future barrier. */
 static SoacTypeContract *
-soac_take_pending_state(SoacConstructionHandle *handle)
+soac_take_construction_state(SoacConstructionHandle *handle)
 {
-    if (handle == NULL ||
-        handle->spec.construction_mode != Py_SOAC_TYPE_CONSTRUCT_PENDING) return NULL;
+    if (handle == NULL) return NULL;
     SoacTypeContract *state = handle->reserved_state;
     if (state == NULL || soac_construction_root(handle)->lineage_phase != SOAC_LINEAGE_OPEN) {
         soac_fail_construction(handle);
@@ -1228,7 +1337,7 @@ soac_take_pending_state(SoacConstructionHandle *handle)
 }
 
 static void
-soac_attach_pending_type(PyTypeObject *type, SoacConstructionHandle *handle,
+soac_attach_construction_type(PyTypeObject *type, SoacConstructionHandle *handle,
                          SoacTypeContract *state)
 {
     if (state == NULL) return;
@@ -1248,7 +1357,7 @@ soac_bind_pending_type(PyTypeObject *type, SoacConstructionHandle *handle,
         handle->spec.construction_mode != Py_SOAC_TYPE_CONSTRUCT_PENDING) return 0;
     SoacTypeContract *state = soac_type_state(type);
     PyObject *owner = handle->spec.owner;
-    if (state == NULL || state->owner != owner || soac_pending_constructor_live(type) < 0) {
+    if (state == NULL || state->owner != owner || soac_constructor_live(type) < 0) {
         return soac_type_state_error("pending native owner binding is unavailable");
     }
     if (slots_context != NULL &&
@@ -1267,7 +1376,7 @@ soac_bind_pending_type(PyTypeObject *type, SoacConstructionHandle *handle,
      * type/handle, but logical state must be re-read after the callback. */
     if (status != 0 || PyErr_Occurred() || soac_type_state(type) != state ||
         state->owner != owner || state->construction != handle ||
-        soac_pending_constructor_live(type) < 0) {
+        soac_constructor_live(type) < 0) {
         soac_fail_construction(handle);
         return soac_type_state_error("pending native owner binding failed");
     }
@@ -1287,16 +1396,14 @@ soac_type_from_handle(SoacConstructionHandle *handle,
     handle->consumed = 1;
     SoacConstructionHandle *root = soac_construction_root(handle);
     int pending = handle->spec.construction_mode == Py_SOAC_TYPE_CONSTRUCT_PENDING;
-    if (pending) {
-        if (root->lineage_phase != SOAC_LINEAGE_OPEN ||
-            root->active_constructions == UINT_MAX) {
-            soac_fail_construction(handle);
-            soac_type_state_error("pending construction lineage is unavailable");
-            soac_retire_pending_handle_inputs(handle);
-            return NULL;
-        }
-        root->active_constructions++;
+    if (root->lineage_phase != SOAC_LINEAGE_OPEN ||
+        root->active_constructions == UINT_MAX) {
+        soac_fail_construction(handle);
+        soac_type_state_error("native construction lineage is unavailable");
+        if (pending) soac_retire_pending_handle_inputs(handle);
+        return NULL;
     }
+    root->active_constructions++;
     PySoacTypeConstructionSpec *spec = &handle->spec;
     PyObject *args = PyTuple_Pack(3, spec->name, spec->bases, spec->namespace_dict);
     PyObject *result = NULL;
@@ -1319,7 +1426,7 @@ soac_type_from_handle(SoacConstructionHandle *handle,
         }
         if (result != NULL &&
             (PyType_Type.tp_init(result, args, spec->keywords) < 0 ||
-             (pending && soac_pending_constructor_live((PyTypeObject *)result) < 0))) {
+             (pending && soac_constructor_live((PyTypeObject *)result) < 0))) {
             soac_fail_construction(handle);
             Py_CLEAR(result);
         }
@@ -1330,9 +1437,9 @@ soac_type_from_handle(SoacConstructionHandle *handle,
         /* Keep construction active across all input/metadata releases. An
          * input finalizer cannot admit a type before this C operation exits. */
         soac_retire_pending_handle_inputs(handle);
-        assert(root->active_constructions > 0);
-        root->active_constructions--;
     }
+    assert(root->active_constructions > 0);
+    root->active_constructions--;
     return result;
 }
 
@@ -1821,7 +1928,7 @@ _PySOAC_ReadyTypeInheritance(PyTypeObject *type)
         SoacTypeContract *state = soac_type_state(type);
         if (state != NULL && !state->permanent_contract_published &&
             state->construction != NULL) {
-            if (soac_pending_constructor_live(type) < 0 ||
+            if (soac_constructor_live(type) < 0 ||
                 state->inherited_final_names != NULL || PyDict_HasSoacPolicy(type->tp_dict)) {
                 Py_DECREF(names);
                 return soac_type_state_error("pending inherited namespace policy changed");

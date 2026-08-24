@@ -363,7 +363,9 @@ typedef struct {
     PyObject *bases;
     PyObject *namespace_dict;
     PyObject *keywords;
-    /* ENFORCED keeps the existing bind phase after set_attrs.
+    /* ENFORCED keeps the existing bind phase after set_attrs, with the early
+     * instance barrier still closed until full native policy/bind validation.
+     * It then opens before Ready callbacks; no pending-admission API is granted.
      * PENDING runs after copied-namespace installation, before set_attrs, under
      * the native barrier. It may allocate/reenter; exact native state is
      * revalidated on return. Final admission uses the separate strict commit. */
