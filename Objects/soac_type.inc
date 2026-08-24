@@ -1630,6 +1630,17 @@ _PySOAC_CheckClassAssignment(PyTypeObject *old_type, PyTypeObject *new_type)
 int
 _PySOAC_CheckDictionaryReplacement(PyObject *object)
 {
+    /* An ordinary instance may detach a foreign protected dictionary alias.
+     * A module's actual md_dict is its authoritative global namespace, not
+     * such an alias. Keep its identity through every supported setter while
+     * initializing as well as after sealing. Inspect the native slot directly:
+     * Python attribute overrides cannot grant replacement permission. */
+    if (PyModule_Check(object) &&
+        _PyDict_HasSoacBindingPolicy(((PyModuleObject *)object)->md_dict)) {
+        PyErr_SetString(soac_type_mutation_error(),
+                        "cannot replace a protected module's __dict__");
+        return -1;
+    }
     if (_PySOAC_UsesInstanceDictionaryPolicy(Py_TYPE(object))) {
         PyErr_SetString(soac_type_mutation_error(), "cannot replace a strict instance dictionary");
         return -1;
