@@ -44,7 +44,12 @@ struct _PyInterpreterFrame {
     /* Index of thread-local bytecode containing instr_ptr. */
     int32_t tlbc_index;
 #endif
-    uint16_t return_offset;  /* Only relevant during a function call */
+    union {
+        uint16_t return_offset;  /* Only relevant during a function call */
+        /* Lifetime-only frames never execute. Their exceptional retained map
+         * edges reuse this mutually exclusive scalar without changing layout. */
+        uint16_t soac_lifetime_owned_environment;
+    };
     char owner;
 #ifdef Py_DEBUG
     uint8_t visited:1;

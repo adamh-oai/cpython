@@ -14,6 +14,14 @@ _PyFrame_Traverse(_PyInterpreterFrame *frame, visitproc visit, void *arg)
     Py_VISIT(frame->f_locals);
     Py_VISIT(frame->soac_dataclass_invocation);
     Py_VISIT(frame->soac_dataclass_checked_activation);
+    if (_PyFrame_IsSoacLifetime(frame)) {
+        if (frame->soac_lifetime_owned_environment & SOAC_LIFETIME_OWNS_GLOBALS) {
+            Py_VISIT(frame->f_globals);
+        }
+        if (frame->soac_lifetime_owned_environment & SOAC_LIFETIME_OWNS_BUILTINS) {
+            Py_VISIT(frame->f_builtins);
+        }
+    }
     _Py_VISIT_STACKREF(frame->f_funcobj);
     _Py_VISIT_STACKREF(frame->f_executable);
     return _PyGC_VisitFrameStack(frame, visit, arg);

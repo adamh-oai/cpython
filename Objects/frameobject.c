@@ -1985,6 +1985,10 @@ frame_dealloc(PyObject *op)
         frame->soac_dataclass_role = 0;
         Py_CLEAR(frame->soac_dataclass_invocation);
         Py_CLEAR(frame->soac_dataclass_checked_activation);
+        if (_PyFrame_IsSoacLifetime(frame)) {
+            frame->owner = FRAME_OWNED_BY_SOAC_CLEARED;
+            _PyFrame_ClearSoacLifetimeEnvironment(frame);
+        }
         PyStackRef_CLEAR(frame->f_executable);
         PyStackRef_CLEAR(frame->f_funcobj);
         Py_CLEAR(frame->f_locals);
@@ -2030,6 +2034,7 @@ frame_tp_clear(PyObject *op)
     }
     if (_PyFrame_IsSoacLifetime(f->f_frame)) {
         f->f_frame->owner = FRAME_OWNED_BY_SOAC_CLEARED;
+        _PyFrame_ClearSoacLifetimeEnvironment(f->f_frame);
     }
     f->f_frame->soac_dataclass_role = 0;
     Py_CLEAR(f->f_frame->soac_dataclass_invocation);

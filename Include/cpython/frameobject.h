@@ -36,7 +36,7 @@ typedef struct {
 
 /* Explicit source-lifetime ownership, never native-bytecode permission.
  * This private prototype is GIL-build-only. */
-#define PySoac_LIFETIME_FRAME_ABI_VERSION 1
+#define PySoac_LIFETIME_FRAME_ABI_VERSION 2
 
 /* The caller owns exactly one active reference. No source binding, function,
  * globals, or closure is copied into this frame while the source runs. */
@@ -58,6 +58,12 @@ PyAPI_FUNC(int) PyFrame_AddSoacTraceback(
  * reference exists, copy the actual source owners in co_localsplus order and
  * the actual active function; NULL slots are unbound, cell/free slots are the
  * original cells. Never reread the function's mutable current closure/code.
+ * captured_globals/captured_builtins are non-NULL borrowed activation snapshots,
+ * independently kept alive by the caller. They are not reread from function
+ * fields, which cyclic GC may already have cleared. No mapping-type restriction
+ * is imposed on captured builtins. Retained frames own any environment object
+ * no longer covered by the function or whose function is pending cyclic-GC
+ * clearing, without adding any ACTIVE frame edges.
  * source_namespace is NULL for optimized function code and the actual owned
  * mapping for nonoptimized module/class code. It is never inferred from the
  * function's globals or copied into a dictionary snapshot.
@@ -66,6 +72,7 @@ PyAPI_FUNC(int) PyFrame_AddSoacTraceback(
  * active frame reference. Explicit source del/rebinding must already have
  * updated those primaries. Finish is required on terminal/deallocation paths,
  * including an unstarted generator's valid throw, and is one-use. */
-PyAPI_FUNC(int) PyFrame_FinishSoacLifetime(
-    PyFrameObject *frame, PyObject *source_function, PyObject *source_namespace,
+PyAPI_FUNC(int) PyFrame_FinishSoacLifetimeWithEnvironment(
+    PyFrameObject *frame, PyObject *source_function,
+    PyObject *captured_globals, PyObject *captured_builtins, PyObject *source_namespace,
     PyObject *const *source_owners, Py_ssize_t count);

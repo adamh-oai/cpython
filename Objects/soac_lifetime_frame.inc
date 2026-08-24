@@ -3,6 +3,7 @@
  * Python locals. The source activation owns its sole primary frame reference.
  * At terminal retirement, retained tracebacks take the then-current owners.
  */
+#include "pycore_gc.h"  // _PyGC_PREV_MASK_COLLECTING
 
 static int
 soac_frame_unavailable(const char *operation)
@@ -120,10 +121,16 @@ PyFrame_AddSoacTraceback(PyFrameObject *object,
 }
 
 int
-PyFrame_FinishSoacLifetime(PyFrameObject *object, PyObject *source_function,
-                           PyObject *source_namespace,
-                           PyObject *const *source_owners, Py_ssize_t count)
+PyFrame_FinishSoacLifetimeWithEnvironment(
+    PyFrameObject *object, PyObject *source_function,
+    PyObject *captured_globals, PyObject *captured_builtins,
+    PyObject *source_namespace, PyObject *const *source_owners, Py_ssize_t count)
 {
+#ifdef Py_GIL_DISABLED
+    PyErr_SetString(PyExc_NotImplementedError,
+                    "source-lifetime frames require the selected GIL build");
+    return -1;
+#else
     if (object == NULL || !PyFrame_Check(object) ||
         object->f_frame->owner != FRAME_OWNED_BY_SOAC_ACTIVE ||
         source_function == NULL || !PyFunction_Check(source_function)) {
@@ -140,10 +147,14 @@ PyFrame_FinishSoacLifetime(PyFrameObject *object, PyObject *source_function,
                         "source-lifetime namespace does not match the original code scope");
         return -1;
     }
-    if (count != code->co_nlocalsplus || (count != 0 && source_owners == NULL) ||
-        function->func_globals == NULL || function->func_builtins == NULL) {
+    if (count != code->co_nlocalsplus || (count != 0 && source_owners == NULL)) {
         PyErr_SetString(PyExc_ValueError,
                         "source-lifetime owners do not match the original code layout");
+        return -1;
+    }
+    if (captured_globals == NULL || captured_builtins == NULL) {
+        PyErr_SetString(PyExc_ValueError,
+                        "source-lifetime finish requires the captured function environment");
         return -1;
     }
     for (Py_ssize_t i = 0; i < count; i++) {
@@ -164,8 +175,25 @@ PyFrame_FinishSoacLifetime(PyFrameObject *object, PyObject *source_function,
         return 0;
     }
     frame->f_funcobj = PyStackRef_FromPyObjectNew(source_function);
-    frame->f_globals = function->func_globals;
-    frame->f_builtins = function->func_builtins;
+    frame->f_globals = captured_globals;
+    frame->f_builtins = captured_builtins;
+    /* Cyclic GC may already have cleared this still-allocated function, or it
+     * may still be queued for tp_clear after this owner. delete_garbage does not
+     * recheck reachability after Finish adds the function reference. Retain the
+     * explicit environment in either case. This is the function's own pending
+     * collection state, not an ambient "GC is running" test: reachable ordinary
+     * functions still add no map edges or refcount changes. */
+    assert(frame->soac_lifetime_owned_environment == 0);
+    int function_collecting =
+        (_Py_AS_GC(source_function)->_gc_prev & _PyGC_PREV_MASK_COLLECTING) != 0;
+    if (function_collecting || function->func_globals != captured_globals) {
+        Py_INCREF(captured_globals);
+        frame->soac_lifetime_owned_environment |= SOAC_LIFETIME_OWNS_GLOBALS;
+    }
+    if (function_collecting || function->func_builtins != captured_builtins) {
+        Py_INCREF(captured_builtins);
+        frame->soac_lifetime_owned_environment |= SOAC_LIFETIME_OWNS_BUILTINS;
+    }
     frame->f_locals = Py_XNewRef(source_namespace);
     for (Py_ssize_t i = 0; i < count; i++) {
         frame->localsplus[i] = source_owners[i] == NULL ? PyStackRef_NULL
@@ -173,4 +201,5 @@ PyFrame_FinishSoacLifetime(PyFrameObject *object, PyObject *source_function,
     }
     frame->stackpointer = frame->localsplus + count;
     return 1;
+#endif
 }
