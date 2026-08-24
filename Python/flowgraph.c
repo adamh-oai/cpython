@@ -47,6 +47,13 @@ typedef struct _PySoacCfgStaticSwap {
     _PySoacReadOrigins last;
 } soac_cfg_static_swap;
 
+typedef struct _PySoacCfgUnreachableAllocation {
+    struct _PySoacCfgUnreachableAllocation *next;
+    _PySoacReadOrigins origins;
+    int opcode;
+    int oparg;
+} soac_cfg_unreachable_allocation;
+
 typedef struct _PyCfgBasicblock {
     /* Each basicblock in a compilation unit is linked via b_list in the
        reverse order that the block are allocated.  b_list points to the next
@@ -68,6 +75,7 @@ typedef struct _PyCfgBasicblock {
     unsigned b_soac_handler_ambiguous : 1;
     int b_soac_final_ordinal;
     soac_cfg_static_swap *b_soac_static_swaps;
+    soac_cfg_unreachable_allocation *b_soac_unreachable_allocations;
     /* pointer to an array of instructions, initially NULL */
     cfg_instr *b_instr;
     /* If b_next is non-NULL, it is a pointer to the next
@@ -495,6 +503,12 @@ _PyCfgBuilder_Free(cfg_builder *g)
             soac_cfg_static_swap *next_swap = swap->next;
             PyMem_Free(swap);
             swap = next_swap;
+        }
+        soac_cfg_unreachable_allocation *allocation = b->b_soac_unreachable_allocations;
+        while (allocation != NULL) {
+            soac_cfg_unreachable_allocation *next_allocation = allocation->next;
+            PyMem_Free(allocation);
+            allocation = next_allocation;
         }
         basicblock *next = b->b_list;
         PyMem_Free((void *)b);
@@ -1121,6 +1135,28 @@ remove_unreachable(basicblock *entryblock) {
     /* Delete unreachable instructions */
     for (basicblock *b = entryblock; b != NULL; b = b->b_next) {
        if (b->b_predecessors == 0) {
+            /* Observe only the actual native reachability decision, before its
+             * instructions are erased. Missing final origins are not this proof.
+             * Untagged ordinary compilation allocates no metadata receipts. */
+            for (int i = 0; i < b->b_iused; i++) {
+                cfg_instr *instruction = &b->b_instr[i];
+                int opcode = instruction->i_opcode;
+                if ((opcode != BUILD_LIST && opcode != BUILD_SET && opcode != BUILD_MAP) ||
+                    (instruction->i_soac_origins.lane[0] == 0 &&
+                     instruction->i_soac_origins.lane[1] == 0)) {
+                    continue;
+                }
+                soac_cfg_unreachable_allocation *receipt = PyMem_Malloc(sizeof(*receipt));
+                if (receipt == NULL) {
+                    PyErr_NoMemory();
+                    return ERROR;
+                }
+                *receipt = (soac_cfg_unreachable_allocation){
+                    b->b_soac_unreachable_allocations, instruction->i_soac_origins,
+                    opcode, instruction->i_oparg,
+                };
+                b->b_soac_unreachable_allocations = receipt;
+            }
             b->b_iused = 0;
             b->b_except_handler = 0;
        }
@@ -4118,6 +4154,11 @@ _PyCfg_OptimizedCfgToInstructionSequence(cfg_builder *g,
                  swap != NULL; swap = swap->next) {
                 RETURN_IF_ERROR(_PyCompile_SoacScopeStaticSwap(umd, swap->rotation,
                     swap->depth, swap->first, swap->last));
+            }
+            for (soac_cfg_unreachable_allocation *allocation = b->b_soac_unreachable_allocations;
+                 allocation != NULL; allocation = allocation->next) {
+                RETURN_IF_ERROR(_PyCompile_SoacScopeUnreachableAllocation(umd,
+                    allocation->origins, allocation->opcode, allocation->oparg));
             }
         }
         int count = 0;

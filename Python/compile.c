@@ -172,7 +172,10 @@ typedef struct {
     int result_kind;  /* -1 explicitly unsupported; zero is keep, never proof */
     location result_statement;
     uint32_t result_origin;
+    /* Positive CFG reachability evidence for this exact original allocation. */
+    uint32_t unreachable_allocation;
     /* Serialization-local proof state; only complete constructed rows set it. */
+    int lifecycle_copy_omitted;
     int protection_complete;
     int normal_complete;
     int normal_group_coherent;
@@ -2435,6 +2438,39 @@ error:
     return ERROR;
 }
 
+int
+_PyCompile_SoacScopeUnreachableAllocation(_PyCompile_CodeUnitMetadata *umd,
+                                           _PySoacReadOrigins origins,
+                                           int opcode, int oparg)
+{
+    soac_code_bindings *unit = umd->u_soac_bindings;
+    if (unit == NULL) {
+        return SUCCESS;
+    }
+    if (origins.lane[0] > unit->reference_origins.count ||
+        origins.lane[1] > unit->reference_origins.count) {
+        return soac_binding_error("unreachable allocation has an invalid original operation");
+    }
+    soac_reference_origin *origin = soac_operation_at(unit, origins.lane[0]);
+    soac_scope_event *event = soac_scope_event_at(unit, origin);
+    if (event == NULL) {
+        return SUCCESS;  /* A non-lifecycle collection or call preparation. */
+    }
+    if (origins.lane[1] != 0 || event->kind != Py_SOAC_SCOPE_BUILD_COLLECTION ||
+        event->region < 0 || event->region >= unit->regions.count ||
+        origin->initial_opcode != opcode || origin->initial_slot != oparg) {
+        return soac_binding_error("unreachable collection differs from its original allocation");
+    }
+    RETURN_IF_ERROR(soac_validate_scope_event_producer(unit, event, opcode, oparg));
+    soac_binding_region *region = &unit->regions.items[event->region];
+    if (region->unreachable_allocation != 0 &&
+        region->unreachable_allocation != event->origin) {
+        return soac_binding_error("unreachable collection has two original allocation identities");
+    }
+    region->unreachable_allocation = event->origin;
+    return SUCCESS;
+}
+
 void
 _PyCompile_SoacScopeProtectionUncertain(_PyCompile_CodeUnitMetadata *umd)
 {
@@ -2805,6 +2841,11 @@ soac_same_final_references(soac_code_bindings *left, soac_code_bindings *right)
         }
         int same = soac_same_final_origin(left, soac_operation_at(left, a->result_origin),
                                          right, soac_operation_at(right, b->result_origin));
+        if (same <= 0) {
+            return same;
+        }
+        same = soac_same_final_origin(left, soac_operation_at(left, a->unreachable_allocation),
+                                     right, soac_operation_at(right, b->unreachable_allocation));
         if (same <= 0) {
             return same;
         }

@@ -819,6 +819,54 @@ done:
     return row;
 }
 
+/* This predicate starts with a positive remove_unreachable observation of
+ * the exact native BuildCollection instruction. Absence is only a further
+ * consistency check: a surviving prefix, consumer, handler member or cloned
+ * lane keeps the copy unsupported, even if the allocation itself vanished. */
+static int
+soac_scope_copy_observed_unreachable(soac_code_bindings *unit, Py_ssize_t region_id)
+{
+    soac_binding_region *region = &unit->regions.items[region_id];
+    if (region->unreachable_allocation == 0 || unit->scope_protection_uncertain ||
+        region->protection != Py_SOAC_SCOPE_FINALLY_AFTER_PREFIX) {
+        return 0;
+    }
+    soac_scope_event *build = soac_scope_original_event(unit, region_id,
+        Py_SOAC_SCOPE_PHASE_BODY, Py_SOAC_SCOPE_BUILD_COLLECTION, region->kind);
+    if (build == NULL || build->origin != region->unreachable_allocation ||
+        soac_operation_at(unit, build->origin)->emission_context == -2) {
+        return 0;
+    }
+    for (Py_ssize_t i = 0; i < unit->scope_events.count; i++) {
+        soac_scope_event *event = &unit->scope_events.items[i];
+        if (event->region == region_id && event->alternative) {
+            return 0;
+        }
+    }
+    for (Py_ssize_t i = 0; i < unit->reference_instructions.count; i++) {
+        soac_reference_instruction *instruction = &unit->reference_instructions.items[i];
+        if (instruction->opcode == NOP) {
+            continue;
+        }
+        for (int lane = 0; lane < 2; lane++) {
+            uint32_t id = instruction->origins.lane[lane];
+            soac_scope_event *event = soac_scope_event_at(unit, soac_operation_at(unit, id));
+            if ((event != NULL && event->region == region_id) ||
+                (id != 0 && id == region->result_origin)) {
+                return 0;
+            }
+        }
+    }
+    for (Py_ssize_t i = 0; i < unit->scope_protection_members.count; i++) {
+        soac_scope_protection_member *member = &unit->scope_protection_members.items[i];
+        soac_scope_event *enter = soac_scope_event_at(unit, soac_operation_at(unit, member->enter));
+        if (enter == NULL || enter->region == region_id) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static PyObject *
 soac_scope_lifecycle_rows(soac_code_bindings *unit, Py_ssize_t representative, PyObject *gaps)
 {
@@ -828,14 +876,38 @@ soac_scope_lifecycle_rows(soac_code_bindings *unit, Py_ssize_t representative, P
         Py_XDECREF(normal);
         return NULL;
     }
+    int retained_allocation = 0;
     for (Py_ssize_t i = 0; i < unit->regions.count; i++) {
         if (soac_region_representative(unit, i) != representative) {
             continue;
         }
         soac_binding_region *region = &unit->regions.items[i];
+        soac_scope_event *build = soac_scope_original_event(unit, i,
+            Py_SOAC_SCOPE_PHASE_BODY, Py_SOAC_SCOPE_BUILD_COLLECTION, region->kind);
+        soac_reference_origin *origin = build == NULL ? NULL : soac_operation_at(unit, build->origin);
+        if (origin != NULL && soac_scope_direct_event_instruction(unit, build,
+                origin->emission_context) != NULL) {
+            retained_allocation = 1;
+        }
+        else if (PyErr_Occurred()) {
+            goto error;
+        }
+    }
+    for (Py_ssize_t i = 0; i < unit->regions.count; i++) {
+        if (soac_region_representative(unit, i) != representative) {
+            continue;
+        }
+        soac_binding_region *region = &unit->regions.items[i];
+        region->lifecycle_copy_omitted = 0;
         region->protection_complete = region->normal_complete = region->normal_group_coherent = 0;
         region->rewritten_rotation = 0;
         Py_CLEAR(region->normal_schedule);
+        /* A wholly eliminated original still publishes its old refusal gaps.
+         * Only a dead physical copy of a surviving original can be omitted. */
+        if (retained_allocation && soac_scope_copy_observed_unreachable(unit, i)) {
+            region->lifecycle_copy_omitted = 1;
+            continue;
+        }
         soac_scope_event *build = soac_scope_original_event(unit, i,
             Py_SOAC_SCOPE_PHASE_BODY, Py_SOAC_SCOPE_BUILD_COLLECTION, region->kind);
         soac_reference_origin *origin = build == NULL ? NULL : soac_operation_at(unit, build->origin);
@@ -889,6 +961,9 @@ soac_scope_lifecycle_rows(soac_code_bindings *unit, Py_ssize_t representative, P
             continue;
         }
         soac_binding_region *region = &unit->regions.items[i];
+        if (region->lifecycle_copy_omitted) {
+            continue;
+        }
         complete &= region->normal_complete;
         if (!region->normal_complete) {
             continue;
@@ -910,6 +985,9 @@ soac_scope_lifecycle_rows(soac_code_bindings *unit, Py_ssize_t representative, P
             continue;
         }
         soac_binding_region *region = &unit->regions.items[i];
+        if (region->lifecycle_copy_omitted) {
+            continue;
+        }
         region->normal_group_coherent = complete && !divergent;
         if (divergent) {
             soac_scope_event *build = soac_scope_original_event(unit, i,
@@ -949,6 +1027,9 @@ soac_scope_event_has_lifecycle_proof(soac_code_bindings *unit, soac_scope_event 
             return 0;
         }
         soac_binding_region *region = &unit->regions.items[candidate->region];
+        if (region->lifecycle_copy_omitted) {
+            continue;
+        }
         found = 1;
         if (event->kind == Py_SOAC_SCOPE_PROTECT_ENTER || event->kind == Py_SOAC_SCOPE_PROTECT_EXIT) {
             if (!region->protection_complete) {

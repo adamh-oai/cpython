@@ -122,6 +122,8 @@ int _PyCompile_SoacScopeProtectionMember(_PyCompile_CodeUnitMetadata *,
                                          int ordinal, _PySoacReadOrigins enter,
                                          _PySoacReadOrigins leave, int handler);
 void _PyCompile_SoacScopeProtectionUncertain(_PyCompile_CodeUnitMetadata *);
+int _PyCompile_SoacScopeUnreachableAllocation(_PyCompile_CodeUnitMetadata *,
+                                              _PySoacReadOrigins, int opcode, int oparg);
 int _PyCompile_SoacScopeStaticSwap(_PyCompile_CodeUnitMetadata *,
                                   _PySoacReadOrigins rotation, int depth,
                                   _PySoacReadOrigins first, _PySoacReadOrigins last);
