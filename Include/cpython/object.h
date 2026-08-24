@@ -369,12 +369,14 @@ PyAPI_FUNC(int) PyType_SetSoacDataclassMember(
     PyObject *function);
 
 /* Class construction pieces, not authentication capabilities. Preparation is
- * the exact tuple (metaclass, namespace, resolved_bases, keywords, classcell).
- * The caller executes its namespace body between Prepare and Complete, then
- * invokes the selected metaclass/native constructor before Finish. */
-PyAPI_FUNC(PyObject *) PySoac_PrepareClass(PyObject *, PyObject *, PyObject *, int);
+ * the exact tuple (metaclass, namespace, resolved_bases, keywords). The actual
+ * namespace body allocates/exports its own cells and returns ClassCell or None.
+ * Complete only installs changed original bases. The caller then invokes the
+ * selected metaclass/native constructor and passes that actual body result
+ * directly to Finish; no cell is inferred from the prepared mapping. */
+PyAPI_FUNC(PyObject *) PySoac_PrepareClass(PyObject *, PyObject *, PyObject *);
 PyAPI_FUNC(int) PySoac_CompleteClassNamespace(PyObject *, PyObject *);
-PyAPI_FUNC(int) PySoac_FinishClass(PyObject *, PyObject *, PyObject *);
+PyAPI_FUNC(int) PySoac_FinishClass(PyObject *name, PyObject *class_cell, PyObject *cls);
 
 /* Exact builtin descriptor reads for pre-Ready owner binding. Success only
  * borrows existing references: no attribute lookup, allocation, or callback.

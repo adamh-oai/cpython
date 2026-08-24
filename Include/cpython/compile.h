@@ -53,12 +53,74 @@ typedef struct {
 PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSource(
     const char *source, Py_ssize_t length, PyObject *filename, int optimize);
 
-/* Compile the same authenticated source once, returning (code, strings).
+/* Compile the same authenticated source once, returning (code, strings,
+ * (Py_SOAC_CLASS_BINDINGS_SCHEMA, nodes, class_recipes)). All containers are
+ * exact immutable tuples. Each node refers to an exact member of code's final
+ * constant tree; metadata never authorizes execution of that member.
  * strings is an exact tuple of (line, column, end_line, end_column, text)
  * entries for future-stringized annotations in that native AST. The returned
- * ordinary data is not an execution or optimizer capability. */
+ * ordinary data is not an execution or optimizer capability.
+ *
+ * Version 1 tuple rows (IDs are nonnegative, optional values are None):
+ * node = (id, parent_id, exact_code, scope_kind, symtable_kind, source_span)
+ * recipe = (class_id, owners, initializers, regions, captures, exports, accesses)
+ * owner = (id, kind, final_localsplus_index, native_kind_byte, region_id)
+ * initializer = (phase, entry_owner_id, role, incoming_free_ordinal_or_None)
+ * region = (id, parent_region_id, source_span, ordered_entry_ops, restores)
+ * entry_op = (kind, final_slot_index, allocation_or_saved_owner_id)
+ * restore = (final_slot_index, saved_owner_id)
+ * current_slot = (Py_SOAC_CLASS_CURRENT_SLOT, final_slot_index)
+ * capture = (child_id, creation_span, child_freevar_ordinal, current_slot)
+ * export = (role, current_slot)
+ * access = (original_Name_span, context, mode, current_slot)
+ * source_span = (line, UTF8_byte_column, end_line, end_UTF8_byte_column),
+ * or None when unavailable. Zero-width spans are permitted, not invented.
+ *
+ * Current slots, not allocation IDs, select closure/frame values after joins.
+ * SaveClear moves the actual current raw value; MakeCellFromCurrent wraps that
+ * raw value and replaces its slot only on success. Entry ops precede native
+ * SETUP_FINALLY: restores protect the entered body/result, not partial entry.
+ * Failed entry drops completed saved tokens as ordinary operand temporaries. */
 PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSourceDetails(
     const char *source, Py_ssize_t length, PyObject *filename, int optimize);
+
+/* Fixed wire values, independent of internal compiler enum numbering. */
+#define Py_SOAC_CLASS_BINDINGS_SCHEMA 1
+#define Py_SOAC_SCOPE_MODULE 0
+#define Py_SOAC_SCOPE_CLASS 1
+#define Py_SOAC_SCOPE_FUNCTION 2
+#define Py_SOAC_SCOPE_ASYNC_FUNCTION 3
+#define Py_SOAC_SCOPE_LAMBDA 4
+#define Py_SOAC_SCOPE_COMPREHENSION 5
+#define Py_SOAC_SCOPE_ANNOTATIONS 6
+#define Py_SOAC_SYMTABLE_FUNCTION 0
+#define Py_SOAC_SYMTABLE_CLASS 1
+#define Py_SOAC_SYMTABLE_MODULE 2
+#define Py_SOAC_SYMTABLE_ANNOTATION 3
+#define Py_SOAC_SYMTABLE_TYPE_ALIAS 4
+#define Py_SOAC_SYMTABLE_TYPE_PARAMETERS 5
+#define Py_SOAC_SYMTABLE_TYPE_VARIABLE 6
+#define Py_SOAC_CLASS_PHASE_ENTRY 0
+#define Py_SOAC_CLASS_PHASE_HEADER 1
+#define Py_SOAC_CLASS_INIT_UNBOUND 0
+#define Py_SOAC_CLASS_INIT_EMPTY_CELL 1
+#define Py_SOAC_CLASS_INIT_INCOMING_FREE 2
+#define Py_SOAC_CLASS_INIT_NAMESPACE 3
+#define Py_SOAC_CLASS_INIT_CONDITIONAL_SET 4
+#define Py_SOAC_CLASS_OWNER_ENTRY 0
+#define Py_SOAC_CLASS_OWNER_FRESH_CELL 1
+#define Py_SOAC_CLASS_OWNER_SAVED_SLOT 2
+#define Py_SOAC_CLASS_OP_SAVE_CLEAR 0
+#define Py_SOAC_CLASS_OP_MAKE_CELL 1
+#define Py_SOAC_CLASS_CURRENT_SLOT 0
+#define Py_SOAC_CLASS_EXPORT_CLASSCELL 0
+#define Py_SOAC_CLASS_EXPORT_CLASSDICTCELL 1
+#define Py_SOAC_CLASS_ACCESS_LOAD 0
+#define Py_SOAC_CLASS_ACCESS_STORE 1
+#define Py_SOAC_CLASS_ACCESS_DEL 2
+#define Py_SOAC_CLASS_ACCESS_RAW_SLOT 0
+#define Py_SOAC_CLASS_ACCESS_CELL_VALUE 1
+#define Py_SOAC_CLASS_ACCESS_NAMESPACE_OR_CELL 2
 
 /* Execute SETUP_ANNOTATIONS against the explicit actual local namespace. */
 PyAPI_FUNC(int) PySoac_SetupAnnotations(PyObject *locals);

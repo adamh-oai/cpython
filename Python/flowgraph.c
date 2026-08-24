@@ -3757,6 +3757,10 @@ insert_prefix_instructions(_PyCompile_CodeUnitMetadata *umd, basicblock *entrybl
                 PyMem_RawFree(sorted);
                 return ERROR;
             }
+            if (_PyCompile_SoacEntryCell(umd, oldindex) < 0) {
+                PyMem_RawFree(sorted);
+                return ERROR;
+            }
             ncellsused += 1;
         }
         PyMem_RawFree(sorted);
@@ -3771,6 +3775,7 @@ insert_prefix_instructions(_PyCompile_CodeUnitMetadata *umd, basicblock *entrybl
             .i_except = NULL,
         };
         RETURN_IF_ERROR(basicblock_insert_instruction(entryblock, 0, &copy_frees));
+        RETURN_IF_ERROR(_PyCompile_SoacEntryFreeVars(umd, nfreevars));
     }
 
     return SUCCESS;
@@ -3845,6 +3850,11 @@ prepare_localsplus(_PyCompile_CodeUnitMetadata *umd, cfg_builder *g)
     }
 
     int numdropped = fix_cell_offsets(umd, g->g_entryblock, cellfixedoffsets);
+    if (numdropped >= 0 && _PyCompile_SoacFixSlots(
+            umd, cellfixedoffsets, ncellvars + nfreevars) < 0) {
+        PyMem_Free(cellfixedoffsets);
+        return ERROR;
+    }
     PyMem_Free(cellfixedoffsets);  // At this point we're done with it.
     cellfixedoffsets = NULL;
     if (numdropped < 0) {

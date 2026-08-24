@@ -49,6 +49,8 @@ typedef struct _PyCfgBuilder cfg_builder;
 typedef _PyCompile_FBlockInfo fblockinfo;
 typedef enum _PyCompile_FBlockType fblocktype;
 
+typedef struct _PySoacBindingCollector soac_binding_collector;
+
 /* The following items change on entry and exit of code blocks.
    They must be saved and restored when returning to a block.
 */
@@ -105,7 +107,1293 @@ typedef struct _PyCompiler {
                                   */
     int c_disable_warning;
     PyObject *c_module;
+    soac_binding_collector *c_soac_bindings;
 } compiler;
+
+/* This collector exists only for CompileVerifiedSourceDetails. It observes
+ * native compiler decisions, not executable bytecode. All references belong
+ * to this compilation and disappear after the immutable result is built. */
+#define SOAC_VECTOR(T) struct { T *items; Py_ssize_t count, capacity; }
+
+typedef struct {
+    int is_deref;
+    int raw_index;
+    int final_index;
+    Py_ssize_t entry_owner;
+} soac_binding_slot;
+
+typedef struct {
+    Py_ssize_t slot;
+    Py_ssize_t region;
+    int kind;
+    Py_ssize_t representative;
+    Py_ssize_t final_id;
+} soac_binding_owner;
+
+typedef struct {
+    int phase;
+    Py_ssize_t owner;
+    int role;
+    Py_ssize_t operand;
+} soac_binding_init;
+
+typedef struct {
+    Py_ssize_t slot;
+    Py_ssize_t owner;
+} soac_binding_saved;
+
+typedef struct {
+    int role;
+    Py_ssize_t slot;
+    Py_ssize_t owner;
+} soac_binding_entry_op;
+
+typedef struct {
+    location loc;
+    Py_ssize_t parent;
+    int restored;
+    PySTEntryObject *origin;  /* Borrowed original AST/symtable identity. */
+    Py_ssize_t representative;
+    Py_ssize_t final_id;
+    SOAC_VECTOR(soac_binding_entry_op) entry_ops;
+    SOAC_VECTOR(soac_binding_saved) restores;
+} soac_binding_region;
+
+typedef struct {
+    PyCodeObject *child;  /* Borrowed from another collector-owned unit. */
+    location loc;
+    int free_ordinal;
+    Py_ssize_t slot;
+    Py_ssize_t region;
+    int emit;
+} soac_binding_capture;
+
+typedef struct {
+    int role;
+    Py_ssize_t slot;
+} soac_binding_export;
+
+typedef struct {
+    location loc;
+    int context;
+    int mode;
+    Py_ssize_t slot;
+    expr_ty origin;  /* Borrowed from this compilation's original AST. */
+    Py_ssize_t region;
+    int emit;
+} soac_binding_access;
+
+typedef struct _PySoacCodeUnitBindings {
+    struct _PySoacCodeUnitBindings *parent;
+    PyCodeObject *code;
+    PySTEntryObject *origin;
+    int scope_kind;
+    int symtable_kind;
+    location loc;
+    int cell_count;
+    int free_count;
+    Py_ssize_t final_id;
+    Py_ssize_t active_region;
+    Py_ssize_t final_owner_count;
+    Py_ssize_t final_region_count;
+    SOAC_VECTOR(soac_binding_slot) slots;
+    SOAC_VECTOR(soac_binding_owner) owners;
+    SOAC_VECTOR(soac_binding_init) entry_prefix;
+    SOAC_VECTOR(soac_binding_init) initializers;
+    SOAC_VECTOR(soac_binding_region) regions;
+    SOAC_VECTOR(soac_binding_capture) captures;
+    SOAC_VECTOR(soac_binding_export) exports;
+    SOAC_VECTOR(soac_binding_access) accesses;
+} soac_code_bindings;
+
+struct _PySoacBindingCollector {
+    SOAC_VECTOR(soac_code_bindings *) units;
+};
+
+static int
+soac_binding_error(const char *message)
+{
+    PyErr_Format(PyExc_SystemError, "native class bindings: %s", message);
+    return ERROR;
+}
+
+static int
+soac_binding_append(void **items, Py_ssize_t *count, Py_ssize_t *capacity,
+                    size_t item_size, const void *item)
+{
+    if (*count == *capacity) {
+        size_t old = (size_t)*capacity;
+        size_t next = old == 0 ? 8 : old * 2;
+        if (next < old || next > (size_t)PY_SSIZE_T_MAX / item_size) {
+            PyErr_NoMemory();
+            return ERROR;
+        }
+        void *grown = PyMem_Realloc(*items, next * item_size);
+        if (grown == NULL) {
+            PyErr_NoMemory();
+            return ERROR;
+        }
+        *items = grown;
+        *capacity = (Py_ssize_t)next;
+    }
+    memcpy((char *)*items + (size_t)*count * item_size, item, item_size);
+    ++*count;
+    return SUCCESS;
+}
+
+#define SOAC_PUSH(V, ITEM) \
+    soac_binding_append((void **)&(V).items, &(V).count, &(V).capacity, \
+                        sizeof(*(V).items), &(ITEM))
+
+static void
+soac_binding_collector_free(soac_binding_collector *collector)
+{
+    if (collector == NULL) {
+        return;
+    }
+    PyObject *saved_error = PyErr_GetRaisedException();
+    for (Py_ssize_t i = 0; i < collector->units.count; i++) {
+        soac_code_bindings *unit = collector->units.items[i];
+        for (Py_ssize_t j = 0; j < unit->regions.count; j++) {
+            soac_binding_region *region = &unit->regions.items[j];
+            PyMem_Free(region->entry_ops.items);
+            PyMem_Free(region->restores.items);
+        }
+        PyMem_Free(unit->slots.items);
+        PyMem_Free(unit->owners.items);
+        PyMem_Free(unit->entry_prefix.items);
+        PyMem_Free(unit->initializers.items);
+        PyMem_Free(unit->regions.items);
+        PyMem_Free(unit->captures.items);
+        PyMem_Free(unit->exports.items);
+        PyMem_Free(unit->accesses.items);
+        Py_XDECREF(unit->code);
+        PyMem_Free(unit);
+    }
+    PyMem_Free(collector->units.items);
+    PyMem_Free(collector);
+    PyErr_SetRaisedException(saved_error);
+}
+
+static int
+soac_scope_wire_kind(int scope)
+{
+    switch (scope) {
+        case COMPILE_SCOPE_MODULE: return Py_SOAC_SCOPE_MODULE;
+        case COMPILE_SCOPE_CLASS: return Py_SOAC_SCOPE_CLASS;
+        case COMPILE_SCOPE_FUNCTION: return Py_SOAC_SCOPE_FUNCTION;
+        case COMPILE_SCOPE_ASYNC_FUNCTION: return Py_SOAC_SCOPE_ASYNC_FUNCTION;
+        case COMPILE_SCOPE_LAMBDA: return Py_SOAC_SCOPE_LAMBDA;
+        case COMPILE_SCOPE_COMPREHENSION: return Py_SOAC_SCOPE_COMPREHENSION;
+        case COMPILE_SCOPE_ANNOTATIONS: return Py_SOAC_SCOPE_ANNOTATIONS;
+    }
+    return soac_binding_error("unknown compiler scope kind");
+}
+
+static int
+soac_symtable_wire_kind(_Py_block_ty kind)
+{
+    switch (kind) {
+        case FunctionBlock: return Py_SOAC_SYMTABLE_FUNCTION;
+        case ClassBlock: return Py_SOAC_SYMTABLE_CLASS;
+        case ModuleBlock: return Py_SOAC_SYMTABLE_MODULE;
+        case AnnotationBlock: return Py_SOAC_SYMTABLE_ANNOTATION;
+        case TypeAliasBlock: return Py_SOAC_SYMTABLE_TYPE_ALIAS;
+        case TypeParametersBlock: return Py_SOAC_SYMTABLE_TYPE_PARAMETERS;
+        case TypeVariableBlock: return Py_SOAC_SYMTABLE_TYPE_VARIABLE;
+    }
+    return soac_binding_error("unknown symbol-table kind");
+}
+
+static int
+soac_add_owner(soac_code_bindings *unit, Py_ssize_t slot, Py_ssize_t region,
+               int kind, Py_ssize_t *owner_id)
+{
+    *owner_id = unit->owners.count;
+    soac_binding_owner owner = {slot, region, kind, unit->owners.count, -1};
+    RETURN_IF_ERROR(SOAC_PUSH(unit->owners, owner));
+    return SUCCESS;
+}
+
+static int
+soac_binding_slot_for(soac_code_bindings *unit, int is_deref, int raw_index,
+                      Py_ssize_t *slot_id)
+{
+    for (Py_ssize_t i = 0; i < unit->slots.count; i++) {
+        soac_binding_slot *slot = &unit->slots.items[i];
+        if (slot->is_deref == is_deref && slot->raw_index == raw_index) {
+            *slot_id = i;
+            return SUCCESS;
+        }
+    }
+    if (raw_index < 0 || (is_deref &&
+            raw_index >= unit->cell_count + unit->free_count)) {
+        return soac_binding_error("binding operand outside native layout");
+    }
+    *slot_id = unit->slots.count;
+    soac_binding_slot slot = {is_deref, raw_index, -1, -1};
+    RETURN_IF_ERROR(SOAC_PUSH(unit->slots, slot));
+    Py_ssize_t owner;
+    RETURN_IF_ERROR(soac_add_owner(unit, *slot_id, -1, Py_SOAC_CLASS_OWNER_ENTRY, &owner));
+    if (!is_deref) {
+        soac_binding_init init = {Py_SOAC_CLASS_PHASE_ENTRY, owner,
+                                 Py_SOAC_CLASS_INIT_UNBOUND, -1};
+        RETURN_IF_ERROR(SOAC_PUSH(unit->initializers, init));
+    }
+    unit->slots.items[*slot_id].entry_owner = owner;
+    return SUCCESS;
+}
+
+static int
+soac_local_binding_slot(_PyCompile_CodeUnitMetadata *umd, int local_index,
+                        Py_ssize_t *slot_id)
+{
+    PyObject *name, *value;
+    Py_ssize_t pos = 0;
+    while (PyDict_Next(umd->u_varnames, &pos, &name, &value)) {
+        int index = PyLong_AsInt(value);
+        if (index == -1 && PyErr_Occurred()) {
+            return ERROR;
+        }
+        if (index != local_index) {
+            continue;
+        }
+        /* A LOCAL/CELL pair is one slot. An equal-spelling FREE is not. */
+        PyObject *cell_index = PyDict_GetItemWithError(umd->u_cellvars, name);
+        if (cell_index != NULL) {
+            index = PyLong_AsInt(cell_index);
+            if (index == -1 && PyErr_Occurred()) {
+                return ERROR;
+            }
+            return soac_binding_slot_for(umd->u_soac_bindings, 1, index, slot_id);
+        }
+        if (PyErr_Occurred()) {
+            return ERROR;
+        }
+        return soac_binding_slot_for(umd->u_soac_bindings, 0, local_index, slot_id);
+    }
+    return soac_binding_error("local operand has no native variable row");
+}
+
+static int
+soac_register_code_unit(compiler *c, struct compiler_unit *u)
+{
+    u->u_metadata.u_soac_bindings = NULL;
+    if (c->c_soac_bindings == NULL) {
+        return SUCCESS;
+    }
+    soac_code_bindings *unit = PyMem_Calloc(1, sizeof(*unit));
+    if (unit == NULL) {
+        PyErr_NoMemory();
+        return ERROR;
+    }
+    unit->parent = c->u == NULL ? NULL : c->u->u_metadata.u_soac_bindings;
+    unit->origin = u->u_ste;
+    unit->final_id = -1;
+    unit->active_region = -1;
+    unit->scope_kind = soac_scope_wire_kind(u->u_scope_type);
+    unit->symtable_kind = soac_symtable_wire_kind(u->u_ste->ste_type);
+    unit->loc = u->u_ste->ste_loc;
+    if (unit->scope_kind < 0 || unit->symtable_kind < 0 ||
+        SOAC_PUSH(c->c_soac_bindings->units, unit) < 0) {
+        PyMem_Free(unit);
+        return ERROR;
+    }
+    u->u_metadata.u_soac_bindings = unit;
+    if (u->u_scope_type == COMPILE_SCOPE_CLASS) {
+        unit->cell_count = (int)PyDict_GET_SIZE(u->u_metadata.u_cellvars);
+        unit->free_count = (int)PyDict_GET_SIZE(u->u_metadata.u_freevars);
+        for (int i = 0; i < unit->cell_count + unit->free_count; i++) {
+            Py_ssize_t slot;
+            RETURN_IF_ERROR(soac_binding_slot_for(unit, 1, i, &slot));
+        }
+    }
+    return SUCCESS;
+}
+
+static soac_code_bindings *
+soac_current_class(compiler *c)
+{
+    if (c->c_soac_bindings == NULL || c->u == NULL ||
+        c->u->u_scope_type != COMPILE_SCOPE_CLASS) {
+        return NULL;
+    }
+    return c->u->u_metadata.u_soac_bindings;
+}
+
+int
+_PyCompile_SoacEnterComprehension(compiler *c, location loc, PySTEntryObject *original)
+{
+    soac_code_bindings *unit = soac_current_class(c);
+    if (unit == NULL) {
+        return SUCCESS;
+    }
+    soac_binding_region region = {
+        .loc = loc, .parent = unit->active_region, .origin = original,
+        .representative = unit->regions.count, .final_id = -1,
+    };
+    Py_ssize_t id = unit->regions.count;
+    RETURN_IF_ERROR(SOAC_PUSH(unit->regions, region));
+    unit->active_region = id;
+    return SUCCESS;
+}
+
+int
+_PyCompile_SoacSaveLocal(compiler *c, int local_index)
+{
+    soac_code_bindings *unit = soac_current_class(c);
+    if (unit == NULL) {
+        return SUCCESS;
+    }
+    if (unit->active_region < 0) {
+        return soac_binding_error("comprehension save outside a region");
+    }
+    Py_ssize_t slot_id;
+    RETURN_IF_ERROR(soac_local_binding_slot(&c->u->u_metadata, local_index, &slot_id));
+    soac_binding_region *region = &unit->regions.items[unit->active_region];
+    Py_ssize_t owner;
+    RETURN_IF_ERROR(soac_add_owner(unit, slot_id, unit->active_region,
+                                  Py_SOAC_CLASS_OWNER_SAVED_SLOT, &owner));
+    soac_binding_entry_op op = {Py_SOAC_CLASS_OP_SAVE_CLEAR, slot_id, owner};
+    RETURN_IF_ERROR(SOAC_PUSH(region->entry_ops, op));
+    return SUCCESS;
+}
+
+int
+_PyCompile_SoacMakeCell(compiler *c, int deref_index)
+{
+    soac_code_bindings *unit = soac_current_class(c);
+    if (unit == NULL) {
+        return SUCCESS;
+    }
+    if (unit->active_region < 0) {
+        return soac_binding_error("replacement cell outside a region");
+    }
+    Py_ssize_t slot_id;
+    RETURN_IF_ERROR(soac_binding_slot_for(unit, 1, deref_index, &slot_id));
+    soac_binding_region *region = &unit->regions.items[unit->active_region];
+    Py_ssize_t owner;
+    RETURN_IF_ERROR(soac_add_owner(unit, slot_id, unit->active_region,
+                                  Py_SOAC_CLASS_OWNER_FRESH_CELL, &owner));
+    /* MAKE_CELL reads the actual current slot object. It need not be the
+     * varnames slot saved immediately above, nor one static prior generation. */
+    soac_binding_entry_op op = {Py_SOAC_CLASS_OP_MAKE_CELL, slot_id, owner};
+    RETURN_IF_ERROR(SOAC_PUSH(region->entry_ops, op));
+    return SUCCESS;
+}
+
+int
+_PyCompile_SoacRestoreComprehension(compiler *c)
+{
+    soac_code_bindings *unit = soac_current_class(c);
+    if (unit == NULL) {
+        return SUCCESS;
+    }
+    if (unit->active_region < 0) {
+        return soac_binding_error("comprehension restore outside a region");
+    }
+    soac_binding_region *region = &unit->regions.items[unit->active_region];
+    if (region->restored) {
+        return soac_binding_error("comprehension restored twice in semantic recipe");
+    }
+    for (Py_ssize_t i = region->entry_ops.count; i-- > 0;) {
+        soac_binding_entry_op op = region->entry_ops.items[i];
+        if (op.role != Py_SOAC_CLASS_OP_SAVE_CLEAR) {
+            continue;
+        }
+        soac_binding_saved saved = {op.slot, op.owner};
+        RETURN_IF_ERROR(SOAC_PUSH(region->restores, saved));
+    }
+    region->restored = 1;
+    return SUCCESS;
+}
+
+int
+_PyCompile_SoacLeaveComprehension(compiler *c)
+{
+    soac_code_bindings *unit = soac_current_class(c);
+    if (unit == NULL) {
+        return SUCCESS;
+    }
+    if (unit->active_region < 0 ||
+        !unit->regions.items[unit->active_region].restored) {
+        return soac_binding_error("unbalanced comprehension ownership region");
+    }
+    unit->active_region = unit->regions.items[unit->active_region].parent;
+    return SUCCESS;
+}
+
+int
+_PyCompile_SoacCapture(compiler *c, PyCodeObject *child, location loc,
+                       int free_ordinal, int deref_index)
+{
+    soac_code_bindings *unit = soac_current_class(c);
+    if (unit == NULL) {
+        return SUCCESS;
+    }
+    Py_ssize_t slot;
+    RETURN_IF_ERROR(soac_binding_slot_for(unit, 1, deref_index, &slot));
+    soac_binding_capture capture = {child, loc, free_ordinal, slot, unit->active_region, 1};
+    RETURN_IF_ERROR(SOAC_PUSH(unit->captures, capture));
+    return SUCCESS;
+}
+
+int
+_PyCompile_SoacClassInitializer(compiler *c, PyObject *name, int role)
+{
+    soac_code_bindings *unit = soac_current_class(c);
+    if (unit == NULL) {
+        return SUCCESS;
+    }
+    int index = _PyCompile_LookupCellvar(c, name);
+    RETURN_IF_ERROR(index);
+    Py_ssize_t slot;
+    RETURN_IF_ERROR(soac_binding_slot_for(unit, 1, index, &slot));
+    if (role != Py_SOAC_CLASS_INIT_NAMESPACE &&
+        role != Py_SOAC_CLASS_INIT_CONDITIONAL_SET) {
+        return soac_binding_error("invalid class header initialization role");
+    }
+    soac_binding_init init = {Py_SOAC_CLASS_PHASE_HEADER,
+        unit->slots.items[slot].entry_owner, role, -1};
+    RETURN_IF_ERROR(SOAC_PUSH(unit->initializers, init));
+    return SUCCESS;
+}
+
+int
+_PyCompile_SoacClassExport(compiler *c, int deref_index, int role)
+{
+    soac_code_bindings *unit = soac_current_class(c);
+    if (unit == NULL) {
+        return SUCCESS;
+    }
+    Py_ssize_t slot;
+    RETURN_IF_ERROR(soac_binding_slot_for(unit, 1, deref_index, &slot));
+    soac_binding_export export = {role, slot};
+    RETURN_IF_ERROR(SOAC_PUSH(unit->exports, export));
+    return SUCCESS;
+}
+
+int
+_PyCompile_SoacNameAccess(compiler *c, location loc, expr_ty original, expr_context_ty context,
+                          int mode, int native_index)
+{
+    soac_code_bindings *unit = soac_current_class(c);
+    if (unit == NULL) {
+        return SUCCESS;
+    }
+    int wire_context;
+    switch (context) {
+        case Load: wire_context = Py_SOAC_CLASS_ACCESS_LOAD; break;
+        case Store: wire_context = Py_SOAC_CLASS_ACCESS_STORE; break;
+        case Del: wire_context = Py_SOAC_CLASS_ACCESS_DEL; break;
+        default: return soac_binding_error("unknown original Name context");
+    }
+    if (mode < Py_SOAC_CLASS_ACCESS_RAW_SLOT ||
+        mode > Py_SOAC_CLASS_ACCESS_NAMESPACE_OR_CELL ||
+        (mode == Py_SOAC_CLASS_ACCESS_NAMESPACE_OR_CELL && context != Load)) {
+        return soac_binding_error("invalid original Name access mode");
+    }
+    Py_ssize_t slot;
+    if (mode == Py_SOAC_CLASS_ACCESS_RAW_SLOT) {
+        RETURN_IF_ERROR(soac_local_binding_slot(&c->u->u_metadata, native_index, &slot));
+    }
+    else {
+        RETURN_IF_ERROR(soac_binding_slot_for(unit, 1, native_index, &slot));
+    }
+    if (original == NULL || original->kind != Name_kind) {
+        return soac_binding_error("Name access lacks an original AST Name");
+    }
+    soac_binding_access access = {
+        loc, wire_context, mode, slot, original, unit->active_region, 1,
+    };
+    RETURN_IF_ERROR(SOAC_PUSH(unit->accesses, access));
+    return SUCCESS;
+}
+
+int
+_PyCompile_SoacFixSlots(_PyCompile_CodeUnitMetadata *umd,
+                       const int *fixed, int noffsets)
+{
+    soac_code_bindings *unit = umd->u_soac_bindings;
+    if (unit == NULL || unit->scope_kind != Py_SOAC_SCOPE_CLASS) {
+        return SUCCESS;
+    }
+    if (noffsets != unit->cell_count + unit->free_count || unit->active_region >= 0) {
+        return soac_binding_error("native cell layout or region state changed unexpectedly");
+    }
+    int nlocals = (int)PyDict_GET_SIZE(umd->u_varnames);
+    for (int i = 0; i < nlocals; i++) {
+        Py_ssize_t slot;
+        RETURN_IF_ERROR(soac_local_binding_slot(umd, i, &slot));
+    }
+    for (Py_ssize_t i = 0; i < unit->slots.count; i++) {
+        soac_binding_slot *slot = &unit->slots.items[i];
+        slot->final_index = slot->is_deref ? fixed[slot->raw_index] : slot->raw_index;
+    }
+    return SUCCESS;
+}
+
+int
+_PyCompile_SoacEntryCell(_PyCompile_CodeUnitMetadata *umd, int deref_index)
+{
+    soac_code_bindings *unit = umd->u_soac_bindings;
+    if (unit == NULL || unit->scope_kind != Py_SOAC_SCOPE_CLASS) {
+        return SUCCESS;
+    }
+    if (deref_index < 0 || deref_index >= unit->cell_count) {
+        return soac_binding_error("entry MAKE_CELL is not a native cell row");
+    }
+    Py_ssize_t slot;
+    RETURN_IF_ERROR(soac_binding_slot_for(unit, 1, deref_index, &slot));
+    soac_binding_init init = {Py_SOAC_CLASS_PHASE_ENTRY,
+        unit->slots.items[slot].entry_owner, Py_SOAC_CLASS_INIT_EMPTY_CELL, -1};
+    RETURN_IF_ERROR(SOAC_PUSH(unit->entry_prefix, init));
+    return SUCCESS;
+}
+
+static void
+soac_reverse_initializers(soac_binding_init *items, Py_ssize_t start, Py_ssize_t end)
+{
+    while (start < --end) {
+        soac_binding_init item = items[start];
+        items[start++] = items[end];
+        items[end] = item;
+    }
+}
+
+int
+_PyCompile_SoacEntryFreeVars(_PyCompile_CodeUnitMetadata *umd, int free_count)
+{
+    soac_code_bindings *unit = umd->u_soac_bindings;
+    if (unit == NULL || unit->scope_kind != Py_SOAC_SCOPE_CLASS) {
+        return SUCCESS;
+    }
+    if (free_count != unit->free_count) {
+        return soac_binding_error("entry COPY_FREE_VARS count mismatch");
+    }
+    Py_ssize_t existing = unit->entry_prefix.count;
+    for (int i = 0; i < free_count; i++) {
+        Py_ssize_t slot;
+        RETURN_IF_ERROR(soac_binding_slot_for(unit, 1, unit->cell_count + i, &slot));
+        soac_binding_init init = {Py_SOAC_CLASS_PHASE_ENTRY,
+            unit->slots.items[slot].entry_owner, Py_SOAC_CLASS_INIT_INCOMING_FREE, i};
+        RETURN_IF_ERROR(SOAC_PUSH(unit->entry_prefix, init));
+    }
+    /* COPY_FREE_VARS was inserted at native instruction zero, ahead of the
+     * already-recorded MAKE_CELL prefix. Rotate to that exact operation order. */
+    soac_reverse_initializers(unit->entry_prefix.items, 0, existing);
+    soac_reverse_initializers(unit->entry_prefix.items, existing, unit->entry_prefix.count);
+    soac_reverse_initializers(unit->entry_prefix.items, 0, unit->entry_prefix.count);
+    return SUCCESS;
+}
+
+static PyObject *
+soac_optional_id(Py_ssize_t id)
+{
+    return id < 0 ? Py_NewRef(Py_None) : PyLong_FromSsize_t(id);
+}
+
+static PyObject *
+soac_source_span(location loc)
+{
+    if (loc.lineno < 1 || loc.end_lineno < 1 ||
+        loc.col_offset < 0 || loc.end_col_offset < 0) {
+        return Py_NewRef(Py_None);
+    }
+    if (loc.end_lineno < loc.lineno ||
+        (loc.end_lineno == loc.lineno && loc.end_col_offset < loc.col_offset)) {
+        soac_binding_error("invalid original source span");
+        return NULL;
+    }
+    return Py_BuildValue("(iiii)", loc.lineno, loc.col_offset,
+                         loc.end_lineno, loc.end_col_offset);
+}
+
+static int
+soac_append_owned(PyObject *list, PyObject *item)
+{
+    if (item == NULL) {
+        return ERROR;
+    }
+    int result = PyList_Append(list, item);
+    Py_DECREF(item);
+    return result;
+}
+
+static soac_code_bindings *
+soac_unit_for_code(soac_binding_collector *collector, PyCodeObject *code)
+{
+    for (Py_ssize_t i = 0; i < collector->units.count; i++) {
+        if (collector->units.items[i]->code == code) {
+            return collector->units.items[i];
+        }
+    }
+    soac_binding_error("final code tree has no originating compiler unit");
+    return NULL;
+}
+
+static int
+soac_same_original_scope_chain(soac_code_bindings *left, soac_code_bindings *right)
+{
+    while (left != right) {
+        if (left == NULL || right == NULL || left->origin == NULL ||
+            left->origin != right->origin || left->scope_kind != right->scope_kind ||
+            left->symtable_kind != right->symtable_kind) {
+            return 0;
+        }
+        left = left->parent;
+        right = right->parent;
+    }
+    return 1;
+}
+
+static int
+soac_rebind_code_constant(compiler *c, PyCodeObject *original, PyObject *key)
+{
+    soac_code_bindings *unit = soac_current_class(c);
+    if (unit == NULL || key == (PyObject *)original) {
+        return SUCCESS;
+    }
+    if (!PyCode_Check(key)) {
+        return soac_binding_error("code constant canonicalized to a non-code key");
+    }
+    soac_code_bindings *before = soac_unit_for_code(c->c_soac_bindings, original);
+    soac_code_bindings *after = soac_unit_for_code(c->c_soac_bindings, (PyCodeObject *)key);
+    if (before == NULL || after == NULL) {
+        return ERROR;
+    }
+    if (before->origin != after->origin || before->parent != unit ||
+        !soac_same_original_scope_chain(after->parent, unit) ||
+        before->scope_kind != after->scope_kind ||
+        before->symtable_kind != after->symtable_kind) {
+        return soac_binding_error("canonical code constant has ambiguous original scope");
+    }
+    /* This is the actual key selected by native AddConst, not a reconstructed
+     * bytecode/equality guess. Every originating symtable/AST scope and its
+     * parent chain must be identical. An outer finally can re-emit the parent
+     * ClassDef too: its second unit may disappear when that parent's AddConst
+     * selects the first code object. No unit is reparented here; final tree
+     * collection still requires each retained code's exact parent unit. */
+    for (Py_ssize_t i = 0; i < unit->captures.count; i++) {
+        if (unit->captures.items[i].child == original) {
+            unit->captures.items[i].child = (PyCodeObject *)key;
+        }
+    }
+    return SUCCESS;
+}
+
+static int
+soac_collect_final_tree(soac_binding_collector *collector, PyCodeObject *code,
+                        soac_code_bindings *parent, PyObject *nodes)
+{
+    if (Py_EnterRecursiveCall(" while collecting native class bindings")) {
+        return ERROR;
+    }
+    int result = ERROR;
+    soac_code_bindings *unit = soac_unit_for_code(collector, code);
+    if (unit == NULL) {
+        goto done;
+    }
+    if (unit->final_id >= 0 || unit->parent != parent) {
+        soac_binding_error("ambiguous or reparented final native code tree");
+        goto done;
+    }
+    unit->final_id = PyList_GET_SIZE(nodes);
+    PyObject *parent_id = soac_optional_id(parent == NULL ? -1 : parent->final_id);
+    PyObject *span = soac_source_span(unit->loc);
+    if (parent_id == NULL || span == NULL) {
+        Py_XDECREF(parent_id);
+        Py_XDECREF(span);
+        goto done;
+    }
+    PyObject *row = Py_BuildValue("(nOOiiO)", unit->final_id, parent_id, code,
+                                  unit->scope_kind, unit->symtable_kind, span);
+    Py_DECREF(parent_id);
+    Py_DECREF(span);
+    if (soac_append_owned(nodes, row) < 0) {
+        goto done;
+    }
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(code->co_consts); i++) {
+        PyObject *constant = PyTuple_GET_ITEM(code->co_consts, i);
+        if (PyCode_Check(constant) && soac_collect_final_tree(
+                collector, (PyCodeObject *)constant, unit, nodes) < 0) {
+            goto done;
+        }
+    }
+    result = SUCCESS;
+done:
+    Py_LeaveRecursiveCall();
+    return result;
+}
+
+static int
+soac_validate_class_slots(soac_code_bindings *unit)
+{
+    PyCodeObject *code = unit->code;
+    if (code == NULL || unit->final_id < 0 || unit->active_region >= 0 ||
+        unit->slots.count != code->co_nlocalsplus ||
+        code->co_argcount != 0 || code->co_kwonlyargcount != 0 ||
+        unit->entry_prefix.count != unit->cell_count + unit->free_count) {
+        return soac_binding_error("incomplete final class layout or entry prefix");
+    }
+    for (Py_ssize_t i = 0; i < unit->slots.count; i++) {
+        soac_binding_slot *slot = &unit->slots.items[i];
+        int index = slot->final_index;
+        if (index < 0 || index >= code->co_nlocalsplus) {
+            return soac_binding_error("unresolved final native slot");
+        }
+        unsigned char kind = (unsigned char)PyBytes_AS_STRING(code->co_localspluskinds)[index];
+        int expected = !slot->is_deref ? CO_FAST_LOCAL :
+            slot->raw_index < unit->cell_count ? CO_FAST_CELL : CO_FAST_FREE;
+        if (!(kind & expected)) {
+            return soac_binding_error("native slot kind disagrees with resolved operand");
+        }
+        for (Py_ssize_t j = 0; j < i; j++) {
+            if (unit->slots.items[j].final_index == index) {
+                return soac_binding_error("two symbolic slots alias after native fixup");
+            }
+        }
+    }
+    for (Py_ssize_t i = 0; i < unit->entry_prefix.count; i++) {
+        Py_ssize_t owner = unit->entry_prefix.items[i].owner;
+        if (owner < 0 || owner >= unit->owners.count) {
+            return soac_binding_error("entry prefix references no owner");
+        }
+        for (Py_ssize_t j = 0; j < i; j++) {
+            if (unit->entry_prefix.items[j].owner == owner) {
+                return soac_binding_error("duplicate native entry initialization");
+            }
+        }
+    }
+    return SUCCESS;
+}
+
+static PyObject *
+soac_owner_rows(soac_code_bindings *unit);
+
+static int
+soac_same_location(location left, location right)
+{
+    return left.lineno == right.lineno && left.end_lineno == right.end_lineno &&
+        left.col_offset == right.col_offset && left.end_col_offset == right.end_col_offset;
+}
+
+static int
+soac_same_slot(soac_code_bindings *unit, Py_ssize_t left, Py_ssize_t right)
+{
+    return unit->slots.items[left].final_index == unit->slots.items[right].final_index;
+}
+
+static Py_ssize_t
+soac_region_representative(soac_code_bindings *unit, Py_ssize_t region)
+{
+    return region < 0 ? -1 : unit->regions.items[region].representative;
+}
+
+static Py_ssize_t
+soac_saved_operation(soac_binding_region *region, Py_ssize_t owner)
+{
+    for (Py_ssize_t i = 0; i < region->entry_ops.count; i++) {
+        soac_binding_entry_op *op = &region->entry_ops.items[i];
+        if (op->role == Py_SOAC_CLASS_OP_SAVE_CLEAR && op->owner == owner) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int
+soac_same_region_shape(soac_code_bindings *unit,
+                        soac_binding_region *left, soac_binding_region *right)
+{
+    if (!soac_same_location(left->loc, right->loc) ||
+        left->entry_ops.count != right->entry_ops.count ||
+        left->restores.count != right->restores.count ||
+        soac_region_representative(unit, left->parent) !=
+            soac_region_representative(unit, right->parent)) {
+        return 0;
+    }
+    for (Py_ssize_t i = 0; i < left->entry_ops.count; i++) {
+        soac_binding_entry_op *a = &left->entry_ops.items[i];
+        soac_binding_entry_op *b = &right->entry_ops.items[i];
+        if (a->role != b->role || !soac_same_slot(unit, a->slot, b->slot) ||
+            unit->owners.items[a->owner].kind != unit->owners.items[b->owner].kind) {
+            return 0;
+        }
+    }
+    for (Py_ssize_t i = 0; i < left->restores.count; i++) {
+        soac_binding_saved *a = &left->restores.items[i];
+        soac_binding_saved *b = &right->restores.items[i];
+        Py_ssize_t saved = soac_saved_operation(left, a->owner);
+        if (!soac_same_slot(unit, a->slot, b->slot) || saved < 0 ||
+            saved != soac_saved_operation(right, b->owner)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int
+soac_same_access(soac_code_bindings *unit,
+                 soac_binding_access *left, soac_binding_access *right)
+{
+    return left->origin == right->origin &&
+        soac_same_location(left->loc, right->loc) &&
+        left->context == right->context && left->mode == right->mode &&
+        soac_same_slot(unit, left->slot, right->slot);
+}
+
+static int
+soac_same_capture(soac_code_bindings *unit,
+                  soac_binding_capture *left, soac_binding_capture *right)
+{
+    return left->child == right->child && left->free_ordinal == right->free_ordinal &&
+        soac_same_location(left->loc, right->loc) &&
+        soac_same_slot(unit, left->slot, right->slot);
+}
+
+static int
+soac_same_region_body(soac_code_bindings *unit, Py_ssize_t left, Py_ssize_t right)
+{
+    Py_ssize_t i = 0, j = 0;
+    for (;;) {
+        while (i < unit->accesses.count && unit->accesses.items[i].region != left) i++;
+        while (j < unit->accesses.count && unit->accesses.items[j].region != right) j++;
+        if (i == unit->accesses.count || j == unit->accesses.count) {
+            if (i != unit->accesses.count || j != unit->accesses.count) return 0;
+            break;
+        }
+        if (!soac_same_access(unit, &unit->accesses.items[i++], &unit->accesses.items[j++])) {
+            return 0;
+        }
+    }
+    i = j = 0;
+    for (;;) {
+        while (i < unit->captures.count && unit->captures.items[i].region != left) i++;
+        while (j < unit->captures.count && unit->captures.items[j].region != right) j++;
+        if (i == unit->captures.count || j == unit->captures.count) {
+            return i == unit->captures.count && j == unit->captures.count;
+        }
+        if (!soac_same_capture(unit, &unit->captures.items[i++], &unit->captures.items[j++])) {
+            return 0;
+        }
+    }
+}
+
+static int
+soac_normalize_class_bindings(soac_code_bindings *unit)
+{
+    /* Native finally codegen can visit one original AST twice. Normalize only
+     * after final slot fixup and actual AddConst canonicalization, preserving
+     * every scoped operation and rejecting different choices for one origin. */
+    for (Py_ssize_t i = 0; i < unit->regions.count; i++) {
+        soac_binding_region *region = &unit->regions.items[i];
+        for (Py_ssize_t j = 0; j < i; j++) {
+            soac_binding_region *previous = &unit->regions.items[j];
+            if (previous->representative != j || previous->origin != region->origin) continue;
+            if (!soac_same_region_shape(unit, region, previous)) {
+                return soac_binding_error("conflicting repeated original comprehension");
+            }
+            region->representative = j;
+            for (Py_ssize_t k = 0; k < region->entry_ops.count; k++) {
+                Py_ssize_t owner = region->entry_ops.items[k].owner;
+                unit->owners.items[owner].representative = previous->entry_ops.items[k].owner;
+            }
+            break;
+        }
+        region->final_id = region->representative == i ? unit->final_region_count++
+            : unit->regions.items[region->representative].final_id;
+    }
+    for (Py_ssize_t i = 0; i < unit->regions.count; i++) {
+        Py_ssize_t previous = unit->regions.items[i].representative;
+        if (previous != i && !soac_same_region_body(unit, i, previous)) {
+            return soac_binding_error("conflicting repeated comprehension body bindings");
+        }
+    }
+    for (Py_ssize_t i = 0; i < unit->owners.count; i++) {
+        soac_binding_owner *owner = &unit->owners.items[i];
+        if (owner->representative < 0 || owner->representative > i) {
+            return soac_binding_error("invalid canonical owner ordering");
+        }
+        owner->final_id = owner->representative == i ? unit->final_owner_count++
+            : unit->owners.items[owner->representative].final_id;
+    }
+    for (Py_ssize_t i = 0; i < unit->accesses.count; i++) {
+        soac_binding_access *access = &unit->accesses.items[i];
+        for (Py_ssize_t j = 0; j < i; j++) {
+            soac_binding_access *previous = &unit->accesses.items[j];
+            if (!previous->emit || previous->context != access->context ||
+                !soac_same_location(previous->loc, access->loc)) continue;
+            if (!soac_same_access(unit, access, previous) ||
+                soac_region_representative(unit, access->region) !=
+                    soac_region_representative(unit, previous->region)) {
+                return soac_binding_error("conflicting repeated original Name access");
+            }
+            access->emit = 0;
+            break;
+        }
+    }
+    for (Py_ssize_t i = 0; i < unit->captures.count; i++) {
+        soac_binding_capture *capture = &unit->captures.items[i];
+        for (Py_ssize_t j = 0; j < i; j++) {
+            soac_binding_capture *previous = &unit->captures.items[j];
+            if (!previous->emit || previous->child != capture->child ||
+                previous->free_ordinal != capture->free_ordinal ||
+                !soac_same_location(previous->loc, capture->loc)) continue;
+            if (!soac_same_capture(unit, capture, previous) ||
+                soac_region_representative(unit, capture->region) !=
+                    soac_region_representative(unit, previous->region)) {
+                return soac_binding_error("conflicting repeated original closure capture");
+            }
+            capture->emit = 0;
+            break;
+        }
+    }
+    return SUCCESS;
+}
+
+static PyObject *
+soac_owner_rows(soac_code_bindings *unit)
+{
+    PyObject *rows = PyTuple_New(unit->final_owner_count);
+    if (rows == NULL) {
+        return NULL;
+    }
+    for (Py_ssize_t i = 0; i < unit->owners.count; i++) {
+        soac_binding_owner *owner = &unit->owners.items[i];
+        if (owner->representative != i) {
+            continue;
+        }
+        soac_binding_slot *slot = &unit->slots.items[owner->slot];
+        unsigned char kind = (unsigned char)PyBytes_AS_STRING(
+            unit->code->co_localspluskinds)[slot->final_index];
+        PyObject *region = soac_optional_id(owner->region < 0 ? -1 :
+            unit->regions.items[owner->region].final_id);
+        if (region == NULL) {
+            Py_DECREF(rows);
+            return NULL;
+        }
+        PyObject *row = Py_BuildValue("(niiiO)", owner->final_id, owner->kind,
+            slot->final_index, (int)kind, region);
+        Py_DECREF(region);
+        if (row == NULL) {
+            Py_DECREF(rows);
+            return NULL;
+        }
+        PyTuple_SET_ITEM(rows, owner->final_id, row);
+    }
+    return rows;
+}
+
+static PyObject *
+soac_initializer_row(soac_code_bindings *unit, soac_binding_init *init)
+{
+    PyObject *operand = soac_optional_id(init->operand);
+    if (operand == NULL) {
+        return NULL;
+    }
+    PyObject *row = Py_BuildValue("(iniO)", init->phase,
+        unit->owners.items[init->owner].final_id, init->role, operand);
+    Py_DECREF(operand);
+    return row;
+}
+
+static PyObject *
+soac_initializer_rows(soac_code_bindings *unit)
+{
+    PyObject *rows = PyList_New(0);
+    if (rows == NULL) {
+        return NULL;
+    }
+    /* Frame allocation starts plain local carriers NULL. Native prefix events
+     * follow in their actual insertion order, then the observed header stores. */
+    for (Py_ssize_t i = 0; i < unit->initializers.count; i++) {
+        soac_binding_init *init = &unit->initializers.items[i];
+        if (init->phase == Py_SOAC_CLASS_PHASE_ENTRY &&
+            soac_append_owned(rows, soac_initializer_row(unit, init)) < 0) {
+            goto error;
+        }
+    }
+    for (Py_ssize_t i = 0; i < unit->entry_prefix.count; i++) {
+        if (soac_append_owned(rows, soac_initializer_row(unit, &unit->entry_prefix.items[i])) < 0) {
+            goto error;
+        }
+    }
+    for (Py_ssize_t i = 0; i < unit->initializers.count; i++) {
+        soac_binding_init *init = &unit->initializers.items[i];
+        if (init->phase == Py_SOAC_CLASS_PHASE_HEADER &&
+            soac_append_owned(rows, soac_initializer_row(unit, init)) < 0) {
+            goto error;
+        }
+    }
+    PyObject *result = PyList_AsTuple(rows);
+    Py_DECREF(rows);
+    return result;
+error:
+    Py_DECREF(rows);
+    return NULL;
+}
+
+static PyObject *
+soac_region_rows(soac_code_bindings *unit)
+{
+    PyObject *rows = PyTuple_New(unit->final_region_count);
+    if (rows == NULL) {
+        return NULL;
+    }
+    for (Py_ssize_t i = 0; i < unit->regions.count; i++) {
+        soac_binding_region *region = &unit->regions.items[i];
+        if (region->representative != i) {
+            continue;
+        }
+        PyObject *parent = soac_optional_id(region->parent < 0 ? -1 :
+            unit->regions.items[region->parent].final_id);
+        PyObject *span = soac_source_span(region->loc);
+        PyObject *ops = PyTuple_New(region->entry_ops.count);
+        PyObject *restores = PyTuple_New(region->restores.count);
+        if (parent == NULL || span == NULL || ops == NULL || restores == NULL ||
+            !region->restored || span == Py_None) {
+            if (!PyErr_Occurred()) {
+                soac_binding_error("incomplete source comprehension region");
+            }
+            goto region_error;
+        }
+        for (Py_ssize_t j = 0; j < region->entry_ops.count; j++) {
+            soac_binding_entry_op *op = &region->entry_ops.items[j];
+            int slot = unit->slots.items[op->slot].final_index;
+            PyObject *row = Py_BuildValue("(iin)", op->role, slot,
+                                          unit->owners.items[op->owner].final_id);
+            if (row == NULL) {
+                goto region_error;
+            }
+            PyTuple_SET_ITEM(ops, j, row);
+        }
+        for (Py_ssize_t j = 0; j < region->restores.count; j++) {
+            soac_binding_saved *restore = &region->restores.items[j];
+            int slot = unit->slots.items[restore->slot].final_index;
+            PyObject *row = Py_BuildValue("(in)", slot,
+                                          unit->owners.items[restore->owner].final_id);
+            if (row == NULL) {
+                goto region_error;
+            }
+            PyTuple_SET_ITEM(restores, j, row);
+        }
+        PyObject *row = Py_BuildValue("(nOOOO)", region->final_id, parent, span, ops, restores);
+        if (row == NULL) {
+            goto region_error;
+        }
+        Py_DECREF(parent);
+        Py_DECREF(span);
+        Py_DECREF(ops);
+        Py_DECREF(restores);
+        PyTuple_SET_ITEM(rows, region->final_id, row);
+        continue;
+region_error:
+        Py_XDECREF(parent);
+        Py_XDECREF(span);
+        Py_XDECREF(ops);
+        Py_XDECREF(restores);
+        Py_DECREF(rows);
+        return NULL;
+    }
+    return rows;
+}
+
+static PyObject *
+soac_current_slot(soac_code_bindings *unit, Py_ssize_t slot)
+{
+    return Py_BuildValue("(ii)", Py_SOAC_CLASS_CURRENT_SLOT,
+                         unit->slots.items[slot].final_index);
+}
+
+static PyObject *
+soac_capture_rows(soac_binding_collector *collector, soac_code_bindings *unit)
+{
+    PyObject *rows = PyList_New(0);
+    if (rows == NULL) {
+        return NULL;
+    }
+    for (Py_ssize_t i = 0; i < unit->captures.count; i++) {
+        soac_binding_capture *capture = &unit->captures.items[i];
+        if (!capture->emit) {
+            continue;
+        }
+        soac_code_bindings *child = soac_unit_for_code(collector, capture->child);
+        if (child == NULL) {
+            goto error;
+        }
+        if (child->final_id < 0) {
+            /* Native CFG optimization removed this original child constant. */
+            continue;
+        }
+        if (child->parent != unit || capture->free_ordinal < 0 ||
+            capture->free_ordinal >= child->code->co_nfreevars) {
+            soac_binding_error("closure edge disagrees with the actual native child");
+            goto error;
+        }
+        PyObject *span = soac_source_span(capture->loc);
+        PyObject *slot = soac_current_slot(unit, capture->slot);
+        if (span == NULL || slot == NULL) {
+            Py_XDECREF(span);
+            Py_XDECREF(slot);
+            goto error;
+        }
+        PyObject *row = Py_BuildValue("(nOiO)", child->final_id, span,
+                                      capture->free_ordinal, slot);
+        Py_DECREF(span);
+        Py_DECREF(slot);
+        if (soac_append_owned(rows, row) < 0) {
+            goto error;
+        }
+    }
+    /* A removed/provisionally deduplicated constant cannot silently erase a
+     * required edge on a different final child. Coverage is by exact identity. */
+    for (Py_ssize_t i = 0; i < collector->units.count; i++) {
+        soac_code_bindings *child = collector->units.items[i];
+        if (child->final_id < 0 || child->parent != unit) {
+            continue;
+        }
+        for (int ordinal = 0; ordinal < child->code->co_nfreevars; ordinal++) {
+            int found = 0;
+            for (Py_ssize_t j = 0; j < unit->captures.count; j++) {
+                soac_binding_capture *capture = &unit->captures.items[j];
+                if (capture->child == child->code && capture->free_ordinal == ordinal) {
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) {
+                soac_binding_error("final native child has no closure binding edge");
+                goto error;
+            }
+        }
+    }
+    PyObject *result = PyList_AsTuple(rows);
+    Py_DECREF(rows);
+    return result;
+error:
+    Py_DECREF(rows);
+    return NULL;
+}
+
+static PyObject *
+soac_export_rows(soac_code_bindings *unit)
+{
+    PyObject *rows = PyTuple_New(unit->exports.count);
+    if (rows == NULL) {
+        return NULL;
+    }
+    for (Py_ssize_t i = 0; i < unit->exports.count; i++) {
+        soac_binding_export *entry = &unit->exports.items[i];
+        PyObject *slot = soac_current_slot(unit, entry->slot);
+        if (slot == NULL) {
+            Py_DECREF(rows);
+            return NULL;
+        }
+        PyObject *row = Py_BuildValue("(iO)", entry->role, slot);
+        Py_DECREF(slot);
+        if (row == NULL) {
+            Py_DECREF(rows);
+            return NULL;
+        }
+        PyTuple_SET_ITEM(rows, i, row);
+    }
+    return rows;
+}
+
+static PyObject *
+soac_access_rows(soac_code_bindings *unit)
+{
+    Py_ssize_t count = 0;
+    for (Py_ssize_t i = 0; i < unit->accesses.count; i++) count += unit->accesses.items[i].emit;
+    PyObject *rows = PyTuple_New(count);
+    if (rows == NULL) {
+        return NULL;
+    }
+    Py_ssize_t output_index = 0;
+    for (Py_ssize_t i = 0; i < unit->accesses.count; i++) {
+        soac_binding_access *access = &unit->accesses.items[i];
+        if (!access->emit) {
+            continue;
+        }
+        PyObject *span = soac_source_span(access->loc);
+        PyObject *slot = soac_current_slot(unit, access->slot);
+        if (span == NULL || span == Py_None || slot == NULL) {
+            if (!PyErr_Occurred()) {
+                soac_binding_error("original Name access has no source span");
+            }
+            Py_XDECREF(span);
+            Py_XDECREF(slot);
+            Py_DECREF(rows);
+            return NULL;
+        }
+        PyObject *row = Py_BuildValue("(OiiO)", span, access->context,
+                                      access->mode, slot);
+        Py_DECREF(span);
+        Py_DECREF(slot);
+        if (row == NULL) {
+            Py_DECREF(rows);
+            return NULL;
+        }
+        PyTuple_SET_ITEM(rows, output_index++, row);
+    }
+    return rows;
+}
+
+static PyObject *
+soac_class_recipe(soac_binding_collector *collector, soac_code_bindings *unit)
+{
+    if (soac_validate_class_slots(unit) < 0 || soac_normalize_class_bindings(unit) < 0) {
+        return NULL;
+    }
+    PyObject *owners = soac_owner_rows(unit);
+    PyObject *initializers = owners == NULL ? NULL : soac_initializer_rows(unit);
+    PyObject *regions = initializers == NULL ? NULL : soac_region_rows(unit);
+    PyObject *captures = regions == NULL ? NULL : soac_capture_rows(collector, unit);
+    PyObject *exports = captures == NULL ? NULL : soac_export_rows(unit);
+    PyObject *accesses = exports == NULL ? NULL : soac_access_rows(unit);
+    PyObject *result = accesses == NULL ? NULL : Py_BuildValue("(nOOOOOO)",
+        unit->final_id, owners, initializers, regions, captures, exports, accesses);
+    Py_XDECREF(owners);
+    Py_XDECREF(initializers);
+    Py_XDECREF(regions);
+    Py_XDECREF(captures);
+    Py_XDECREF(exports);
+    Py_XDECREF(accesses);
+    return result;
+}
+
+static PyObject *
+soac_binding_details(soac_binding_collector *collector, PyCodeObject *root)
+{
+    PyObject *nodes = PyList_New(0);
+    PyObject *recipes = PyList_New(0);
+    if (nodes == NULL || recipes == NULL ||
+        soac_collect_final_tree(collector, root, NULL, nodes) < 0) {
+        Py_XDECREF(nodes);
+        Py_XDECREF(recipes);
+        return NULL;
+    }
+    for (Py_ssize_t id = 0; id < PyList_GET_SIZE(nodes); id++) {
+        PyCodeObject *code = (PyCodeObject *)PyTuple_GET_ITEM(PyList_GET_ITEM(nodes, id), 2);
+        soac_code_bindings *unit = soac_unit_for_code(collector, code);
+        if (unit == NULL || (unit->scope_kind == Py_SOAC_SCOPE_CLASS &&
+            soac_append_owned(recipes, soac_class_recipe(collector, unit)) < 0)) {
+            Py_DECREF(nodes);
+            Py_DECREF(recipes);
+            return NULL;
+        }
+    }
+    PyObject *node_tuple = PyList_AsTuple(nodes);
+    PyObject *recipe_tuple = node_tuple == NULL ? NULL : PyList_AsTuple(recipes);
+    Py_DECREF(nodes);
+    Py_DECREF(recipes);
+    PyObject *result = recipe_tuple == NULL ? NULL :
+        Py_BuildValue("(iOO)", Py_SOAC_CLASS_BINDINGS_SCHEMA, node_tuple, recipe_tuple);
+    Py_XDECREF(node_tuple);
+    Py_XDECREF(recipe_tuple);
+    return result;
+}
 
 static int
 compiler_setup(compiler *c, mod_ty mod, PyObject *filename,
@@ -157,6 +1445,7 @@ compiler_setup(compiler *c, mod_ty mod, PyObject *filename,
 static void
 compiler_free(compiler *c)
 {
+    soac_binding_collector_free(c->c_soac_bindings);
     if (c->c_st) {
         _PySymtable_Free(c->c_st);
     }
@@ -473,6 +1762,10 @@ _PyCompile_AddConst(compiler *c, PyObject *o)
     }
 
     Py_ssize_t arg = _PyCompile_DictAddObj(c->u->u_metadata.u_consts, key);
+    if (arg >= 0 && c->c_soac_bindings != NULL && PyCode_Check(o) &&
+        soac_rebind_code_constant(c, (PyCodeObject *)o, key) < 0) {
+        arg = ERROR;
+    }
     Py_DECREF(key);
     return arg;
 }
@@ -667,6 +1960,10 @@ _PyCompile_EnterScope(compiler *c, identifier name, int scope_type,
     }
     u->u_metadata.u_names = PyDict_New();
     if (!u->u_metadata.u_names) {
+        compiler_unit_free(u);
+        return ERROR;
+    }
+    if (soac_register_code_unit(c, u) < 0) {
         compiler_unit_free(u);
         return ERROR;
     }
@@ -1453,6 +2750,16 @@ optimize_and_assemble_code_unit(struct compiler_unit *u, PyObject *const_cache,
     co = _PyAssemble_MakeCodeObject(&u->u_metadata, const_cache, consts,
                                     stackdepth, &optimized_instrs, nlocalsplus,
                                     code_flags, filename);
+    if (co != NULL && u->u_metadata.u_soac_bindings != NULL) {
+        soac_code_bindings *bindings = u->u_metadata.u_soac_bindings;
+        if (bindings->code != NULL) {
+            soac_binding_error("one compiler unit assembled more than once");
+            Py_CLEAR(co);
+        }
+        else {
+            bindings->code = (PyCodeObject *)Py_NewRef(co);
+        }
+    }
 
 error:
     Py_XDECREF(consts);
@@ -1481,20 +2788,59 @@ _PyCompile_OptimizeAndAssemble(compiler *c, int addNone)
     return optimize_and_assemble_code_unit(u, const_cache, code_flags, filename);
 }
 
-PyCodeObject *
-_PyAST_Compile(mod_ty mod, PyObject *filename, PyCompilerFlags *pflags,
-               int optimize, PyArena *arena, PyObject *module)
+static PyCodeObject *
+ast_compile_with_binding_details(mod_ty mod, PyObject *filename, PyCompilerFlags *pflags,
+                                  int optimize, PyArena *arena, PyObject *module,
+                                  PyObject **bindings)
 {
     assert(!PyErr_Occurred());
     compiler *c = new_compiler(mod, filename, pflags, optimize, arena, module);
     if (c == NULL) {
         return NULL;
     }
+    if (bindings != NULL) {
+        *bindings = NULL;
+        c->c_soac_bindings = PyMem_Calloc(1, sizeof(*c->c_soac_bindings));
+        if (c->c_soac_bindings == NULL) {
+            PyErr_NoMemory();
+            compiler_free(c);
+            return NULL;
+        }
+    }
 
     PyCodeObject *co = compiler_mod(c, mod);
+    if (co != NULL && bindings != NULL) {
+        *bindings = soac_binding_details(c->c_soac_bindings, co);
+        if (*bindings == NULL) {
+            Py_CLEAR(co);
+        }
+    }
     compiler_free(c);
     assert(co || PyErr_Occurred());
     return co;
+}
+
+PyCodeObject *
+_PyAST_Compile(mod_ty mod, PyObject *filename, PyCompilerFlags *pflags,
+               int optimize, PyArena *arena, PyObject *module)
+{
+    return ast_compile_with_binding_details(mod, filename, pflags,
+                                            optimize, arena, module, NULL);
+}
+
+PyCodeObject *
+_PyAST_CompileWithSoacClassBindings(mod_ty mod, PyObject *filename,
+                                   PyCompilerFlags *pflags, int optimize,
+                                   PyArena *arena, PyObject *module,
+                                   PyObject **bindings)
+{
+    if (bindings == NULL) {
+        PyErr_BadInternalCall();
+        return NULL;
+    }
+    *bindings = NULL;
+    return ast_compile_with_binding_details(mod, filename, pflags,
+                                            optimize, arena, module, bindings);
 }
 
 int
@@ -1697,6 +3043,10 @@ _PyCompile_Assemble(_PyCompile_CodeUnitMetadata *umd, PyObject *filename,
         PyErr_SetString(PyExc_TypeError, "expected an instruction sequence");
         return NULL;
     }
+    /* This low-level assembly API has no owned-source compilation. Its callers
+     * may initialize only the public metadata fields; never read a supplied or
+     * uninitialized collector pointer as source provenance. */
+    umd->u_soac_bindings = NULL;
     cfg_builder *g = NULL;
     PyCodeObject *co = NULL;
     instr_sequence optimized_instrs;

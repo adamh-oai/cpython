@@ -56,6 +56,8 @@ extern int _PyAST_Preprocess(
     PyObject *module);
 
 
+struct _PySoacCodeUnitBindings;
+
 typedef struct {
     PyObject *u_name;
     PyObject *u_qualname;  /* dot-separated qualified name (lazy) */
@@ -78,9 +80,33 @@ typedef struct {
     Py_ssize_t u_kwonlyargcount; /* number of keyword only arguments for block */
 
     int u_firstlineno; /* the first lineno of the block */
+    /* Non-NULL only for the explicit verified-source details compilation. */
+    struct _PySoacCodeUnitBindings *u_soac_bindings;
 } _PyCompile_CodeUnitMetadata;
 
 struct _PyCompiler;
+
+/* Data-only native class-binding collection. Ordinary compiler entrypoints do
+ * not construct a collector, and these hooks never authorize code execution. */
+PyCodeObject *_PyAST_CompileWithSoacClassBindings(
+    struct _mod *mod, PyObject *filename, PyCompilerFlags *flags,
+    int optimize, struct _arena *arena, PyObject *module, PyObject **bindings);
+int _PyCompile_SoacEnterComprehension(struct _PyCompiler *, _Py_SourceLocation,
+                                     PySTEntryObject *original);
+int _PyCompile_SoacSaveLocal(struct _PyCompiler *, int local_index);
+int _PyCompile_SoacMakeCell(struct _PyCompiler *, int deref_index);
+int _PyCompile_SoacRestoreComprehension(struct _PyCompiler *);
+int _PyCompile_SoacLeaveComprehension(struct _PyCompiler *);
+int _PyCompile_SoacCapture(struct _PyCompiler *, PyCodeObject *,
+                          _Py_SourceLocation, int free_ordinal, int deref_index);
+int _PyCompile_SoacClassInitializer(struct _PyCompiler *, PyObject *name, int role);
+int _PyCompile_SoacClassExport(struct _PyCompiler *, int deref_index, int role);
+int _PyCompile_SoacNameAccess(struct _PyCompiler *, _Py_SourceLocation,
+                             expr_ty original, expr_context_ty, int mode, int native_index);
+int _PyCompile_SoacFixSlots(_PyCompile_CodeUnitMetadata *,
+                           const int *fixed, int noffsets);
+int _PyCompile_SoacEntryCell(_PyCompile_CodeUnitMetadata *, int deref_index);
+int _PyCompile_SoacEntryFreeVars(_PyCompile_CodeUnitMetadata *, int free_count);
 
 typedef enum {
     COMPILE_OP_FAST,

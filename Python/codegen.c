@@ -196,6 +196,7 @@ typedef struct {
 } pattern_context;
 
 static int codegen_nameop(compiler *, location, identifier, expr_context_ty);
+static int codegen_source_nameop(compiler *, location, expr_ty, expr_context_ty);
 
 static int codegen_visit_stmt(compiler *, stmt_ty);
 static int codegen_visit_keyword(compiler *, keyword_ty);
@@ -396,6 +397,14 @@ codegen_addop_name(compiler *c, location loc,
         arg |= 1;
     }
     ADDOP_I(c, loc, opcode, arg);
+    if (METADATA(c)->u_soac_bindings != NULL) {
+        if (opcode == LOAD_FAST_AND_CLEAR) {
+            RETURN_IF_ERROR(_PyCompile_SoacSaveLocal(c, (int)arg));
+        }
+        else if (opcode == MAKE_CELL) {
+            RETURN_IF_ERROR(_PyCompile_SoacMakeCell(c, (int)arg));
+        }
+    }
     return SUCCESS;
 }
 
@@ -952,7 +961,8 @@ codegen_make_closure(compiler *c, location loc,
                      PyCodeObject *co, Py_ssize_t flags)
 {
     if (co->co_nfreevars) {
-        int i = PyUnstable_Code_GetFirstFree(co);
+        int first_free = PyUnstable_Code_GetFirstFree(co);
+        int i = first_free;
         for (; i < co->co_nlocalsplus; ++i) {
             /* Bypass com_addop_varname because it will generate
                LOAD_DEREF but LOAD_CLOSURE is needed.
@@ -961,6 +971,9 @@ codegen_make_closure(compiler *c, location loc,
             int arg = _PyCompile_LookupArg(c, co, name);
             RETURN_IF_ERROR(arg);
             ADDOP_I(c, loc, LOAD_CLOSURE, arg);
+            if (METADATA(c)->u_soac_bindings != NULL) {
+                RETURN_IF_ERROR(_PyCompile_SoacCapture(c, co, loc, i - first_free, arg));
+            }
         }
         flags |= MAKE_FUNCTION_CLOSURE;
         ADDOP_I(c, loc, BUILD_TUPLE, co->co_nfreevars);
@@ -1583,10 +1596,18 @@ codegen_class_body(compiler *c, stmt_ty s, int firstlineno)
         // STORE_DEREF in a class namespace, and codegen_nameop() won't do
         // that by default.
         ADDOP_N_IN_SCOPE(c, loc, STORE_DEREF, &_Py_ID(__classdict__), cellvars);
+        if (METADATA(c)->u_soac_bindings != NULL) {
+            RETURN_IF_ERROR_IN_SCOPE(c, _PyCompile_SoacClassInitializer(
+                c, &_Py_ID(__classdict__), Py_SOAC_CLASS_INIT_NAMESPACE));
+        }
     }
     if (SYMTABLE_ENTRY(c)->ste_has_conditional_annotations) {
         ADDOP_I(c, loc, BUILD_SET, 0);
         ADDOP_N_IN_SCOPE(c, loc, STORE_DEREF, &_Py_ID(__conditional_annotations__), cellvars);
+        if (METADATA(c)->u_soac_bindings != NULL) {
+            RETURN_IF_ERROR_IN_SCOPE(c, _PyCompile_SoacClassInitializer(
+                c, &_Py_ID(__conditional_annotations__), Py_SOAC_CLASS_INIT_CONDITIONAL_SET));
+        }
     }
     /* compile the body proper */
     RETURN_IF_ERROR_IN_SCOPE(c, codegen_body(c, loc, s->v.ClassDef.body, false));
@@ -1605,6 +1626,10 @@ codegen_class_body(compiler *c, stmt_ty s, int firstlineno)
         /* Store __classdictcell__ into class namespace */
         int i = _PyCompile_LookupCellvar(c, &_Py_ID(__classdict__));
         RETURN_IF_ERROR_IN_SCOPE(c, i);
+        if (METADATA(c)->u_soac_bindings != NULL) {
+            RETURN_IF_ERROR_IN_SCOPE(c, _PyCompile_SoacClassExport(
+                c, i, Py_SOAC_CLASS_EXPORT_CLASSDICTCELL));
+        }
         ADDOP_I(c, NO_LOCATION, LOAD_CLOSURE, i);
         RETURN_IF_ERROR_IN_SCOPE(
             c, codegen_nameop(c, NO_LOCATION, &_Py_ID(__classdictcell__), Store));
@@ -1614,6 +1639,10 @@ codegen_class_body(compiler *c, stmt_ty s, int firstlineno)
         /* Store __classcell__ into class namespace & return it */
         int i = _PyCompile_LookupCellvar(c, &_Py_ID(__class__));
         RETURN_IF_ERROR_IN_SCOPE(c, i);
+        if (METADATA(c)->u_soac_bindings != NULL) {
+            RETURN_IF_ERROR_IN_SCOPE(c, _PyCompile_SoacClassExport(
+                c, i, Py_SOAC_CLASS_EXPORT_CLASSCELL));
+        }
         ADDOP_I(c, NO_LOCATION, LOAD_CLOSURE, i);
         ADDOP_I(c, NO_LOCATION, COPY, 1);
         RETURN_IF_ERROR_IN_SCOPE(
@@ -3216,8 +3245,8 @@ codegen_load_classdict_freevar(compiler *c, location loc)
 }
 
 static int
-codegen_nameop(compiler *c, location loc,
-               identifier name, expr_context_ty ctx)
+codegen_nameop_impl(compiler *c, location loc, identifier name,
+                    expr_context_ty ctx, expr_ty original_name)
 {
     assert(!_PyUnicode_EqualToASCIIString(name, "None") &&
            !_PyUnicode_EqualToASCIIString(name, "True") &&
@@ -3273,6 +3302,18 @@ codegen_nameop(compiler *c, location loc,
         case Store: op = STORE_FAST; break;
         case Del: op = DELETE_FAST; break;
         }
+        if (original_name && METADATA(c)->u_soac_bindings != NULL) {
+            /* Observe the same resolved argument that the native emitter uses;
+             * do not infer a same-spelling CELL/FREE choice after lowering. */
+            arg = _PyCompile_DictAddObj(METADATA(c)->u_varnames, mangled);
+            if (arg < 0 || codegen_addop_i(INSTR_SEQUENCE(c), op, arg, loc) < 0 ||
+                _PyCompile_SoacNameAccess(c, LOC(original_name), original_name, ctx,
+                    Py_SOAC_CLASS_ACCESS_RAW_SLOT, (int)arg) < 0) {
+                goto error;
+            }
+            Py_DECREF(mangled);
+            return SUCCESS;
+        }
         ADDOP_N(c, loc, op, mangled, varnames);
         return SUCCESS;
     case COMPILE_OP_GLOBAL:
@@ -3312,11 +3353,33 @@ codegen_nameop(compiler *c, location loc,
         arg <<= 1;
     }
     ADDOP_I(c, loc, op, arg);
+    if (original_name && optype == COMPILE_OP_DEREF &&
+        METADATA(c)->u_soac_bindings != NULL) {
+        int mode = op == LOAD_FROM_DICT_OR_DEREF
+            ? Py_SOAC_CLASS_ACCESS_NAMESPACE_OR_CELL
+            : Py_SOAC_CLASS_ACCESS_CELL_VALUE;
+        RETURN_IF_ERROR(_PyCompile_SoacNameAccess(
+            c, LOC(original_name), original_name, ctx, mode, (int)arg));
+    }
     return SUCCESS;
 
 error:
     Py_DECREF(mangled);
     return ERROR;
+}
+
+static int
+codegen_nameop(compiler *c, location loc, identifier name, expr_context_ty ctx)
+{
+    return codegen_nameop_impl(c, loc, name, ctx, NULL);
+}
+
+static int
+codegen_source_nameop(compiler *c, location loc, expr_ty name, expr_context_ty ctx)
+{
+    assert(name->kind == Name_kind);
+    /* Keep the caller's emission location separate from the metadata origin. */
+    return codegen_nameop_impl(c, loc, name->v.Name.id, ctx, name);
 }
 
 static int
@@ -4812,6 +4875,9 @@ push_inlined_comprehension_state(compiler *c, location loc,
                                  PySTEntryObject *comp,
                                  _PyCompile_InlinedComprehensionState *state)
 {
+    if (METADATA(c)->u_soac_bindings != NULL) {
+        RETURN_IF_ERROR(_PyCompile_SoacEnterComprehension(c, loc, comp));
+    }
     RETURN_IF_ERROR(
         _PyCompile_TweakInlinedComprehensionScopes(c, loc, comp, state));
     RETURN_IF_ERROR(
@@ -4845,6 +4911,11 @@ static int
 codegen_pop_inlined_comprehension_locals(compiler *c, location loc,
                                          _PyCompile_InlinedComprehensionState *state)
 {
+    /* Native code below emits the same restoration on two CFG paths. Record
+     * one scoped ownership transition, not two sequential restorations. */
+    if (METADATA(c)->u_soac_bindings != NULL) {
+        RETURN_IF_ERROR(_PyCompile_SoacRestoreComprehension(c));
+    }
     if (state->pushed_locals) {
         ADDOP(c, NO_LOCATION, POP_BLOCK);
 
@@ -4872,6 +4943,9 @@ pop_inlined_comprehension_state(compiler *c, location loc,
 {
     RETURN_IF_ERROR(codegen_pop_inlined_comprehension_locals(c, loc, state));
     RETURN_IF_ERROR(_PyCompile_RevertInlinedComprehensionScopes(c, loc, state));
+    if (METADATA(c)->u_soac_bindings != NULL) {
+        RETURN_IF_ERROR(_PyCompile_SoacLeaveComprehension(c));
+    }
     return SUCCESS;
 }
 
@@ -5434,7 +5508,7 @@ codegen_visit_expr(compiler *c, expr_ty e)
         RETURN_IF_ERROR(codegen_slice(c, e));
         break;
     case Name_kind:
-        return codegen_nameop(c, loc, e->v.Name.id, e->v.Name.ctx);
+        return codegen_source_nameop(c, loc, e, e->v.Name.ctx);
     /* child nodes of List and Tuple will have expr_context set */
     case List_kind:
         return codegen_list(c, e);
@@ -5496,7 +5570,7 @@ codegen_augassign(compiler *c, stmt_ty s)
         }
         break;
     case Name_kind:
-        RETURN_IF_ERROR(codegen_nameop(c, loc, e->v.Name.id, Load));
+        RETURN_IF_ERROR(codegen_source_nameop(c, loc, e, Load));
         break;
     default:
         PyErr_Format(PyExc_SystemError,
@@ -5532,7 +5606,7 @@ codegen_augassign(compiler *c, stmt_ty s)
         }
         break;
     case Name_kind:
-        return codegen_nameop(c, loc, e->v.Name.id, Store);
+        return codegen_source_nameop(c, loc, e, Store);
     default:
         Py_UNREACHABLE();
     }

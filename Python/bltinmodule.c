@@ -102,14 +102,12 @@ error:
  * Base resolution and metaclass selection deliberately use the same native
  * helpers and callback order as builtin___build_class__ below. */
 PyObject *
-PySoac_PrepareClass(PyObject *name, PyObject *orig_bases, PyObject *keywords,
-                    int requires_class_cell)
+PySoac_PrepareClass(PyObject *name, PyObject *orig_bases, PyObject *keywords)
 {
     if (!PyUnicode_Check(name) || !PyTuple_CheckExact(orig_bases) ||
-        !PyDict_CheckExact(keywords) ||
-        (requires_class_cell != 0 && requires_class_cell != 1)) {
+        !PyDict_CheckExact(keywords)) {
         PyErr_SetString(PyExc_TypeError,
-                        "class preparation requires a string, exact bases/keywords, and a cell flag");
+                        "class preparation requires a string and exact bases/keywords");
         return NULL;
     }
     /* __build_class__ receives already-evaluated keyword values in its
@@ -128,7 +126,7 @@ PySoac_PrepareClass(PyObject *name, PyObject *orig_bases, PyObject *keywords,
     if (bases == orig_bases) {
         Py_INCREF(bases);
     }
-    PyObject *meta = NULL, *ns = NULL, *prep = NULL, *cell = NULL, *result = NULL;
+    PyObject *meta = NULL, *ns = NULL, *prep = NULL, *result = NULL;
     if (PyDict_Pop(mkw, &_Py_ID(metaclass), &meta) < 0) {
         goto done;
     }
@@ -172,14 +170,9 @@ PySoac_PrepareClass(PyObject *name, PyObject *orig_bases, PyObject *keywords,
                      Py_TYPE(ns)->tp_name);
         goto done;
     }
-    /* A class cell is a fresh closure local, not a value supplied by a custom
-     * __prepare__ namespace. It is published only after the namespace body. */
-    cell = requires_class_cell ? PyCell_New(NULL) : Py_NewRef(Py_None);
-    if (cell != NULL) {
-        result = PyTuple_Pack(5, meta, ns, bases, mkw, cell);
-    }
+    /* The actual namespace body owns its cell allocation and export order. */
+    result = PyTuple_Pack(4, meta, ns, bases, mkw);
 done:
-    Py_XDECREF(cell);
     Py_XDECREF(prep);
     Py_XDECREF(ns);
     Py_XDECREF(meta);
@@ -191,12 +184,10 @@ done:
 static int
 soac_check_class_preparation(PyObject *preparation)
 {
-    if (!PyTuple_CheckExact(preparation) || PyTuple_GET_SIZE(preparation) != 5 ||
+    if (!PyTuple_CheckExact(preparation) || PyTuple_GET_SIZE(preparation) != 4 ||
         !PyMapping_Check(PyTuple_GET_ITEM(preparation, 1)) ||
         !PyTuple_CheckExact(PyTuple_GET_ITEM(preparation, 2)) ||
-        !PyDict_CheckExact(PyTuple_GET_ITEM(preparation, 3)) ||
-        (PyTuple_GET_ITEM(preparation, 4) != Py_None &&
-         !PyCell_Check(PyTuple_GET_ITEM(preparation, 4)))) {
+        !PyDict_CheckExact(PyTuple_GET_ITEM(preparation, 3))) {
         PyErr_SetString(PyExc_TypeError, "invalid native class preparation tuple");
         return -1;
     }
@@ -214,10 +205,6 @@ PySoac_CompleteClassNamespace(PyObject *preparation, PyObject *original_bases)
         return -1;
     }
     PyObject *ns = PyTuple_GET_ITEM(preparation, 1);
-    PyObject *cell = PyTuple_GET_ITEM(preparation, 4);
-    if (cell != Py_None && PyMapping_SetItemString(ns, "__classcell__", cell) < 0) {
-        return -1;
-    }
     if (PyTuple_GET_ITEM(preparation, 2) != original_bases &&
         PyMapping_SetItemString(ns, "__orig_bases__", original_bases) < 0) {
         return -1;
@@ -226,16 +213,16 @@ PySoac_CompleteClassNamespace(PyObject *preparation, PyObject *original_bases)
 }
 
 int
-PySoac_FinishClass(PyObject *name, PyObject *preparation, PyObject *cls)
+PySoac_FinishClass(PyObject *name, PyObject *cell, PyObject *cls)
 {
     if (!PyUnicode_Check(name)) {
         PyErr_SetString(PyExc_TypeError, "class name must be a string");
         return -1;
     }
-    if (soac_check_class_preparation(preparation) < 0) {
+    if (cell != Py_None && !PyCell_Check(cell)) {
+        PyErr_SetString(PyExc_TypeError, "class body result must be None or an actual cell");
         return -1;
     }
-    PyObject *cell = PyTuple_GET_ITEM(preparation, 4);
     if (!PyType_Check(cls) || !PyCell_Check(cell)) {
         return 0;
     }

@@ -1715,15 +1715,23 @@ soac_compile_verified_source(const char *source, Py_ssize_t length,
     PyCompilerFlags flags = _PyCompilerFlags_INIT;
     mod_ty mod = _PyParser_ASTFromString(terminated, filename, Py_file_input,
                                          &flags, arena, NULL);
-    PyObject *result = mod == NULL ? NULL :
-        (PyObject *)_PyAST_Compile(mod, filename, &flags, optimize, arena, NULL);
+    PyObject *bindings = NULL;
+    PyObject *result = NULL;
+    if (mod != NULL) {
+        result = details
+            ? (PyObject *)_PyAST_CompileWithSoacClassBindings(
+                mod, filename, &flags, optimize, arena, NULL, &bindings)
+            : (PyObject *)_PyAST_Compile(mod, filename, &flags, optimize, arena, NULL);
+    }
     PyMem_Free(terminated);
     if (result == NULL) {
+        Py_XDECREF(bindings);
         _PyArena_Free(arena);
         return NULL;
     }
     PyCodeObject *code = (PyCodeObject *)result;
     if (!(code->co_flags & CO_FUTURE_STRICT)) {
+        Py_XDECREF(bindings);
         Py_DECREF(result);
         _PyArena_Free(arena);
         PyErr_SetString(PyExc_ValueError,
@@ -1743,8 +1751,10 @@ soac_compile_verified_source(const char *source, Py_ssize_t length,
         }
         PyObject *immutable = strings == NULL ? NULL : PyList_AsTuple(strings);
         Py_XDECREF(strings);
-        PyObject *combined = immutable == NULL ? NULL : PyTuple_Pack(2, result, immutable);
+        PyObject *combined = immutable == NULL ? NULL :
+            PyTuple_Pack(3, result, immutable, bindings);
         Py_XDECREF(immutable);
+        Py_CLEAR(bindings);
         Py_DECREF(result);
         result = combined;
         if (result == NULL) {
