@@ -4071,28 +4071,7 @@ _PyObject_SetDict(PyObject *obj, PyObject *value)
                      "not a '%.200s'", Py_TYPE(value)->tp_name);
         return -1;
     }
-    if (Py_TYPE(obj)->tp_flags & Py_TPFLAGS_MANAGED_DICT) {
-        return _PyObject_SetManagedDict(obj, value);
-    }
-    PyObject **dictptr = _PyObject_ComputedDictPointer(obj);
-    if (dictptr == NULL) {
-        PyErr_SetString(PyExc_AttributeError,
-                        "This object has no __dict__");
-        return -1;
-    }
-    if (_PyDict_HasSoacBindingPolicy(*dictptr)) {
-        PyObject *error = PySoac_GetStrictMutationError();
-        if (error != NULL) {
-            PyErr_SetString(error, "cannot replace an authoritative protected dictionary");
-        }
-        return -1;
-    }
-    Py_BEGIN_CRITICAL_SECTION(obj);
-    // gh-133980: To prevent use-after-free from other threads that reference
-    // the __dict__
-    _PyObject_XSetRefDelayed(dictptr, Py_NewRef(value));
-    Py_END_CRITICAL_SECTION();
-    return 0;
+    return _PyObject_SetInstanceDictionary(obj, value);
 }
 
 static int
