@@ -552,6 +552,34 @@ PyType_GetSoacContractOwner(PyObject *object)
 }
 
 int
+_PySoac_IsLayoutDescriptor(PyObject *name, PyObject *descriptor)
+{
+    if (name == NULL || descriptor == NULL) {
+        PyErr_BadInternalCall();
+        return -1;
+    }
+    if (!PyUnicode_CheckExact(name)) {
+        return 0;
+    }
+    int is_dict = _PyUnicode_Equal(name, &_Py_ID(__dict__));
+    int is_weakref = _PyUnicode_Equal(name, &_Py_ID(__weakref__));
+    if (!is_dict && !is_weakref) {
+        return 0;
+    }
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+#ifdef Py_GIL_DISABLED
+    PyMutex_Lock(&interp->cached_objects.descriptor_mutex);
+#endif
+    PyObject *cached = is_dict ? interp->cached_objects.dict_descriptor
+                              : interp->cached_objects.weakref_descriptor;
+    int result = cached != NULL && descriptor == cached;
+#ifdef Py_GIL_DISABLED
+    PyMutex_Unlock(&interp->cached_objects.descriptor_mutex);
+#endif
+    return result;
+}
+
+int
 PyType_IsSoacSealed(PyObject *object)
 {
     SoacTypeContract *state = PyType_Check(object) ? soac_type_contract((PyTypeObject *)object) : NULL;

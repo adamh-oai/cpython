@@ -360,6 +360,10 @@ PyAPI_FUNC(int) _PySoac_SealProperty(PyObject *, PyObject *, PyObject *, PyObjec
 /* No-error, no-allocation predicate: 1 only for an exact builtin descriptor
  * with a permanent seal, 0 for any ordinary, non-exact, or unsealed object. */
 PyAPI_FUNC(int) _PySoac_IsDescriptorSealed(PyObject *);
+/* Exact current-interpreter cached __dict__/__weakref__ descriptor identity.
+   Valid operands never allocate or call Python; other names/objects return 0.
+   NULL operands are invalid C API calls and return -1 with an exception. */
+PyAPI_FUNC(int) _PySoac_IsLayoutDescriptor(PyObject *name, PyObject *descriptor);
 
 PyAPI_FUNC(int) PyObject_Print(PyObject *, FILE *, int);
 PyAPI_FUNC(void) _Py_BreakPoint(void);
