@@ -1,6 +1,25 @@
 /* Included by funcobject.c after the exact builtin descriptor definitions.
  * A birth is a mechanical native witness, not source or optimizer authority. */
 
+int
+_PySOAC_DescriptorFactoryIsOriginal(PyObject *factory)
+{
+    if (factory == (PyObject *)&PyProperty_Type)
+        return _PySOAC_PropertyFactoryIsOriginal();
+    if (factory != (PyObject *)&PyStaticMethod_Type &&
+        factory != (PyObject *)&PyClassMethod_Type)
+        return 0;
+    PyTypeObject *type = (PyTypeObject *)factory;
+    int is_static = type == &PyStaticMethod_Type;
+    return Py_TYPE(type) == &PyType_Type && _PySOAC_TypeCallIsOriginal() &&
+        type->tp_vectorcall == NULL &&
+        type->tp_basicsize == (is_static ? sizeof(staticmethod) : sizeof(classmethod)) &&
+        type->tp_itemsize == 0 && type->tp_alloc == PyType_GenericAlloc &&
+        type->tp_free == PyObject_GC_Del &&
+        type->tp_new == (is_static ? sm_new : cm_new) &&
+        type->tp_init == (is_static ? sm_init : cm_init);
+}
+
 enum {
     SOAC_DESCRIPTOR_CONSTRUCTING,
     SOAC_DESCRIPTOR_PENDING,
@@ -307,6 +326,12 @@ soac_descriptor_new_method(PyTypeObject *factory, PyObject *function,
     }
     _PySoac_DescriptorBirth_Bind(record, object);
     _PyObject_GC_TRACK(object);
+    if (!_PySOAC_DescriptorFactoryIsOriginal((PyObject *)factory)) {
+        func_soac_mutation_error("builtin descriptor init changed during allocation");
+        _PySoac_DescriptorBirth_Invalidate(record);
+        Py_DECREF(object);
+        return NULL;
+    }
     if (functools_wraps(object, function) < 0) {
         _PySoac_DescriptorBirth_Invalidate(record);
         Py_DECREF(object);
@@ -331,9 +356,15 @@ PySoac_NewBuiltinDescriptor(PyObject *factory, PyObject *function,
         PyErr_SetString(PyExc_TypeError, "expected an exact supported builtin descriptor factory");
         return NULL;
     }
-    if (!PyFunction_Check(function) || !PyCode_Check(verified_code) ||
+    if (!PyFunction_Check(function) ||
+        (PyObject *)((PyFunctionObject *)function)->func_code != verified_code ||
+        !PyCode_Check((PyObject *)((PyFunctionObject *)function)->func_code) ||
         namespace_witness == Py_None || expected_owner == Py_None) {
         PyErr_SetString(PyExc_TypeError, "descriptor construction needs a function, code, and live owners");
+        return NULL;
+    }
+    if (!_PySOAC_DescriptorFactoryIsOriginal(factory)) {
+        func_soac_mutation_error("builtin descriptor constructor dispatch changed");
         return NULL;
     }
     if (soac_descriptor_check_function(function, expected_owner, verified_code) < 0) {
@@ -380,7 +411,15 @@ PySoac_NewBuiltinDescriptor(PyObject *factory, PyObject *function,
     birth->state = SOAC_DESCRIPTOR_CONSTRUCTING;
     _PyObject_GC_TRACK(birth);
 
-    PyObject *descriptor;
+    PyObject *descriptor = NULL;
+    /* The metadata allocation above may collect objects. Do not bypass a
+     * constructor slot changed by a callback since the source CALL selection. */
+    if (!_PySOAC_DescriptorFactoryIsOriginal(factory) ||
+        soac_descriptor_check_function(function, expected_owner, verified_code) < 0) {
+        if (!PyErr_Occurred())
+            func_soac_mutation_error("builtin descriptor constructor changed before allocation");
+        goto error;
+    }
     if (factory == (PyObject *)&PyProperty_Type) {
         descriptor = _PySoac_NewProperty(function, (PyObject *)birth);
     }
@@ -417,7 +456,7 @@ PySoac_NewBuiltinDescriptor(PyObject *factory, PyObject *function,
 error:
     _PySoac_DescriptorBirth_Invalidate((PyObject *)birth);
     PyObject *exception = PyErr_GetRaisedException();
-    Py_DECREF(descriptor);
+    Py_XDECREF(descriptor);
     soac_descriptor_birth_clear((PyObject *)birth);
     Py_DECREF(birth);
     PyErr_SetRaisedException(exception);

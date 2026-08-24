@@ -9,6 +9,20 @@
 /* Only an immediate real Python parent can transmit context implicitly.
  * C entry/trampoline frames are barriers. Explicit root/exec bridges supply
  * their owned invocation instead; no thread-local or Python attribute state. */
+struct _PySoacInterpreterCallV1;
+extern int _PySOAC_DataclassBeginRoot(PyObject *, unsigned int, PyObject *);
+extern int _PySOAC_DataclassAttachRoot(
+    PyObject **, unsigned int, _PyInterpreterFrame *,
+    _PyInterpreterFrame *, const _Py_CODEUNIT *, struct _PySoacInterpreterCallV1 *);
+extern void _PySOAC_DataclassTakeRoot(
+    _PyInterpreterFrame *, PyObject **, unsigned int *,
+    _PyInterpreterFrame **, const _Py_CODEUNIT **, struct _PySoacInterpreterCallV1 **);
+extern int _PySOAC_DataclassFinishRoot(PyObject *, unsigned int, PyObject *);
+extern PyObject *_PySOAC_DataclassRootOwner(PyObject *);
+extern void _PySOAC_DataclassReleaseRoot(PyObject *);
+extern void _PySOAC_DataclassCreationInfo(
+    PyObject *, uint32_t *, uint32_t *, uint64_t *, PyObject **, PyObject **);
+
 PyAPI_FUNC(int) _PySOAC_DataclassEnterFrame(_PyInterpreterFrame *frame);
 extern int _PySOAC_DataclassEnterExplicit(
     PyObject *invocation, unsigned int stage, _PyInterpreterFrame *parent,

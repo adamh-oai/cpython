@@ -2026,6 +2026,13 @@ _PySoac_NewProperty(PyObject *function, PyObject *birth)
     self->prop_soac_birth = Py_NewRef(birth);
     _PySoac_DescriptorBirth_Bind(birth, (PyObject *)self);
     _PyObject_GC_TRACK(self);
+    if (!_PySOAC_PropertyFactoryIsOriginal()) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "builtin property init changed during allocation");
+        _PySoac_DescriptorBirth_Invalidate(birth);
+        Py_DECREF(self);
+        return NULL;
+    }
     if (property_init_common(self, function, Py_None, Py_None, Py_None, 1) < 0) {
         _PySoac_DescriptorBirth_Invalidate(birth);
         Py_DECREF(self);
@@ -2183,3 +2190,18 @@ PyTypeObject PyProperty_Type = {
     PyType_GenericNew,                          /* tp_new */
     PyObject_GC_Del,                            /* tp_free */
 };
+
+int
+_PySOAC_PropertyFactoryIsOriginal(void)
+{
+    return Py_TYPE(&PyProperty_Type) == &PyType_Type &&
+        _PySOAC_TypeCallIsOriginal() &&
+        PyProperty_Type.tp_vectorcall == NULL &&
+        PyProperty_Type.tp_basicsize == sizeof(propertyobject) &&
+        PyProperty_Type.tp_itemsize == 0 &&
+        PyProperty_Type.tp_new == PyType_GenericNew &&
+        PyProperty_Type.tp_init == property_init &&
+        PyProperty_Type.tp_alloc == PyType_GenericAlloc &&
+        PyProperty_Type.tp_free == PyObject_GC_Del;
+}
+

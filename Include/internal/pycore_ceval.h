@@ -423,6 +423,7 @@ _Py_VectorCall_StackRefSteal(
     _PyStackRef kwnames,
     _PyInterpreterFrame *frame);
 
+struct _PySoacInterpreterCallV1;
 PyAPI_FUNC(PyObject*)
 _Py_VectorCallInstrumentation_StackRefSteal(
     _PyStackRef callable,
@@ -432,7 +433,8 @@ _Py_VectorCallInstrumentation_StackRefSteal(
     bool call_instrumentation,
     _PyInterpreterFrame* frame,
     _Py_CODEUNIT* this_instr,
-    PyThreadState* tstate);
+    PyThreadState* tstate,
+    struct _PySoacInterpreterCallV1 *soac_call);
 
 PyAPI_FUNC(PyObject *)
 _Py_BuiltinCallFast_StackRefSteal(

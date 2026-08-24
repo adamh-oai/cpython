@@ -29,6 +29,13 @@ typedef struct {
     int member_pending;
     PyObject *pending_type_root;  /* existing native lineage metadata only */
     int pending_scope_active;
+    /* Exact root cleanup identity only; these pointers have actual active
+     * evaluator/C supports, are never owners, and never grant a call edge. */
+    _PyInterpreterFrame *root_frame, *root_caller;
+    const _Py_CODEUNIT *root_instruction;
+    struct _PySoacInterpreterCallV1 *root_deferred;
+    unsigned int root_stage;
+    int root_active;
 } SoacDataclassInvocation;
 
 typedef enum {
@@ -116,11 +123,15 @@ soac_dataclass_expire(SoacDataclassInvocation *invocation,
     invocation->replacement_type = NULL;
     invocation->slots_started = 0;
     invocation->member_pending = 0;
-    PyObject *owner = invocation->owner;
+    /* A failed root may still be executing finally or catching a helper
+     * error. Keep its SAME metadata owner until exact post-clear completion;
+     * all execution/admission state and value-bearing associations are already
+     * terminal. No source input/type/globals owner is retained here. */
+    PyObject *owner = invocation->root_active ? NULL : invocation->owner;
     PyObject *class_owner = invocation->class_owner;
     PyObject *replacement_owner = invocation->replacement_owner;
     PyObject *replacement_weakref = invocation->replacement_weakref;
-    invocation->owner = NULL;
+    if (!invocation->root_active) invocation->owner = NULL;
     invocation->class_owner = NULL;
     invocation->replacement_owner = NULL;
     invocation->replacement_weakref = NULL;
@@ -357,6 +368,11 @@ PySoac_NewDataclassInvocation(PyObject *owner)
     invocation->member_pending = 0;
     invocation->pending_type_root = NULL;
     invocation->pending_scope_active = 0;
+    invocation->root_frame = invocation->root_caller = NULL;
+    invocation->root_instruction = NULL;
+    invocation->root_deferred = NULL;
+    invocation->root_stage = 0;
+    invocation->root_active = 0;
     PyObject_GC_Track(invocation);
     return (PyObject *)invocation;
 }
@@ -459,7 +475,8 @@ soac_dataclass_frame_valid(_PyInterpreterFrame *frame)
 
 static int
 soac_dataclass_enter(SoacDataclassInvocation *invocation, unsigned int stage,
-                     _PyInterpreterFrame *parent, _PyInterpreterFrame *frame)
+                     _PyInterpreterFrame *parent, _PyInterpreterFrame *frame,
+                     int move_invocation)
 {
     if (!soac_dataclass_is_running(invocation) || invocation->owner == NULL ||
         soac_dataclass_current(invocation) < 0 ||
@@ -503,7 +520,8 @@ soac_dataclass_enter(SoacDataclassInvocation *invocation, unsigned int stage,
         }
     }
     frame->soac_dataclass_role = role;
-    frame->soac_dataclass_invocation = Py_NewRef((PyObject *)invocation);
+    frame->soac_dataclass_invocation = move_invocation
+        ? (PyObject *)invocation : Py_NewRef((PyObject *)invocation);
     return 0;
 }
 
@@ -516,7 +534,7 @@ _PySOAC_DataclassEnterExplicit(PyObject *object, unsigned int stage,
     if (invocation == NULL) {
         return -1;
     }
-    return soac_dataclass_enter(invocation, stage, parent, frame);
+    return soac_dataclass_enter(invocation, stage, parent, frame, 0);
 }
 
 int
@@ -546,7 +564,7 @@ _PySOAC_DataclassEnterFrame(_PyInterpreterFrame *frame)
         /* Synthetic type-call trampolines do not transmit provenance. */
         return 0;
     }
-    return soac_dataclass_enter(invocation, 0, parent, frame);
+    return soac_dataclass_enter(invocation, 0, parent, frame, 0);
 }
 
 static int
@@ -675,53 +693,153 @@ _PySOAC_DataclassObjectCallFromFrame(_PyInterpreterFrame *parent,
     return result;
 }
 
+int
+_PySOAC_DataclassBeginRoot(PyObject *object, unsigned int stage, PyObject *callable)
+{
+    SoacDataclassInvocation *invocation = soac_dataclass_invocation(object);
+    if (invocation == NULL) return -1;
+    if (stage != Py_SOAC_DATACLASS_ROOT_FACTORY &&
+        stage != Py_SOAC_DATACLASS_ROOT_APPLY)
+        return soac_dataclass_fail(invocation, "invalid dataclass root stage");
+    SoacDataclassPhase expected = stage == Py_SOAC_DATACLASS_ROOT_FACTORY
+        ? SOAC_DC_NEW : SOAC_DC_CLASS_BOUND;
+    if (invocation->root_active || invocation->phase != expected ||
+        invocation->owner == NULL || callable == NULL ||
+        !PyFunction_Check(callable) ||
+        ((PyFunctionObject *)callable)->vectorcall != _PyFunction_Vectorcall ||
+        (((PyCodeObject *)PyFunction_GET_CODE(callable))->co_flags &
+            (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR)) ||
+        _PyInterpreterState_GET()->eval_frame != NULL)
+        return soac_dataclass_fail(invocation, "dataclass root invocation is not available");
+    invocation->root_active = 1;
+    invocation->root_stage = stage;
+    invocation->phase = stage == Py_SOAC_DATACLASS_ROOT_FACTORY
+        ? SOAC_DC_FACTORY_ACTIVE : SOAC_DC_APPLY_ACTIVE;
+    return 0;
+}
+
+int
+_PySOAC_DataclassAttachRoot(
+    PyObject **owned, unsigned int stage, _PyInterpreterFrame *frame,
+    _PyInterpreterFrame *caller, const _Py_CODEUNIT *instruction,
+    struct _PySoacInterpreterCallV1 *deferred)
+{
+    if (owned == NULL || *owned == NULL || caller == NULL || instruction == NULL ||
+        frame == NULL || frame->soac_dataclass_invocation != NULL)
+        return soac_dataclass_error("dataclass root has no exact owned attachment");
+    SoacDataclassInvocation *invocation = soac_dataclass_invocation(*owned);
+    if (invocation == NULL) return -1;
+    if (!invocation->root_active || invocation->root_stage != stage ||
+        invocation->root_frame != NULL)
+        return soac_dataclass_fail(invocation, "dataclass root attachment was replayed");
+    /* Validate the native bound ordinary frame using the existing root recipe.
+     * The source parent is NOT passed as a dataclass-helper parent. */
+    if (soac_dataclass_enter(invocation, stage, NULL, frame, 1) < 0) return -1;
+    *owned = NULL;  /* MOVE sole opcode continuation edge into actual frame. */
+    invocation->root_frame = frame;
+    invocation->root_caller = caller;
+    invocation->root_instruction = instruction;
+    invocation->root_deferred = deferred;
+    return 0;
+}
+
+void
+_PySOAC_DataclassTakeRoot(
+    _PyInterpreterFrame *frame, PyObject **owned, unsigned int *stage,
+    _PyInterpreterFrame **caller, const _Py_CODEUNIT **instruction,
+    struct _PySoacInterpreterCallV1 **deferred)
+{
+    *owned = NULL;
+    PyObject *object = frame->soac_dataclass_invocation;
+    if (object == NULL || !Py_IS_TYPE(object, &SoacDataclassInvocation_Type)) return;
+    SoacDataclassInvocation *invocation = (SoacDataclassInvocation *)object;
+    if (!invocation->root_active || invocation->root_frame != frame) return;
+    *owned = object;
+    *stage = invocation->root_stage;
+    *caller = invocation->root_caller;
+    *instruction = invocation->root_instruction;
+    *deferred = invocation->root_deferred;
+    /* All borrowed frame/C coordinates disappear BEFORE native frame unlink,
+     * clear, ownership transfer to a frame object, or any local decref. */
+    invocation->root_frame = invocation->root_caller = NULL;
+    invocation->root_instruction = NULL;
+    invocation->root_deferred = NULL;
+    frame->soac_dataclass_invocation = NULL;
+    frame->soac_dataclass_role = 0;
+}
+
+PyObject *
+_PySOAC_DataclassRootOwner(PyObject *object)
+{
+    if (object == NULL || !Py_IS_TYPE(object, &SoacDataclassInvocation_Type)) return NULL;
+    SoacDataclassInvocation *invocation = (SoacDataclassInvocation *)object;
+    /* Internal exact continuation only; not a new public owner getter. */
+    return invocation->root_active ? invocation->owner : NULL;
+}
+
+int
+_PySOAC_DataclassFinishRoot(PyObject *object, unsigned int stage, PyObject *result)
+{
+    SoacDataclassInvocation *invocation = soac_dataclass_invocation(object);
+    if (invocation == NULL) return -1;
+    if (!invocation->root_active || invocation->root_stage != stage ||
+        invocation->root_frame != NULL || result == NULL ||
+        !soac_dataclass_is_running(invocation) || invocation->member_pending ||
+        (stage == Py_SOAC_DATACLASS_ROOT_APPLY &&
+         (invocation->slots_started
+            ? PySoac_DataclassMatchesSlotsClass(object, result,
+                                                invocation->replacement_owner) != 1
+            : result != (PyObject *)invocation->actual_type)))
+        return soac_dataclass_fail(invocation, "dataclass root did not finish its exact application");
+    invocation->phase = stage == Py_SOAC_DATACLASS_ROOT_FACTORY
+        ? SOAC_DC_FACTORY_READY : SOAC_DC_APPLY_RETURNED;
+    if (stage == Py_SOAC_DATACLASS_ROOT_APPLY && invocation->pending_scope_active) {
+        invocation->pending_scope_active = 0;
+        _PySOAC_EndPendingTypeAdapter(invocation->pending_type_root, 0);
+    }
+    return 0;
+}
+
+void
+_PySOAC_DataclassReleaseRoot(PyObject *object)
+{
+    if (object == NULL || !Py_IS_TYPE(object, &SoacDataclassInvocation_Type)) return;
+    SoacDataclassInvocation *invocation = (SoacDataclassInvocation *)object;
+    assert(invocation->root_frame == NULL);
+    invocation->root_active = 0;
+    invocation->root_stage = 0;
+    invocation->root_caller = NULL;
+    invocation->root_instruction = NULL;
+    invocation->root_deferred = NULL;
+    if (invocation->phase >= SOAC_DC_COMPLETE)
+        soac_dataclass_expire(invocation, invocation->phase);
+}
+
 PyObject *
 PySoac_DataclassVectorcall(PyObject *object, unsigned int stage,
                            PyObject *callable, PyObject *const *args,
                            size_t nargsf, PyObject *kwnames)
 {
     SoacDataclassInvocation *invocation = soac_dataclass_invocation(object);
-    if (invocation == NULL) {
-        return NULL;
-    }
+    if (invocation == NULL) return NULL;
     if (stage != Py_SOAC_DATACLASS_ROOT_FACTORY &&
         stage != Py_SOAC_DATACLASS_ROOT_APPLY) {
         soac_dataclass_fail(invocation, "invalid dataclass root stage");
         return NULL;
     }
-    if (invocation->phase == SOAC_DC_DECLINED) {
+    if (invocation->phase == SOAC_DC_DECLINED)
         return PyObject_Vectorcall(callable, args, nargsf, kwnames);
-    }
-    SoacDataclassPhase expected = stage == Py_SOAC_DATACLASS_ROOT_FACTORY
-        ? SOAC_DC_NEW : SOAC_DC_CLASS_BOUND;
-    if (invocation->phase != expected || callable == NULL ||
-        !PyFunction_Check(callable) ||
-        ((PyFunctionObject *)callable)->vectorcall != _PyFunction_Vectorcall ||
-        _PyInterpreterState_GET()->eval_frame != NULL) {
-        soac_dataclass_fail(invocation, "dataclass root invocation is not available");
-        return NULL;
-    }
-    invocation->phase = stage == Py_SOAC_DATACLASS_ROOT_FACTORY
-        ? SOAC_DC_FACTORY_ACTIVE : SOAC_DC_APPLY_ACTIVE;
+    if (_PySOAC_DataclassBeginRoot(object, stage, callable) < 0) return NULL;
+    /* Legacy C transport keeps its ordinary borrowed argv semantics. Only the
+     * shared phase validation was factored; no interpreter completion repeats. */
     PyObject *result = _PySOAC_DataclassEvalVector(
         _PyThreadState_GET(), (PyFunctionObject *)callable, NULL,
         args, PyVectorcall_NARGS(nargsf), kwnames, object, stage, NULL);
-    if (result == NULL || !soac_dataclass_is_running(invocation) ||
-        invocation->member_pending ||
-        (stage == Py_SOAC_DATACLASS_ROOT_APPLY &&
-         (invocation->slots_started
-             ? PySoac_DataclassMatchesSlotsClass(object, result,
-                                                 invocation->replacement_owner) != 1
-             : result != (PyObject *)invocation->actual_type))) {
-        soac_dataclass_fail(invocation, "dataclass root did not finish its exact application");
+    int status = _PySOAC_DataclassFinishRoot(object, stage, result);
+    _PySOAC_DataclassReleaseRoot(object);
+    if (status < 0) {
         Py_XDECREF(result);
         return NULL;
-    }
-    invocation->phase = stage == Py_SOAC_DATACLASS_ROOT_FACTORY
-        ? SOAC_DC_FACTORY_READY : SOAC_DC_APPLY_RETURNED;
-    if (stage == Py_SOAC_DATACLASS_ROOT_APPLY && invocation->pending_scope_active) {
-        invocation->pending_scope_active = 0;
-        _PySOAC_EndPendingTypeAdapter(invocation->pending_type_root, 0);
     }
     return result;
 }
@@ -833,6 +951,38 @@ soac_dataclass_original_code(SoacDataclassRecord *record, PyFunctionObject *func
      * pointer, acquire its last reference, or run a code-extra finalizer. */
     return record->code_weakref != NULL &&
         ((PyWeakReference *)record->code_weakref)->wr_object == function->func_code;
+}
+
+/* Callback-free observation of the existing exact native creation record.
+ * NONE/INVALID expose no metadata pointers and never alter an incoming error,
+ * renew an invocation, or manufacture a function/code primary. */
+void
+_PySOAC_DataclassCreationInfo(
+    PyObject *value, uint32_t *status, uint32_t *role, uint64_t *identity,
+    PyObject **native, PyObject **owner)
+{
+    *status = Py_SOAC_INTERPRETER_CREATION_NONE;
+    *role = 0; *identity = 0; *native = NULL; *owner = NULL;
+    if (value == NULL || !PyFunction_Check(value)) return;
+    PyFunctionObject *function = (PyFunctionObject *)value;
+    PyObject *metadata = function->func_soac_strict_owner;
+    if (metadata == NULL || !Py_IS_TYPE(metadata, &SoacDataclassRecord_Type)) return;
+    *status = Py_SOAC_INTERPRETER_CREATION_INVALID;
+    SoacDataclassRecord *record = (SoacDataclassRecord *)metadata;
+    SoacDataclassInvocation *invocation = record->invocation;
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    if (record->function != function || invocation == NULL ||
+        record->phase != SOAC_DC_RECORD_FRESH || record->identity == 0 ||
+        !soac_dataclass_original_code(record, function) ||
+        invocation->interpreter_id != PyInterpreterState_GetID(interp) ||
+        interp->soac.dataclass_closed ||
+        interp->soac.dataclass_callbacks.abi_version != Py_SOAC_DATACLASS_ABI ||
+        invocation->owner == NULL || invocation->phase >= SOAC_DC_COMPLETE) return;
+    *status = Py_SOAC_INTERPRETER_CREATION_LIVE;
+    *role = record->role;
+    *identity = record->identity;
+    *native = (PyObject *)invocation;
+    *owner = invocation->owner;
 }
 
 int

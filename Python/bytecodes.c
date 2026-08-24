@@ -1340,9 +1340,22 @@ dummy_func(
             _Py_LeaveRecursiveCallPy(tstate);
             // GH-99729: We need to unlink the frame *before* clearing it:
             _PyInterpreterFrame *dying = frame;
+            _PySoacInterpreterRootFinishV1 soac_finish;
+            _PySOAC_InterpreterTakeDataclassRoot(dying, &soac_finish);
             frame = tstate->current_frame = dying->previous;
             _PyEval_FrameClearAndPop(tstate, dying);
+            int soac_finished = 0;
+            if (soac_finish.invocation != NULL) {
+                soac_finished = _PySOAC_InterpreterFinishDataclassRoot(
+                    &soac_finish, PyStackRef_AsPyObjectBorrow(temp));
+            }
             RELOAD_STACK();
+            if (soac_finished < 0) {
+                PyObject *primary = PyErr_GetRaisedException();
+                PyStackRef_CLOSE(temp);
+                PyErr_SetRaisedException(primary);
+                ERROR_NO_POP();
+            }
             LOAD_IP(frame->return_offset);
             res = temp;
             LLTRACE_RESUME_FRAME();
@@ -3893,6 +3906,16 @@ dummy_func(
                 arguments--;
                 total_args++;
             }
+            _PySoacInterpreterCallV1 soac_call;
+            SAVE_STACK();
+            int soac_selected = _PySOAC_InterpreterSelectCall(
+                frame, this_instr, Py_SOAC_INTERPRETER_CALL_VECTOR,
+                oparg, &soac_call);
+            RELOAD_STACK();
+            if (soac_selected < 0) {
+                ERROR_NO_POP();
+            }
+
             if (Py_TYPE(callable_o) == &PyFunction_Type &&
                 (frame->soac_checked_activation == NULL ||
                  !_PySOAC_DataclassHasValueSite(frame)) &&
@@ -3910,6 +3933,7 @@ dummy_func(
                 DEAD(callable);
                 SYNC_SP();
                 res = _PySoacVMCall_FinishV1(&source_call, frame->stackpointer);
+                _PySOAC_InterpreterCallClear(&soac_call);
                 ERROR_IF(PyStackRef_IsNull(res));
             }
             else {
@@ -3924,8 +3948,8 @@ dummy_func(
                 {
                     int code_flags = ((PyCodeObject*)PyFunction_GET_CODE(callable_o))->co_flags;
                     PyObject *locals = code_flags & CO_OPTIMIZED ? NULL : Py_NewRef(PyFunction_GET_GLOBALS(callable_o));
-                    _PyInterpreterFrame *new_frame = _PyEvalFramePushAndInit(
-                        tstate, callable, locals,
+                    _PyInterpreterFrame *new_frame = _PySOAC_InterpreterPushCall(
+                        &soac_call, tstate, callable, locals,
                         arguments, total_args, NULL, frame
                     );
                     DEAD(args);
@@ -3936,6 +3960,12 @@ dummy_func(
                     // The frame has stolen all the arguments from the stack,
                     // so there is no need to clean them up.
                     if (new_frame == NULL) {
+                        _PySOAC_InterpreterCallFailed(&soac_call);
+                        ERROR_NO_POP();
+                    }
+                    if (_PySOAC_InterpreterCallCommit(&soac_call, new_frame) < 0) {
+                        _PyEval_FrameClearAndPop(tstate, new_frame);
+                        _PySOAC_InterpreterCallFailed(&soac_call);
                         ERROR_NO_POP();
                     }
                     frame->return_offset = INSTRUCTION_SIZE;
@@ -3949,10 +3979,12 @@ dummy_func(
                     opcode == INSTRUMENTED_CALL,
                     frame,
                     this_instr,
-                    tstate);
+                    tstate, &soac_call);
                 DEAD(args);
                 DEAD(self_or_null);
                 DEAD(callable);
+                SYNC_SP();
+                _PySOAC_InterpreterCallFinished(&soac_call, &res_o);
                 ERROR_IF(res_o == NULL);
                 res = PyStackRef_FromPyObjectSteal(res_o);
             }
@@ -4832,6 +4864,16 @@ dummy_func(
                 total_args++;
             }
             int positional_args = total_args - (int)PyTuple_GET_SIZE(kwnames_o);
+            _PySoacInterpreterCallV1 soac_call;
+            SAVE_STACK();
+            int soac_selected = _PySOAC_InterpreterSelectCall(
+                frame, this_instr, Py_SOAC_INTERPRETER_CALL_VECTOR_KW,
+                oparg, &soac_call);
+            RELOAD_STACK();
+            if (soac_selected < 0) {
+                ERROR_NO_POP();
+            }
+
             if (Py_TYPE(callable_o) == &PyFunction_Type &&
                 (frame->soac_checked_activation == NULL ||
                  !_PySOAC_DataclassHasValueSite(frame)) &&
@@ -4850,6 +4892,7 @@ dummy_func(
                 PyStackRef_CLOSE(kwnames);
                 SYNC_SP();
                 res = _PySoacVMCall_FinishV1(&source_call, frame->stackpointer);
+                _PySOAC_InterpreterCallClear(&soac_call);
                 ERROR_IF(PyStackRef_IsNull(res));
             }
             else {
@@ -4864,8 +4907,8 @@ dummy_func(
                 {
                     int code_flags = ((PyCodeObject*)PyFunction_GET_CODE(callable_o))->co_flags;
                     PyObject *locals = code_flags & CO_OPTIMIZED ? NULL : Py_NewRef(PyFunction_GET_GLOBALS(callable_o));
-                    _PyInterpreterFrame *new_frame = _PyEvalFramePushAndInit(
-                        tstate, callable, locals,
+                    _PyInterpreterFrame *new_frame = _PySOAC_InterpreterPushCall(
+                        &soac_call, tstate, callable, locals,
                         arguments, positional_args, kwnames_o, frame
                     );
                     DEAD(args);
@@ -4877,6 +4920,12 @@ dummy_func(
                     // The frame has stolen all the arguments from the stack,
                     // so there is no need to clean them up.
                     if (new_frame == NULL) {
+                        _PySOAC_InterpreterCallFailed(&soac_call);
+                        ERROR_NO_POP();
+                    }
+                    if (_PySOAC_InterpreterCallCommit(&soac_call, new_frame) < 0) {
+                        _PyEval_FrameClearAndPop(tstate, new_frame);
+                        _PySOAC_InterpreterCallFailed(&soac_call);
                         ERROR_NO_POP();
                     }
                     assert(INSTRUCTION_SIZE == 1 + INLINE_CACHE_ENTRIES_CALL_KW);
@@ -4891,11 +4940,13 @@ dummy_func(
                     opcode == INSTRUMENTED_CALL_KW,
                     frame,
                     this_instr,
-                    tstate);
+                    tstate, &soac_call);
                 DEAD(kwnames);
                 DEAD(args);
                 DEAD(self_or_null);
                 DEAD(callable);
+                SYNC_SP();
+                _PySOAC_InterpreterCallFinished(&soac_call, &res_o);
                 ERROR_IF(res_o == NULL);
                 res = PyStackRef_FromPyObjectSteal(res_o);
             }
@@ -5076,6 +5127,17 @@ dummy_func(
 
             EVAL_CALL_STAT_INC_IF_FUNCTION(EVAL_CALL_FUNCTION_EX, func);
             assert(!_PyErr_Occurred(tstate));
+            _PySoacInterpreterCallV1 soac_call = {0};
+            if (opcode != INSTRUMENTED_CALL_FUNCTION_EX) {
+                SAVE_STACK();
+                int soac_selected = _PySOAC_InterpreterSelectCall(
+                    frame, this_instr, Py_SOAC_INTERPRETER_CALL_EXPANDED,
+                    oparg, &soac_call);
+                RELOAD_STACK();
+                if (soac_selected < 0) {
+                    ERROR_NO_POP();
+                }
+            }
             if (opcode != INSTRUMENTED_CALL_FUNCTION_EX &&
                 Py_TYPE(func) == &PyFunction_Type &&
                 (frame->soac_checked_activation == NULL ||
@@ -5084,6 +5146,7 @@ dummy_func(
                 _PySoacVMCall_IsRegisteredV1(func)) {
                 int consistent = _PySoacVMCall_RequireOptimizedExpandedV1(func);
                 if (consistent < 0) {
+                    _PySOAC_InterpreterCallClear(&soac_call);
                     ERROR_NO_POP();
                 }
                 /* Check above is before either container's native owned
@@ -5101,6 +5164,7 @@ dummy_func(
                 INPUTS_DEAD();
                 SYNC_SP();
                 result = _PySoacVMCall_FinishV1(&source_call, frame->stackpointer);
+                _PySOAC_InterpreterCallClear(&soac_call);
                 ERROR_IF(PyStackRef_IsNull(result));
             }
             else {
@@ -5120,8 +5184,16 @@ dummy_func(
                     if (err) {
                         ERROR_NO_POP();
                     }
+                    SAVE_STACK();
+                    int soac_selected = _PySOAC_InterpreterSelectCall(
+                        frame, this_instr, Py_SOAC_INTERPRETER_CALL_EXPANDED,
+                        oparg, &soac_call);
+                    RELOAD_STACK();
+                    if (soac_selected < 0) {
+                        ERROR_NO_POP();
+                    }
                     result_o = _PySOAC_InterpreterObjectCallFromFrame(
-                        frame, this_instr, func, callargs, kwargs);
+                        frame, this_instr, func, callargs, kwargs, &soac_call);
 
                     if (!PyFunction_Check(func) && !PyMethod_Check(func)) {
                         if (result_o == NULL) {
@@ -5152,13 +5224,19 @@ dummy_func(
                         int code_flags = ((PyCodeObject *)PyFunction_GET_CODE(func))->co_flags;
                         PyObject *locals = code_flags & CO_OPTIMIZED ? NULL : Py_NewRef(PyFunction_GET_GLOBALS(func));
 
-                        _PyInterpreterFrame *new_frame = _PyEvalFramePushAndInit_Ex(
-                            tstate, func_st, locals,
+                        _PyInterpreterFrame *new_frame = _PySOAC_InterpreterPushCallEx(
+                            &soac_call, tstate, func_st, locals,
                             nargs, callargs, kwargs, frame);
                         // Need to sync the stack since we exit with DISPATCH_INLINED.
                         INPUTS_DEAD();
                         SYNC_SP();
                         if (new_frame == NULL) {
+                            _PySOAC_InterpreterCallFailed(&soac_call);
+                            ERROR_NO_POP();
+                        }
+                        if (_PySOAC_InterpreterCallCommit(&soac_call, new_frame) < 0) {
+                            _PyEval_FrameClearAndPop(tstate, new_frame);
+                            _PySOAC_InterpreterCallFailed(&soac_call);
                             ERROR_NO_POP();
                         }
                         assert(INSTRUCTION_SIZE == 1 + INLINE_CACHE_ENTRIES_CALL_FUNCTION_EX);
@@ -5170,12 +5248,15 @@ dummy_func(
                     PyObject *kwargs = PyStackRef_AsPyObjectBorrow(kwargs_st);
                     assert(kwargs == NULL || PyDict_CheckExact(kwargs));
                     result_o = _PySOAC_InterpreterObjectCallFromFrame(
-                        frame, this_instr, func, callargs, kwargs);
+                        frame, this_instr, func, callargs, kwargs, &soac_call);
                 }
                 PyStackRef_XCLOSE(kwargs_st);
                 PyStackRef_CLOSE(callargs_st);
                 DEAD(null);
                 PyStackRef_CLOSE(func_st);
+                INPUTS_DEAD();
+                SYNC_SP();
+                _PySOAC_InterpreterCallFinished(&soac_call, &result_o);
                 ERROR_IF(result_o == NULL);
                 result = PyStackRef_FromPyObjectSteal(result_o);
             }
@@ -6116,8 +6197,11 @@ dummy_func(
             assert(frame->owner != FRAME_OWNED_BY_INTERPRETER);
             // GH-99729: We need to unlink the frame *before* clearing it:
             _PyInterpreterFrame *dying = frame;
+            _PySoacInterpreterRootFinishV1 soac_finish;
+            _PySOAC_InterpreterTakeDataclassRoot(dying, &soac_finish);
             frame = tstate->current_frame = dying->previous;
             _PyEval_FrameClearAndPop(tstate, dying);
+            _PySOAC_InterpreterFinishDataclassRoot(&soac_finish, NULL);
             frame->return_offset = 0;
             if (frame->owner == FRAME_OWNED_BY_INTERPRETER) {
                 /* Restore previous frame and exit */

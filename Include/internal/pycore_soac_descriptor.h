@@ -21,4 +21,10 @@ extern PyObject *_PySoac_NewProperty(PyObject *, PyObject *);
 #ifdef __cplusplus
 }
 #endif
+/* Exact original builtin constructor dispatch, callback-free observations.
+ * These are not descriptor/source authority and expose no operand capability. */
+extern int _PySOAC_TypeCallIsOriginal(void);
+extern int _PySOAC_DescriptorFactoryIsOriginal(PyObject *factory);
+extern int _PySOAC_PropertyFactoryIsOriginal(void);
+
 #endif /* Py_INTERNAL_SOAC_DESCRIPTOR_H */

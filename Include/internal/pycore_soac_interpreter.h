@@ -5,7 +5,19 @@
 #endif
 
 #include "pycore_typedefs.h"
+#include "pycore_stackref.h"
 #include "cpython/soac_interpreter.h"
+
+/* No operand/value owner and no public stack capability. The exact incoming
+ * observation is copied only into an existing synchronous checked activation. */
+typedef struct {
+    _PyInterpreterFrame *caller;
+    Py_ssize_t instruction_units, instruction_ordinal, prefix_depth;
+    uint32_t form, channel, instruction_argument, committed;
+    Py_ssize_t positional_count, keyword_count;
+} _PySoacInterpreterConsumedCallV1;
+
+typedef struct _PySoacInterpreterCallV1 _PySoacInterpreterCallV1;
 
 /* Private implementation join, never public authority.
  *
@@ -29,6 +41,7 @@ typedef struct {
     uint32_t return_attempted;
     uint32_t failure_attempted;
     PyObject **namespace_state_out;   /* Borrowed actual __build_class__ C slot. */
+    _PySoacInterpreterConsumedCallV1 incoming_call;
 } _PySoacInterpreterActivationV1;
 
 struct _PySoacInterpreterFrameViewV1 {
@@ -52,7 +65,83 @@ typedef struct {
     PyObject *subject_owner;          /* Borrowed, caller/frame supports it. */
     const PySoacInterpreterFrameViewV1 *parent;
     PyObject **namespace_state_out;   /* NULL except namespace; *out starts NULL. */
+    const _PySoacInterpreterConsumedCallV1 *incoming_call; /* Before transfer only. */
 } _PySoacInterpreterEntryV1;
+
+/* Callback-local, borrowed view. SELECT uses the published ordinary stack.
+ * PREPARE_TYPE gets a new view backed by that exact C dispatch's live argv or
+ * tuple/dict, plus the bounded selected decorator prefix. Never persist self. */
+struct _PySoacInterpreterCallViewV1 {
+    const struct _PySoacInterpreterCallViewV1 *self;
+    PyThreadState *thread;
+    const PySoacInterpreterCallInfoV1 *info;
+    _PyInterpreterFrame *input_frame;
+    _PyStackRef *stack_inputs;
+    PyObject *callable;
+    PyObject *const *argv;
+    PyObject *names;
+    PyObject *expanded_args, *expanded_kwargs;
+    _PyInterpreterFrame *decorator_frame;
+    Py_ssize_t decorator_prefix;
+    uint32_t backing; /* 0:published stack, 1:ordinary C argv */
+};
+
+struct _PySoacInterpreterCallV1 {
+    _PyInterpreterFrame *caller;
+    const _Py_CODEUNIT *instruction;
+    PySoacInterpreterFrameViewV1 current_frame, direct_frame;
+    PySoacInterpreterCallSiteV1 direct_site;
+    PySoacInterpreterCallInfoV1 info;
+    PySoacInterpreterCallViewV1 view;
+    PySoacInterpreterCallDecisionV1 decision;
+    _PySoacInterpreterConsumedCallV1 incoming;
+    Py_ssize_t prefix_depth, input_depth;
+    uint32_t selected, began, root_detached;
+};
+
+/* Only stack-local metadata continuations. The ordinary native result token or
+ * primary exception remains in the evaluator, not in this struct. */
+typedef struct {
+    PyObject *invocation;  /* MOVE of the exact root frame's existing edge. */
+    _PyInterpreterFrame *caller;
+    const _Py_CODEUNIT *instruction;
+    _PySoacInterpreterCallV1 *deferred; /* Exact C dispatch, never a frame walk. */
+    uint32_t stage;
+} _PySoacInterpreterRootFinishV1;
+
+PyAPI_FUNC(int) _PySOAC_InterpreterSelectCall(
+    _PyInterpreterFrame *, const _Py_CODEUNIT *, uint32_t, uint32_t,
+    _PySoacInterpreterCallV1 *);
+PyAPI_FUNC(int) _PySOAC_InterpreterCallCommit(
+    _PySoacInterpreterCallV1 *, _PyInterpreterFrame *);
+PyAPI_FUNC(void) _PySOAC_InterpreterCallClear(_PySoacInterpreterCallV1 *);
+extern void _PySOAC_InterpreterCallBindingFailed(_PySoacInterpreterCallV1 *);
+PyAPI_FUNC(int) _PySOAC_InterpreterCallFailed(_PySoacInterpreterCallV1 *);
+PyAPI_FUNC(int) _PySOAC_InterpreterCallFinished(
+    _PySoacInterpreterCallV1 *, PyObject **);
+PyAPI_FUNC(void) _PySOAC_InterpreterTakeDataclassRoot(
+    _PyInterpreterFrame *, _PySoacInterpreterRootFinishV1 *);
+PyAPI_FUNC(int) _PySOAC_InterpreterFinishDataclassRoot(
+    _PySoacInterpreterRootFinishV1 *, PyObject *);
+PyAPI_FUNC(_PyInterpreterFrame *) _PySOAC_InterpreterPushCall(
+    _PySoacInterpreterCallV1 *, PyThreadState *, _PyStackRef, PyObject *,
+    _PyStackRef const *, size_t, PyObject *, _PyInterpreterFrame *);
+PyAPI_FUNC(_PyInterpreterFrame *) _PySOAC_InterpreterPushCallEx(
+    _PySoacInterpreterCallV1 *, PyThreadState *, _PyStackRef, PyObject *,
+    Py_ssize_t, PyObject *, PyObject *, _PyInterpreterFrame *);
+extern PyObject *_PySOAC_InterpreterCallVector(
+    _PySoacInterpreterCallV1 *, _PyInterpreterFrame *, const _Py_CODEUNIT *,
+    PyObject *, PyObject *const *, size_t, PyObject *);
+extern PyObject *_PySOAC_InterpreterCallEvalVector(
+    _PySoacInterpreterCallV1 *, PyThreadState *, PyFunctionObject *,
+    PyObject *const *, size_t, PyObject *);
+extern int _PySOAC_InterpreterCallPrepareType(
+    _PySoacInterpreterCallV1 *, PyObject *, PyObject *, PyObject *,
+    PyObject *, PyObject *, PyObject *, PyObject *, PyObject **);
+extern int _PySOAC_InterpreterCallHasClass(_PySoacInterpreterCallV1 *);
+extern int _PySOAC_TypeCallIsOriginal(void);
+extern int _PySOAC_DescriptorFactoryIsOriginal(PyObject *);
+extern int _PySOAC_PropertyFactoryIsOriginal(void);
 
 /* Core-only joins except the explicitly PyAPI_FUNC helpers consumed by the
  * generated _testinternalcapi interpreter. These add no public capability.
@@ -73,7 +162,8 @@ extern PyObject *_PySOAC_InterpreterEvalVector(
     const _PySoacInterpreterEntryV1 *entry);
 PyAPI_FUNC(PyObject *) _PySOAC_InterpreterObjectCallFromFrame(
     _PyInterpreterFrame *parent, const _Py_CODEUNIT *this_instr,
-    PyObject *callable, PyObject *args, PyObject *kwargs);
+    PyObject *callable, PyObject *args, PyObject *kwargs,
+    _PySoacInterpreterCallV1 *call);
 
 extern int _PySOAC_InterpreterBirth(
     _PyInterpreterFrame *actual_parent, const _Py_CODEUNIT *this_instr,
@@ -105,7 +195,8 @@ extern void _PySOAC_CheckedFrameClear(
 extern PyObject *_PySOAC_InterpreterBuildClassFromFrame(
     _PyInterpreterFrame *actual_parent, const _Py_CODEUNIT *this_instr,
     PyObject *builtin,
-    PyObject *const *args, size_t nargsf, PyObject *kwnames);
+    PyObject *const *args, size_t nargsf, PyObject *kwnames,
+    _PySoacInterpreterCallV1 *call);
 PyAPI_FUNC(int) _PySOAC_InterpreterDefinitionStore(
     _PyInterpreterFrame *frame, const _Py_CODEUNIT *this_instr,
     uint32_t actual_lane, PyObject *borrowed_value);

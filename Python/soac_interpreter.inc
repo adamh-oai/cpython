@@ -66,6 +66,7 @@ PySoac_SetInterpreterCallbacksV1(
         callbacks->root_end == NULL || callbacks->birth == NULL ||
         callbacks->function_attribute == NULL || callbacks->enter == NULL ||
         callbacks->bound == NULL || callbacks->started == NULL ||
+        callbacks->call == NULL || callbacks->selected_call_finished == NULL ||
         callbacks->returned == NULL || callbacks->failed == NULL ||
         callbacks->leave == NULL ||
         callbacks->prepare_type == NULL || callbacks->definition_store == NULL) {
@@ -86,6 +87,8 @@ PySoac_SetInterpreterCallbacksV1(
             installed->enter == callbacks->enter &&
             installed->bound == callbacks->bound &&
             installed->started == callbacks->started &&
+            installed->call == callbacks->call &&
+            installed->selected_call_finished == callbacks->selected_call_finished &&
             installed->returned == callbacks->returned &&
             installed->failed == callbacks->failed &&
             installed->leave == callbacks->leave &&
@@ -258,6 +261,7 @@ soac_interpreter_retire(_PySoacInterpreterActivationV1 *activation, uint32_t rea
     activation->function = NULL;
     activation->code = NULL;
     activation->namespace_state_out = NULL;
+    memset(&activation->incoming_call, 0, sizeof(activation->incoming_call));
     activation->source_authority = 0;
     activation->phase = Py_SOAC_INTERPRETER_RETIRED;
     if (state != NULL) {
@@ -401,6 +405,9 @@ _PySOAC_InterpreterInitFrame(
     activation->return_attempted = 0;
     activation->failure_attempted = 0;
     activation->namespace_state_out = entry->namespace_state_out;
+    activation->incoming_call = entry->incoming_call == NULL
+        ? (_PySoacInterpreterConsumedCallV1){0} : *entry->incoming_call;
+    activation->incoming_call.committed = 0;
     frame->soac_checked_activation = (PyObject *)activation;  /* MOVE sole edge. */
     PyObject_GC_Track(activation);
     PySoacInterpreterFrameViewV1 view;
@@ -818,6 +825,7 @@ _PySOAC_CheckedFrameReturnCommit(_PyInterpreterFrame *frame)
         activation->phase = Py_SOAC_INTERPRETER_RETIRED;
         activation->state = NULL;
         activation->namespace_state_out = NULL;
+        memset(&activation->incoming_call, 0, sizeof(activation->incoming_call));
         activation->source_authority = 0;
         activation->thread = NULL;
         activation->function = NULL;
@@ -888,4 +896,524 @@ PySoac_EvalInterpreterModuleV1(PyObject *module, PyObject *root_code,
     }
     callbacks->root_end(module_owner, result != NULL);
     return result;
+}
+
+
+/* ---- Exact native CALL operand/completion join. ---- */
+static PyObject *
+soac_call_stack_value(_PyStackRef value)
+{
+    if (PyStackRef_IsTaggedInt(value)) {
+        soac_interpreter_error("call operand is not a Python value");
+        return NULL;
+    }
+    return PyStackRef_AsPyObjectBorrow(value);
+}
+
+int
+PySoac_InterpreterCallOperandV1(
+    const PySoacInterpreterCallViewV1 *view, uint32_t kind, Py_ssize_t index,
+    PySoacInterpreterCallOperandV1 *out, size_t out_size)
+{
+    if (view == NULL || view->self != view || out == NULL ||
+        out_size != sizeof(*out) || view->thread != _PyThreadState_GET() ||
+        view->info == NULL || view->info->abi_version != Py_SOAC_INTERPRETER_CALL_ABI_V1 ||
+        (view->info->phase != Py_SOAC_INTERPRETER_CALL_SELECT &&
+         view->info->phase != Py_SOAC_INTERPRETER_CALL_PREPARE_TYPE) ||
+        soac_interpreter_check_view(view->info->current.frame) < 0 || index < 0)
+        return soac_interpreter_error("invalid or expired interpreter call view");
+    const PySoacInterpreterCallInfoV1 *info = view->info;
+    PyObject *value = NULL;
+    switch (kind) {
+        case Py_SOAC_INTERPRETER_OPERAND_CALLABLE:
+            if (index != 0) goto invalid;
+            value = view->backing == 0
+                ? soac_call_stack_value(view->stack_inputs[0]) : view->callable;
+            break;
+        case Py_SOAC_INTERPRETER_OPERAND_POSITIONAL:
+            if (index >= info->current.positional_count) goto invalid;
+            if (info->current.form == Py_SOAC_INTERPRETER_CALL_EXPANDED) {
+                value = PyTuple_GET_ITEM(view->expanded_args, index);
+            }
+            else if (view->backing == 0) {
+                value = soac_call_stack_value(view->stack_inputs[
+                    2 - info->current.channel + index]);
+            }
+            else value = view->argv[index];
+            break;
+        case Py_SOAC_INTERPRETER_OPERAND_KEYWORD_VALUE:
+            if (info->current.form != Py_SOAC_INTERPRETER_CALL_VECTOR_KW ||
+                index >= info->current.keyword_count) goto invalid;
+            index += info->current.positional_count;
+            value = view->backing == 0
+                ? soac_call_stack_value(view->stack_inputs[2 - info->current.channel + index])
+                : view->argv[index];
+            break;
+        case Py_SOAC_INTERPRETER_OPERAND_KEYWORD_NAMES:
+            if (index != 0 || info->current.form != Py_SOAC_INTERPRETER_CALL_VECTOR_KW)
+                goto invalid;
+            value = view->names;
+            break;
+        case Py_SOAC_INTERPRETER_OPERAND_EXPANDED_ARGS:
+            if (index != 0 || info->current.form != Py_SOAC_INTERPRETER_CALL_EXPANDED)
+                goto invalid;
+            value = view->expanded_args;
+            break;
+        case Py_SOAC_INTERPRETER_OPERAND_EXPANDED_KWARGS:
+            if (index != 0 || info->current.form != Py_SOAC_INTERPRETER_CALL_EXPANDED)
+                goto invalid;
+            value = view->expanded_kwargs; /* NULL is native absence, not None. */
+            break;
+        case Py_SOAC_INTERPRETER_OPERAND_DECORATOR:
+            if (info->phase != Py_SOAC_INTERPRETER_CALL_PREPARE_TYPE ||
+                view->decorator_frame == NULL || index >= info->decorator_count ||
+                view->decorator_prefix < info->decorator_count) goto invalid;
+            value = soac_call_stack_value(_PyFrame_Stackbase(view->decorator_frame)[
+                view->decorator_prefix - info->decorator_count + index]);
+            break;
+        default: goto invalid;
+    }
+    if (value == NULL && kind != Py_SOAC_INTERPRETER_OPERAND_EXPANDED_KWARGS)
+        return soac_interpreter_error("required native call operand is absent or unboxed");
+    *out = (PySoacInterpreterCallOperandV1) {
+        .abi_version = Py_SOAC_INTERPRETER_CALL_ABI_V1, .value = value,
+    };
+    _PySOAC_DataclassCreationInfo(value, &out->creation_status, &out->creation_role,
+        &out->creation_identity, &out->dataclass_invocation, &out->dataclass_owner);
+    return 0;
+invalid:
+    return soac_interpreter_error("interpreter call operand kind/index is unavailable");
+}
+
+static void
+soac_call_unpublish(_PySoacInterpreterCallV1 *call)
+{
+    call->view.self = NULL;
+    call->current_frame.self = NULL;
+    call->direct_frame.self = NULL;
+}
+
+/* Publish only the ONE pre-observed consumed edge. No ancestors, inferred
+ * stack subtraction, resumed frame, or still-unconsumed C caller is accepted. */
+static int
+soac_call_direct(_PySoacInterpreterCallV1 *call)
+{
+    call->info.direct_caller = NULL;
+    PyObject *object = call->caller->soac_checked_activation;
+    if (!_PySOAC_InterpreterIsActivation(object)) return 0;
+    _PySoacInterpreterActivationV1 *activation = (_PySoacInterpreterActivationV1 *)object;
+    const _PySoacInterpreterConsumedCallV1 *edge = &activation->incoming_call;
+    if (!edge->committed) return 0;
+    _PyInterpreterFrame *parent = edge->caller;
+    if (parent == NULL || call->caller->previous != parent ||
+        _PyFrame_GetCode(call->caller)->co_flags &
+            (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR) ||
+        edge->prefix_depth < 0 ||
+        parent->stackpointer != _PyFrame_Stackbase(parent) + edge->prefix_depth)
+        return soac_interpreter_error("generic call lost its exact consumed incoming edge");
+    int selected = _PySOAC_InterpreterParentView(parent,
+        _PyFrame_GetBytecode(parent) + edge->instruction_units, &call->direct_frame);
+    if (selected != 1) return soac_interpreter_error("generic caller is no longer authenticated");
+    if (call->direct_frame.instruction_ordinal != edge->instruction_ordinal)
+        return soac_interpreter_error("generic caller changed its native site");
+    call->direct_site = (PySoacInterpreterCallSiteV1) {
+        .form = edge->form, .channel = edge->channel,
+        .instruction_argument = edge->instruction_argument,
+        .positional_count = edge->positional_count, .keyword_count = edge->keyword_count,
+        .frame = &call->direct_frame,
+    };
+    call->info.direct_caller = &call->direct_site;
+    return 0;
+}
+
+static int
+soac_call_decision(_PySoacInterpreterCallV1 *call)
+{
+    PySoacInterpreterCallDecisionV1 *out = &call->decision;
+    if (out->abi_version != Py_SOAC_INTERPRETER_CALL_ABI_V1 ||
+        out->kind > Py_SOAC_INTERPRETER_CALL_GENERIC_SCOPE)
+        return soac_interpreter_error("invalid interpreter call decision ABI/kind");
+    if (out->kind == Py_SOAC_INTERPRETER_CALL_DATACLASS_ROOT) {
+        if (out->metadata == NULL || out->expected_function_owner != NULL ||
+            out->verified_code != NULL || out->decorator_count != 0 ||
+            out->decorator_source != 0 ||
+            (out->dataclass_stage != Py_SOAC_DATACLASS_ROOT_FACTORY &&
+             out->dataclass_stage != Py_SOAC_DATACLASS_ROOT_APPLY))
+            goto invalid;
+    }
+    else if (out->kind == Py_SOAC_INTERPRETER_CALL_BUILTIN_DESCRIPTOR) {
+        if (out->metadata == NULL || out->expected_function_owner == NULL ||
+            out->verified_code == NULL || out->dataclass_stage != 0 ||
+            out->decorator_count != 0 || out->decorator_source != 0 ||
+            call->info.current.positional_count != 1 || call->info.current.keyword_count != 0)
+            goto invalid;
+    }
+    else {
+        if (out->metadata != NULL || out->expected_function_owner != NULL ||
+            out->verified_code != NULL || out->dataclass_stage != 0) goto invalid;
+        if (out->kind == Py_SOAC_INTERPRETER_CALL_CLASS) {
+            if (out->decorator_count < 0 ||
+                (out->decorator_source != Py_SOAC_INTERPRETER_DECORATORS_CURRENT &&
+                 out->decorator_source != Py_SOAC_INTERPRETER_DECORATORS_DIRECT_CALLER))
+                goto invalid;
+            if (out->decorator_source == Py_SOAC_INTERPRETER_DECORATORS_CURRENT) {
+                if (out->decorator_count > call->prefix_depth) goto invalid;
+            }
+            else {
+                if (call->info.direct_caller == NULL) goto invalid;
+                _PySoacInterpreterActivationV1 *activation =
+                    (_PySoacInterpreterActivationV1 *)call->caller->soac_checked_activation;
+                if (out->decorator_count > activation->incoming_call.prefix_depth) goto invalid;
+            }
+        }
+        else if (out->decorator_count != 0 || out->decorator_source != 0) goto invalid;
+    }
+    return 0;
+invalid:
+    return soac_interpreter_error("interpreter call decision has mismatched kind-specific fields");
+}
+
+int
+_PySOAC_InterpreterSelectCall(
+    _PyInterpreterFrame *frame, const _Py_CODEUNIT *instruction,
+    uint32_t form, uint32_t oparg, _PySoacInterpreterCallV1 *call)
+{
+    memset(call, 0, sizeof(*call));
+    int selected = _PySOAC_InterpreterParentView(frame, instruction, &call->current_frame);
+    if (selected <= 0) return selected;
+    call->caller = frame;
+    call->instruction = instruction;
+    call->selected = 1;
+    _PyStackRef *base = _PyFrame_Stackbase(frame);
+    _PyStackRef *top = frame->stackpointer;
+    Py_ssize_t size = form == Py_SOAC_INTERPRETER_CALL_EXPANDED ? 4 :
+        (Py_ssize_t)oparg + (form == Py_SOAC_INTERPRETER_CALL_VECTOR_KW ? 3 : 2);
+    if (form < Py_SOAC_INTERPRETER_CALL_VECTOR ||
+        form > Py_SOAC_INTERPRETER_CALL_EXPANDED || top == NULL ||
+        top < base || top > base + _PyFrame_GetCode(frame)->co_stacksize ||
+        size > top - base || (form == Py_SOAC_INTERPRETER_CALL_EXPANDED && oparg != 0)) {
+        soac_call_unpublish(call);
+        return soac_interpreter_error("interpreter CALL operand stack is not published");
+    }
+    call->prefix_depth = top - base - size;
+    call->input_depth = top - base;
+    call->view = (PySoacInterpreterCallViewV1) {
+        .self = &call->view, .thread = _PyThreadState_GET(), .info = &call->info,
+        .input_frame = frame, .stack_inputs = top - size,
+    };
+    uint32_t channel = !PyStackRef_IsNull(call->view.stack_inputs[1]);
+    Py_ssize_t positional = (Py_ssize_t)oparg + channel, keywords = 0;
+    if (form == Py_SOAC_INTERPRETER_CALL_VECTOR_KW) {
+        call->view.names = soac_call_stack_value(top[-1]);
+        if (call->view.names == NULL || !PyTuple_CheckExact(call->view.names)) goto invalid;
+        keywords = PyTuple_GET_SIZE(call->view.names);
+        if (keywords > positional) goto invalid;
+        positional -= keywords;
+    }
+    if (form == Py_SOAC_INTERPRETER_CALL_EXPANDED) {
+        if (channel != 0) goto invalid;
+        call->view.expanded_args = soac_call_stack_value(top[-2]);
+        call->view.expanded_kwargs = soac_call_stack_value(top[-1]);
+        if (call->view.expanded_args == NULL ||
+            !PyTuple_CheckExact(call->view.expanded_args) ||
+            (call->view.expanded_kwargs != NULL && !PyDict_CheckExact(call->view.expanded_kwargs)))
+            goto invalid;
+        positional = PyTuple_GET_SIZE(call->view.expanded_args);
+        keywords = call->view.expanded_kwargs == NULL ? 0 : PyDict_GET_SIZE(call->view.expanded_kwargs);
+    }
+    call->info = (PySoacInterpreterCallInfoV1) {
+        .abi_version = Py_SOAC_INTERPRETER_CALL_ABI_V1,
+        .phase = Py_SOAC_INTERPRETER_CALL_SELECT,
+        .current = {
+            .form = form, .channel = channel, .instruction_argument = oparg,
+            .positional_count = positional, .keyword_count = keywords,
+            .frame = &call->current_frame,
+        },
+    };
+    if (soac_call_direct(call) < 0) goto error;
+    call->decision.abi_version = Py_SOAC_INTERPRETER_CALL_ABI_V1;
+    int status = soac_interpreter_callbacks()->call(
+        call->current_frame.call_state, &call->info, &call->view,
+        &call->decision, sizeof(call->decision));
+    if (soac_interpreter_status(status, "interpreter call selection failed") < 0 ||
+        soac_call_decision(call) < 0) goto error;
+    if (call->decision.kind == Py_SOAC_INTERPRETER_CALL_DATACLASS_ROOT) {
+        PyObject *callable = soac_call_stack_value(call->view.stack_inputs[0]);
+        if (_PySOAC_DataclassBeginRoot(call->decision.metadata,
+                call->decision.dataclass_stage, callable) < 0) goto error;
+        call->began = 1;
+    }
+    call->incoming = (_PySoacInterpreterConsumedCallV1) {
+        .caller = frame, .instruction_units = call->current_frame.instruction_units,
+        .instruction_ordinal = call->current_frame.instruction_ordinal,
+        .prefix_depth = call->prefix_depth, .form = form, .channel = channel,
+        .instruction_argument = oparg, .positional_count = positional,
+        .keyword_count = keywords,
+    };
+    soac_call_unpublish(call); /* BEFORE the first native input transfer. */
+    return 0;
+invalid:
+    soac_interpreter_error("native CALL input representation is inconsistent");
+error:
+    _PySOAC_InterpreterCallClear(call);
+    return -1;
+}
+
+void
+_PySOAC_InterpreterCallClear(_PySoacInterpreterCallV1 *call)
+{
+    soac_call_unpublish(call);
+    PyObject *metadata = call->decision.metadata;
+    call->decision.metadata = NULL;
+    call->decision.expected_function_owner = NULL;
+    call->decision.verified_code = NULL;
+    call->decision.kind = Py_SOAC_INTERPRETER_CALL_ORDINARY;
+    call->selected = 0;
+    soac_interpreter_xdecref_preserving_error(metadata);
+}
+
+/* Caller is the exact waiting native frame captured by this operation. */
+static int
+soac_selected_finished(
+    _PyInterpreterFrame *caller, const _Py_CODEUNIT *instruction,
+    uint32_t kind, PyObject *metadata, PyObject *dataclass_owner,
+    uint32_t stage, PyObject *result)
+{
+    PyObject *primary = PyErr_GetRaisedException();
+    int status = -1;
+    PySoacInterpreterFrameViewV1 view = {0};
+    const PySoacInterpreterCallbacksV1 *callbacks = soac_interpreter_callbacks();
+    if (callbacks != NULL && caller == _PyThreadState_GET()->current_frame &&
+        ((kind == Py_SOAC_INTERPRETER_CALL_BUILTIN_DESCRIPTOR &&
+          metadata != NULL && dataclass_owner == NULL && stage == 0) ||
+         (kind == Py_SOAC_INTERPRETER_CALL_DATACLASS_ROOT &&
+          metadata != NULL && dataclass_owner != NULL &&
+           _PySOAC_DataclassRootOwner(metadata) == dataclass_owner &&
+          (stage == Py_SOAC_DATACLASS_ROOT_FACTORY || stage == Py_SOAC_DATACLASS_ROOT_APPLY))) &&
+        _PySOAC_InterpreterParentView(caller, instruction, &view) == 1) {
+        status = callbacks->selected_call_finished(
+            view.call_state, &view, kind, metadata, dataclass_owner, stage, result);
+        view.self = NULL;
+    }
+    if (soac_interpreter_status(status, "selected native call completion failed") < 0) {
+        if (primary != NULL) PyErr_WriteUnraisable(metadata);
+        status = -1;
+    }
+    if (primary != NULL) PyErr_SetRaisedException(primary);
+    return status;
+}
+
+static int
+soac_finish_dataclass(
+    _PyInterpreterFrame *caller, const _Py_CODEUNIT *instruction,
+    PyObject *invocation, uint32_t stage, PyObject *result)
+{
+    int native_status = _PySOAC_DataclassFinishRoot(invocation, stage, result);
+    PyObject *owner = _PySOAC_DataclassRootOwner(invocation);
+    int status = soac_selected_finished(caller, instruction,
+        Py_SOAC_INTERPRETER_CALL_DATACLASS_ROOT, invocation, owner, stage,
+        native_status == 0 ? result : NULL);
+    _PySOAC_DataclassReleaseRoot(invocation);
+    return native_status == 0 ? status : -1;
+}
+
+void
+_PySOAC_InterpreterCallBindingFailed(_PySoacInterpreterCallV1 *call)
+{
+    if (call == NULL || !call->began || call->decision.metadata == NULL)
+        return;
+    /* Only the existing invocation's execution/admission state is retired here.
+     * The post-clear callback still receives its same metadata owner later. */
+    PyObject *primary = PyErr_GetRaisedException();
+    if (PySoac_FailDataclassInvocation(call->decision.metadata) < 0)
+        PyErr_WriteUnraisable(call->decision.metadata);
+    PyErr_SetRaisedException(primary);
+}
+
+int
+_PySOAC_InterpreterCallFailed(_PySoacInterpreterCallV1 *call)
+{
+    if (call->began && call->decision.metadata != NULL) {
+        (void)soac_finish_dataclass(call->caller, call->instruction,
+            call->decision.metadata, call->decision.dataclass_stage, NULL);
+    }
+    _PySOAC_InterpreterCallClear(call);
+    return -1;
+}
+
+int
+_PySOAC_InterpreterCallFinished(_PySoacInterpreterCallV1 *call, PyObject **result)
+{
+    int status = 0;
+    if (call->began && call->decision.metadata != NULL) {
+        status = soac_finish_dataclass(call->caller, call->instruction,
+            call->decision.metadata, call->decision.dataclass_stage, *result);
+    }
+    _PySOAC_InterpreterCallClear(call);
+    if (status < 0 && *result != NULL) {
+        PyObject *error = PyErr_GetRaisedException();
+        Py_CLEAR(*result); /* Actual C result owner, once. */
+        PyErr_SetRaisedException(error);
+    }
+    return status;
+}
+
+void
+_PySOAC_InterpreterTakeDataclassRoot(
+    _PyInterpreterFrame *frame, _PySoacInterpreterRootFinishV1 *finish)
+{
+    memset(finish, 0, sizeof(*finish));
+    _PySOAC_DataclassTakeRoot(frame, &finish->invocation, &finish->stage,
+        &finish->caller, &finish->instruction, &finish->deferred);
+    if (finish->invocation != NULL && PyErr_Occurred()) {
+        /* Mark failed before any callee value releases. The exact same
+         * metadata owner remains supported until the finish callback. */
+        (void)PySoac_FailDataclassInvocation(finish->invocation);
+    }
+}
+
+int
+_PySOAC_InterpreterFinishDataclassRoot(
+    _PySoacInterpreterRootFinishV1 *finish, PyObject *result)
+{
+    if (finish->invocation == NULL) return 0;
+    PyObject *invocation = finish->invocation;
+    finish->invocation = NULL;
+    if (finish->deferred != NULL) {
+        /* Same actual C dispatch will finish AFTER its ordinary caller
+         * containers/argv have retired; no extra frame or result primary. */
+        assert(finish->deferred->decision.metadata == NULL);
+        finish->deferred->decision.metadata = invocation;
+        finish->deferred->root_detached = 1;
+        finish->deferred = NULL;
+        return 0;
+    }
+    int status = soac_finish_dataclass(
+        finish->caller, finish->instruction, invocation, finish->stage, result);
+    finish->caller = NULL;
+    finish->instruction = NULL;
+    soac_interpreter_xdecref_preserving_error(invocation);
+    return status;
+}
+
+int
+_PySOAC_InterpreterCallCommit(_PySoacInterpreterCallV1 *call, _PyInterpreterFrame *child)
+{
+    if (!call->selected) return 0;
+    if (call->caller->stackpointer != _PyFrame_Stackbase(call->caller) + call->prefix_depth) {
+        soac_interpreter_error("native CALL did not commit its consumed input prefix");
+        goto fail;
+    }
+    if (call->decision.kind == Py_SOAC_INTERPRETER_CALL_GENERIC_SCOPE) {
+        if (!_PySOAC_InterpreterIsActivation(child->soac_checked_activation) ||
+            child->previous != call->caller ||
+            _PyFrame_GetCode(child)->co_flags &
+                (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR))
+            return soac_interpreter_error("generic helper did not enter its exact synchronous frame");
+        _PySoacInterpreterActivationV1 *activation =
+            (_PySoacInterpreterActivationV1 *)child->soac_checked_activation;
+        if (!activation->source_authority ||
+            activation->incoming_call.caller != call->caller ||
+            activation->incoming_call.prefix_depth != call->prefix_depth)
+            return soac_interpreter_error("generic helper lost its pre-binding incoming observation");
+        activation->incoming_call.committed = 1;
+    }
+    if (call->decision.kind == Py_SOAC_INTERPRETER_CALL_DATACLASS_ROOT) {
+        if (_PySOAC_DataclassAttachRoot(&call->decision.metadata,
+                call->decision.dataclass_stage, child, call->caller, call->instruction, NULL) < 0)
+            goto fail;
+    }
+    _PySOAC_InterpreterCallClear(call);
+    return 0;
+fail:
+    _PySOAC_InterpreterCallBindingFailed(call);
+    return -1;
+}
+
+int
+_PySOAC_InterpreterCallHasClass(_PySoacInterpreterCallV1 *call)
+{
+    return call != NULL && call->selected &&
+        call->decision.kind == Py_SOAC_INTERPRETER_CALL_CLASS;
+}
+
+int
+_PySOAC_InterpreterCallPrepareType(
+    _PySoacInterpreterCallV1 *call, PyObject *namespace_state,
+    PyObject *function, PyObject *metaclass, PyObject *name, PyObject *bases,
+    PyObject *namespace_dict, PyObject *keywords, PyObject **handle)
+{
+    if (!_PySOAC_InterpreterCallHasClass(call) ||
+        _PySOAC_InterpreterParentView(call->caller, call->instruction, &call->current_frame) != 1 ||
+        soac_call_direct(call) < 0)
+        return soac_interpreter_error("class preparation lost its selected native CALL");
+    call->info.phase = Py_SOAC_INTERPRETER_CALL_PREPARE_TYPE;
+    call->info.decorator_source = call->decision.decorator_source;
+    call->info.decorator_count = call->decision.decorator_count;
+    call->view.decorator_frame = call->caller;
+    call->view.decorator_prefix = call->prefix_depth;
+    if (call->decision.decorator_source == Py_SOAC_INTERPRETER_DECORATORS_DIRECT_CALLER) {
+        if (call->info.direct_caller == NULL) goto invalid;
+        _PySoacInterpreterActivationV1 *activation =
+            (_PySoacInterpreterActivationV1 *)call->caller->soac_checked_activation;
+        call->view.decorator_frame = activation->incoming_call.caller;
+        call->view.decorator_prefix = activation->incoming_call.prefix_depth;
+    }
+    if (call->view.decorator_prefix < call->info.decorator_count) goto invalid;
+    call->view.self = &call->view;
+    call->view.thread = _PyThreadState_GET();
+    int status = soac_interpreter_callbacks()->prepare_type(
+        namespace_state, &call->current_frame, &call->info, &call->view,
+        function, metaclass, name, bases, namespace_dict, keywords, handle);
+    soac_call_unpublish(call);
+    return soac_interpreter_status(status, "native class preparation failed");
+invalid:
+    soac_call_unpublish(call);
+    return soac_interpreter_error("class preparation lost its finite decorator window");
+}
+
+PyObject *
+_PySOAC_InterpreterCallVector(
+    _PySoacInterpreterCallV1 *call, _PyInterpreterFrame *parent,
+    const _Py_CODEUNIT *instruction, PyObject *callable, PyObject *const *args,
+    size_t nargsf, PyObject *names)
+{
+    if (call != NULL && call->selected) {
+        if (call->decision.kind == Py_SOAC_INTERPRETER_CALL_BUILTIN_DESCRIPTOR) {
+            if (!_PySOAC_DescriptorFactoryIsOriginal(callable))
+                return PyObject_Vectorcall(callable, args, nargsf, names);
+            PyObject *result = PySoac_NewBuiltinDescriptor(callable, args[0],
+                call->decision.expected_function_owner, call->decision.verified_code,
+                call->decision.metadata);
+            int status = soac_selected_finished(parent, instruction,
+                Py_SOAC_INTERPRETER_CALL_BUILTIN_DESCRIPTOR,
+                call->decision.metadata, NULL, 0, result);
+            _PySOAC_InterpreterCallClear(call);
+            if (status < 0 && result != NULL) {
+                PyObject *error = PyErr_GetRaisedException();
+                Py_DECREF(result);
+                PyErr_SetRaisedException(error);
+                result = NULL;
+            }
+            return result;
+        }
+        if (call->decision.kind == Py_SOAC_INTERPRETER_CALL_DATACLASS_ROOT) {
+            if (!call->began) {
+                if (_PySOAC_DataclassBeginRoot(call->decision.metadata,
+                        call->decision.dataclass_stage, callable) < 0) return NULL;
+                call->began = 1;
+            }
+            return _PySOAC_InterpreterCallEvalVector(call, _PyThreadState_GET(),
+                (PyFunctionObject *)callable, args, PyVectorcall_NARGS(nargsf), names);
+        }
+        /* A fresh PREPARE_TYPE view will borrow exactly this C operation's
+         * still-live argv, not a consumed caller stack alias. */
+        call->view.backing = 1;
+        call->view.callable = callable;
+        call->view.argv = args;
+        if (call->info.current.form != Py_SOAC_INTERPRETER_CALL_EXPANDED)
+            call->view.names = names;
+    }
+    return _PySOAC_InterpreterBuildClassFromFrame(
+        parent, instruction, callable, args, nargsf, names, call);
 }

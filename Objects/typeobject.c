@@ -20,6 +20,7 @@
 #include "pycore_pystate.h"       // _PyThreadState_GET()
 #include "pycore_setobject.h"    // _PySet_Update()
 #include "pycore_soac_type.h"    // permanent native type policies
+#include "pycore_soac_descriptor.h" // exact builtin constructor dispatch
 #include "pycore_soac_dataclass.h" // explicit generated-member operations
 #include "pycore_symtable.h"      // _Py_Mangle()
 #include "pycore_typeobject.h"    // struct type_cache
@@ -7364,6 +7365,17 @@ PyTypeObject PyType_Type = {
     type_is_gc,                                 /* tp_is_gc */
     .tp_vectorcall = type_vectorcall,
 };
+
+int
+_PySOAC_TypeCallIsOriginal(void)
+{
+    return Py_TYPE(&PyType_Type) == &PyType_Type &&
+        PyType_Type.tp_call == type_call &&
+        PyType_Type.tp_vectorcall == type_vectorcall &&
+        PyType_Type.tp_vectorcall_offset == offsetof(PyTypeObject, tp_vectorcall) &&
+        (PyType_Type.tp_flags & Py_TPFLAGS_HAVE_VECTORCALL) != 0;
+}
+
 
 
 /* The base type of all types (eventually)... except itself. */

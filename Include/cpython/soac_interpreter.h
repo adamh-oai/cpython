@@ -45,6 +45,99 @@ typedef struct {
     Py_ssize_t localsplus_count;
 } PySoacInterpreterFrameInfoV1;
 
+/* Native call-operand projection. The enclosing unpublished callback table
+ * remains a single exact-size table: no old-table or no-call fallback. */
+#define Py_SOAC_INTERPRETER_CALL_ABI_V1 1u
+#define Py_SOAC_INTERPRETER_CALL_SELECT 1u
+#define Py_SOAC_INTERPRETER_CALL_PREPARE_TYPE 2u
+
+#define Py_SOAC_INTERPRETER_CALL_VECTOR 1u
+#define Py_SOAC_INTERPRETER_CALL_VECTOR_KW 2u
+#define Py_SOAC_INTERPRETER_CALL_EXPANDED 3u
+/* Runtime observation only. VALUE does not guess MethodSelf versus the
+ * compiler's LeadingArgument; the authenticated receipt distinguishes them. */
+#define Py_SOAC_INTERPRETER_CALL_NULL_CHANNEL 0u
+#define Py_SOAC_INTERPRETER_CALL_VALUE_CHANNEL 1u
+
+#define Py_SOAC_INTERPRETER_DECORATORS_NONE 0u
+#define Py_SOAC_INTERPRETER_DECORATORS_CURRENT 1u
+#define Py_SOAC_INTERPRETER_DECORATORS_DIRECT_CALLER 2u
+
+#define Py_SOAC_INTERPRETER_OPERAND_CALLABLE 1u
+#define Py_SOAC_INTERPRETER_OPERAND_POSITIONAL 2u
+#define Py_SOAC_INTERPRETER_OPERAND_KEYWORD_VALUE 3u
+#define Py_SOAC_INTERPRETER_OPERAND_KEYWORD_NAMES 4u
+#define Py_SOAC_INTERPRETER_OPERAND_EXPANDED_ARGS 5u
+#define Py_SOAC_INTERPRETER_OPERAND_EXPANDED_KWARGS 6u
+#define Py_SOAC_INTERPRETER_OPERAND_DECORATOR 7u
+
+#define Py_SOAC_INTERPRETER_CREATION_NONE 0u
+#define Py_SOAC_INTERPRETER_CREATION_LIVE 1u
+#define Py_SOAC_INTERPRETER_CREATION_INVALID 2u
+
+#define Py_SOAC_INTERPRETER_CALL_ORDINARY 0u
+#define Py_SOAC_INTERPRETER_CALL_DATACLASS_ROOT 1u
+#define Py_SOAC_INTERPRETER_CALL_BUILTIN_DESCRIPTOR 2u
+#define Py_SOAC_INTERPRETER_CALL_CLASS 3u
+#define Py_SOAC_INTERPRETER_CALL_GENERIC_SCOPE 4u
+
+typedef struct _PySoacInterpreterCallViewV1 PySoacInterpreterCallViewV1;
+
+typedef struct {
+    uint32_t form;
+    uint32_t channel;
+    uint32_t instruction_argument;    /* Actual full native oparg. */
+    uint32_t reserved;                /* Zero. */
+    Py_ssize_t positional_count;      /* Includes actual non-NULL channel. */
+    Py_ssize_t keyword_count;
+    const PySoacInterpreterFrameViewV1 *frame;
+} PySoacInterpreterCallSiteV1;
+
+typedef struct {
+    uint32_t abi_version;
+    uint32_t phase;
+    PySoacInterpreterCallSiteV1 current;
+    /* At most ONE exact active incoming consumed native generic-scope edge.
+     * Its arguments have moved and are not accessible through this view.
+     * NULL for C-forwarded/public/resumed or otherwise unproved edges. */
+    const PySoacInterpreterCallSiteV1 *direct_caller;
+    uint32_t decorator_source;
+    uint32_t reserved;
+    Py_ssize_t decorator_count;       /* Zero during SELECT. */
+} PySoacInterpreterCallInfoV1;
+
+typedef struct {
+    uint32_t abi_version;
+    uint32_t creation_status;
+    uint32_t creation_role;
+    uint32_t reserved;
+    uint64_t creation_identity;
+    PyObject *value;                  /* Borrowed actual selected operand. */
+    /* Only LIVE: borrowed from that operand's existing exact native creation
+     * record, current original code and live same-interpreter invocation.
+     * NONE/INVALID never expose these pointers. No record is created/renewed. */
+    PyObject *dataclass_invocation;
+    PyObject *dataclass_owner;
+} PySoacInterpreterCallOperandV1;
+
+typedef struct {
+    uint32_t abi_version;
+    uint32_t kind;
+    uint32_t dataclass_stage;
+    uint32_t decorator_source;
+    Py_ssize_t decorator_count;
+    /* Exactly ONE owned metadata edge for DATACLASS_ROOT (existing invocation)
+     * or BUILTIN_DESCRIPTOR (namespace birth witness); NULL for other kinds.
+     * Never a callable, argument, defaults, code, namespace map or result. */
+    PyObject *metadata;
+    /* BUILTIN_DESCRIPTOR only. Borrowed comparison inputs, protected by the
+     * actual function operand and authenticated active original code graph.
+     * All other kinds require both NULL. They must survive no unsupported
+     * callback window; native revalidates before the one constructor call. */
+    PyObject *expected_function_owner;
+    PyObject *verified_code;
+} PySoacInterpreterCallDecisionV1;
+
 typedef struct {
     uint32_t abi_version;
     uint32_t flags;                   /* V1 requires zero. */
@@ -113,6 +206,37 @@ typedef struct {
      * Binder/required-check/PEP523 refusals cannot produce this witness. */
     int (*started)(PyObject *state, const PySoacInterpreterFrameViewV1 *frame);
 
+    /* Actual source-authorized CALL, after native CALL monitoring/normalization
+     * and before input consumption. Native publishes the operand stack first.
+     * Unrelated sites return ORDINARY without allocation/callbacks. Selection
+     * joins the immutable original receipt to actual native operands; names,
+     * result identity, public vectorcall equality or table presence grant none.
+     * Out starts zeroed except abi_version; on failure metadata stays NULL.
+     * No selected branch may retry ordinary dispatch after failure. */
+    int (*call)(PyObject *state,
+                 const PySoacInterpreterCallInfoV1 *info,
+                 const PySoacInterpreterCallViewV1 *operands,
+                 PySoacInterpreterCallDecisionV1 *out, size_t out_size);
+
+    /* Closed selected kinds only: BUILTIN_DESCRIPTOR or DATACLASS_ROOT.
+     * Descriptor: immediately after its actual native constructor, before
+     * publication; metadata is its same birth witness, dataclass_owner is NULL,
+     * stage is zero. Dataclass: AFTER native callee/input unlink/clear,
+     * before caller resumes or the result token is released. No CallView
+     * survives consumption. Caller owns state; the native finish continuation
+     * owns invocation metadata; dataclass_owner is borrowed from that SAME edge
+     * (including failure); borrowed_result has its actual native token.
+     * Success completes the existing Rust owner/native invocation transaction.
+     * NULL result means native body/binder failure: native detaches the exact
+     * primary PyErr, the callback fails only this attempted invocation, secondary
+     * errors are unraisable, and native restores the exact primary afterward.
+     * Public legacy DataclassVectorcall retains its own wrapper completion;
+     * it must not receive this callback a second time. */
+    int (*selected_call_finished)(
+        PyObject *state, const PySoacInterpreterFrameViewV1 *caller,
+        uint32_t kind, PyObject *metadata, PyObject *dataclass_owner,
+        uint32_t stage, PyObject *borrowed_result);
+
     /* A borrowed result only: native retains the original result token.
      * Called for EVERY successful synchronous original FUNCTION, including
      * snapshot=0, so pending child definitions can complete. Required result
@@ -161,6 +285,8 @@ typedef struct {
      * keywords may be NULL for no native keyword dictionary. */
     int (*prepare_type)(PyObject *namespace_state,
                         const PySoacInterpreterFrameViewV1 *parent,
+                        const PySoacInterpreterCallInfoV1 *call_info,
+                        const PySoacInterpreterCallViewV1 *call_operands,
                         PyObject *namespace_function, PyObject *metaclass,
                         PyObject *name, PyObject *bases,
                         PyObject *namespace_dict, PyObject *keywords,
@@ -178,7 +304,7 @@ typedef struct {
                             uint32_t lane, PyObject *borrowed_value);
 } PySoacInterpreterCallbacksV1;
 
-/* Exactly four public exports. GIL-build only in V1; free-threaded
+/* Exactly five public exports. GIL-build only in V1; free-threaded
  * registration/evaluation fail explicitly. Per-interpreter immutable callback
  * table, exact sizeof required, every function non-NULL, unknown flags reject.
  * Semantics-preserving C forwarding/restoration of _PyFunction_Vectorcall
@@ -210,6 +336,23 @@ PyAPI_FUNC(int) PySoac_GetInterpreterFrameInfoV1(
  * NULL/error means invalid view/index. In particular Py_None is not Unbound. */
 PyAPI_FUNC(PyObject *) PySoac_InterpreterFrameLocalV1(
     const PySoacInterpreterFrameViewV1 *view, Py_ssize_t index);
+
+/* The ONLY new export. Fills borrowed POD without allocation, Python callbacks,
+ * attribute lookup, hash/equality, stackref casts or frame/locals materializing.
+ * Kind+index selects current actual call inputs, or the already selected finite
+ * decorator window during PREPARE_TYPE. There is no arbitrary stack index,
+ * prefix-length query, ancestor traversal, or access to consumed parent args.
+ * DECORATOR indices are original evaluation order, 0..decorator_count-1.
+ * KEYWORD_VALUE/NAMES are vector-KW only; expanded calls expose their actual
+ * normalized tuple/dict, not a second unpack or guessed keyword ordering.
+ * Scalar operands require index=0. An absent native keywords object is NULL
+ * with status 0; Python None is Py_None. Invalid kind/index/view returns -1.
+ * Exact out_size is mandatory. Successful queries preserve incoming PyErr;
+ * invalid queries do not replace an already pending error. No returned
+ * pointer may outlive this callback and its actual native supporting owner. */
+PyAPI_FUNC(int) PySoac_InterpreterCallOperandV1(
+    const PySoacInterpreterCallViewV1 *view, uint32_t kind, Py_ssize_t index,
+    PySoacInterpreterCallOperandV1 *out, size_t out_size);
 
 #ifdef __cplusplus
 }
