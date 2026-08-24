@@ -1435,6 +1435,10 @@ make_unraisable_hook_args(PyThreadState *tstate, PyObject *exc_type,
         Py_DECREF(args);
         return NULL;
     }
+    /* New leaves struct sequences untracked while their fields are filled.
+       A captured hook argument can cycle through its traceback and frame, so
+       expose these edges to GC only after all five fields are initialized. */
+    PyObject_GC_Track(args);
     return args;
 }
 
