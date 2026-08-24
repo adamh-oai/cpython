@@ -408,6 +408,9 @@ codegen_addop_name(compiler *c, location loc,
         else if (opcode == MAKE_CELL) {
             RETURN_IF_ERROR(_PyCompile_SoacMakeCell(c, (int)arg));
         }
+        else if (opcode == STORE_FAST_MAYBE_NULL) {
+            RETURN_IF_ERROR(_PyCompile_SoacRestoreLocal(c, (int)arg));
+        }
     }
     return SUCCESS;
 }
@@ -4774,6 +4777,22 @@ codegen_call_helper(compiler *c, location loc,
 */
 
 
+/* Keep the original target visit and its source operation identity. The
+ * optional collector only records why this actual Store belongs to a region;
+ * it never replaces the target or changes native name resolution. */
+static int
+codegen_scope_binding_target(compiler *c, expr_ty target, int role, int generator)
+{
+    if (METADATA(c)->u_soac_bindings == NULL) {
+        return codegen_visit_expr(c, target);
+    }
+    _PySoacScopeBindingContext previous =
+        _PyCompile_SoacScopeBindingContext(c, role, generator);
+    int result = codegen_visit_expr(c, target);
+    _PyCompile_SoacRestoreScopeBindingContext(c, previous);
+    return result;
+}
+
 static int
 codegen_comprehension_generator(compiler *c, location loc,
                                 asdl_comprehension_seq *generators, int gen_index,
@@ -4837,6 +4856,7 @@ codegen_sync_comprehension_generator(compiler *c, location loc,
                 if (elt->kind != Starred_kind) {
                     VISIT(c, expr, elt);
                     start = NO_LABEL;
+                    RETURN_IF_ERROR(_PyCompile_SoacScopeNonIterator(c, gen_index));
                 }
             }
             if (IS_JUMP_TARGET_LABEL(start)) {
@@ -4848,13 +4868,15 @@ codegen_sync_comprehension_generator(compiler *c, location loc,
     if (IS_JUMP_TARGET_LABEL(start)) {
         if (iter_pos != ITERATOR_ON_STACK) {
             ADDOP(c, LOC(gen->iter), GET_ITER);
+            RETURN_IF_ERROR(_PyCompile_SoacScopeEvent(c, Py_SOAC_SCOPE_GET_ITER, gen_index));
             depth += 1;
         }
         USE_LABEL(c, start);
         depth += 1;
         ADDOP_JUMP(c, LOC(gen->iter), FOR_ITER, anchor);
     }
-    VISIT(c, expr, gen->target);
+    RETURN_IF_ERROR(codegen_scope_binding_target(c, gen->target,
+        Py_SOAC_SCOPE_BINDING_TARGET, gen_index));
 
     /* XXX this needs to be cleaned up...a lot! */
     Py_ssize_t n = asdl_seq_LEN(gen->ifs);
@@ -4983,6 +5005,7 @@ codegen_async_comprehension_generator(compiler *c, location loc,
     }
     if (iter_pos != ITERATOR_ON_STACK) {
         ADDOP(c, LOC(gen->iter), GET_AITER);
+        RETURN_IF_ERROR(_PyCompile_SoacScopeEvent(c, Py_SOAC_SCOPE_GET_AITER, gen_index));
     }
 
     USE_LABEL(c, start);
@@ -4997,7 +5020,8 @@ codegen_async_comprehension_generator(compiler *c, location loc,
     USE_LABEL(c, send);
     ADD_YIELD_FROM(c, loc, 1);
     ADDOP(c, loc, POP_BLOCK);
-    VISIT(c, expr, gen->target);
+    RETURN_IF_ERROR(codegen_scope_binding_target(c, gen->target,
+        Py_SOAC_SCOPE_BINDING_TARGET, gen_index));
 
     Py_ssize_t n = asdl_seq_LEN(gen->ifs);
     for (Py_ssize_t i = 0; i < n; i++) {
@@ -5148,6 +5172,8 @@ codegen_push_inlined_comprehension_locals(compiler *c, location loc,
         // `pushed_locals` on the stack, but this will be reversed when we swap
         // out the comprehension result in pop_inlined_comprehension_state
         ADDOP_I(c, loc, SWAP, PyList_GET_SIZE(state->pushed_locals) + 1);
+        RETURN_IF_ERROR(_PyCompile_SoacScopeEvent(c, Py_SOAC_SCOPE_ENTRY_ROTATION,
+            (int)PyList_GET_SIZE(state->pushed_locals) + 1));
 
         // Add our own cleanup handler to restore comprehension locals in case
         // of exception, so they have the correct values inside an exception
@@ -5158,17 +5184,19 @@ codegen_push_inlined_comprehension_locals(compiler *c, location loc,
         // no need to push an fblock for this "virtual" try/finally; there can't
         // be return/continue/break inside a comprehension
         ADDOP_JUMP(c, loc, SETUP_FINALLY, cleanup);
+        RETURN_IF_ERROR(_PyCompile_SoacScopeEvent(c, Py_SOAC_SCOPE_PROTECT_ENTER,
+            (int)PyList_GET_SIZE(state->pushed_locals)));
     }
     return SUCCESS;
 }
 
 static int
-push_inlined_comprehension_state(compiler *c, location loc,
+push_inlined_comprehension_state(compiler *c, location loc, expr_ty expression,
                                  PySTEntryObject *comp,
                                  _PyCompile_InlinedComprehensionState *state)
 {
     if (METADATA(c)->u_soac_bindings != NULL) {
-        RETURN_IF_ERROR(_PyCompile_SoacEnterComprehension(c, loc, comp));
+        RETURN_IF_ERROR(_PyCompile_SoacEnterComprehension(c, expression, comp));
     }
     RETURN_IF_ERROR(
         _PyCompile_TweakInlinedComprehensionScopes(c, loc, comp, state));
@@ -5179,8 +5207,9 @@ push_inlined_comprehension_state(compiler *c, location loc,
 
 static int
 restore_inlined_comprehension_locals(compiler *c, location loc,
-                                     _PyCompile_InlinedComprehensionState *state)
+                                     _PyCompile_InlinedComprehensionState *state, int phase)
 {
+    RETURN_IF_ERROR(_PyCompile_SoacScopePhase(c, phase));
     PyObject *k;
     // pop names we pushed to stack earlier
     Py_ssize_t npops = PyList_GET_SIZE(state->pushed_locals);
@@ -5189,6 +5218,7 @@ restore_inlined_comprehension_locals(compiler *c, location loc,
     // to get the outermost iterable to TOS, so we can still just iterate
     // pushed_locals in simple reverse order
     ADDOP_I(c, loc, SWAP, npops + 1);
+    RETURN_IF_ERROR(_PyCompile_SoacScopeEvent(c, Py_SOAC_SCOPE_RESTORE_ROTATION, (int)npops + 1));
     for (Py_ssize_t i = npops - 1; i >= 0; --i) {
         k = PyList_GetItem(state->pushed_locals, i);
         if (k == NULL) {
@@ -5203,27 +5233,35 @@ static int
 codegen_pop_inlined_comprehension_locals(compiler *c, location loc,
                                          _PyCompile_InlinedComprehensionState *state)
 {
-    /* Native code below emits the same restoration on two CFG paths. Record
-     * one scoped ownership transition, not two sequential restorations. */
+    /* Keep one semantic snapshot order, then observe both actual native
+     * restoration paths separately. The private handler starts only after
+     * the full isolation prefix; its protection cannot cover MAKE_CELL. */
     if (METADATA(c)->u_soac_bindings != NULL) {
         RETURN_IF_ERROR(_PyCompile_SoacRestoreComprehension(c));
     }
     if (state->pushed_locals) {
         ADDOP(c, NO_LOCATION, POP_BLOCK);
+        RETURN_IF_ERROR(_PyCompile_SoacScopeEvent(c, Py_SOAC_SCOPE_PROTECT_EXIT, -1));
 
         NEW_JUMP_TARGET_LABEL(c, end);
         ADDOP_JUMP(c, NO_LOCATION, JUMP_NO_INTERRUPT, end);
 
         // cleanup from an exception inside the comprehension
         USE_LABEL(c, state->cleanup);
+        RETURN_IF_ERROR(_PyCompile_SoacScopePhase(c, Py_SOAC_SCOPE_PHASE_ERROR_CLEANUP));
         // discard incomplete comprehension result (beneath exc on stack)
         ADDOP_I(c, NO_LOCATION, SWAP, 2);
+        RETURN_IF_ERROR(_PyCompile_SoacScopeEvent(c, Py_SOAC_SCOPE_ERROR_ENTRY, 2));
         ADDOP(c, NO_LOCATION, POP_TOP);
-        RETURN_IF_ERROR(restore_inlined_comprehension_locals(c, loc, state));
+        RETURN_IF_ERROR(_PyCompile_SoacScopeEvent(c, Py_SOAC_SCOPE_DISCARD_RESULT, -1));
+        RETURN_IF_ERROR(restore_inlined_comprehension_locals(c, loc, state,
+            Py_SOAC_SCOPE_PHASE_ERROR_RESTORE));
         ADDOP_I(c, NO_LOCATION, RERAISE, 0);
+        RETURN_IF_ERROR(_PyCompile_SoacScopeEvent(c, Py_SOAC_SCOPE_PROPAGATE, -1));
 
         USE_LABEL(c, end);
-        RETURN_IF_ERROR(restore_inlined_comprehension_locals(c, loc, state));
+        RETURN_IF_ERROR(restore_inlined_comprehension_locals(c, loc, state,
+            Py_SOAC_SCOPE_PHASE_NORMAL_RESTORE));
         Py_CLEAR(state->pushed_locals);
     }
     return SUCCESS;
@@ -5262,9 +5300,10 @@ codegen_comprehension(compiler *c, expr_ty e, int type,
     IterStackPosition iter_state;
     if (is_inlined) {
         VISIT(c, expr, outermost->iter);
-        if (push_inlined_comprehension_state(c, loc, entry, &inline_state)) {
+        if (push_inlined_comprehension_state(c, loc, e, entry, &inline_state)) {
             goto error;
         }
+        RETURN_IF_ERROR(_PyCompile_SoacScopePhase(c, Py_SOAC_SCOPE_PHASE_BODY));
         iter_state = ITERABLE_ON_STACK;
     }
     else {
@@ -5315,8 +5354,12 @@ codegen_comprehension(compiler *c, expr_ty e, int type,
         }
 
         ADDOP_I(c, loc, op, 0);
+        RETURN_IF_ERROR(_PyCompile_SoacScopeEvent(c, Py_SOAC_SCOPE_BUILD_COLLECTION,
+            op == BUILD_LIST ? Py_SOAC_EAGER_LIST :
+            op == BUILD_SET ? Py_SOAC_EAGER_SET : Py_SOAC_EAGER_DICT));
         if (is_inlined) {
             ADDOP_I(c, loc, SWAP, 2);
+            RETURN_IF_ERROR(_PyCompile_SoacScopeEvent(c, Py_SOAC_SCOPE_COLLECTION_ROTATION, 2));
         }
     }
     if (codegen_comprehension_generator(c, loc, generators, 0, 0,
@@ -5725,7 +5768,8 @@ codegen_visit_expr(compiler *c, expr_ty e)
     case NamedExpr_kind:
         VISIT(c, expr, e->v.NamedExpr.value);
         ADDOP_I(c, loc, COPY, 1);
-        VISIT(c, expr, e->v.NamedExpr.target);
+        RETURN_IF_ERROR(codegen_scope_binding_target(c, e->v.NamedExpr.target,
+            Py_SOAC_SCOPE_BINDING_WALRUS, -1));
         break;
     case BoolOp_kind:
         return codegen_boolop(c, e);

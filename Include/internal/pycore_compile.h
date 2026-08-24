@@ -91,8 +91,7 @@ struct _PyCompiler;
 PyCodeObject *_PyAST_CompileWithSoacClassBindings(
     struct _mod *mod, PyObject *filename, PyCompilerFlags *flags,
     int optimize, struct _arena *arena, PyObject *module, PyObject **bindings);
-int _PyCompile_SoacEnterComprehension(struct _PyCompiler *, _Py_SourceLocation,
-                                     PySTEntryObject *original);
+int _PyCompile_SoacEnterComprehension(struct _PyCompiler *, expr_ty, PySTEntryObject *);
 int _PyCompile_SoacSaveLocal(struct _PyCompiler *, int local_index);
 int _PyCompile_SoacMakeCell(struct _PyCompiler *, int deref_index);
 int _PyCompile_SoacRestoreComprehension(struct _PyCompiler *);
@@ -105,14 +104,29 @@ int _PyCompile_SoacNameAccess(struct _PyCompiler *, _Py_SourceLocation,
                              expr_ty original, expr_context_ty, int mode, int native_index);
 int _PyCompile_SoacFixSlots(_PyCompile_CodeUnitMetadata *,
                            const int *fixed, int noffsets);
-int _PyCompile_SoacEntryCell(_PyCompile_CodeUnitMetadata *, int deref_index);
-int _PyCompile_SoacEntryFreeVars(_PyCompile_CodeUnitMetadata *, int free_count);
+int _PyCompile_SoacEntryCell(_PyCompile_CodeUnitMetadata *, int deref_index, uint32_t *origin);
+int _PyCompile_SoacEntryFreeVars(_PyCompile_CodeUnitMetadata *, int free_count, uint32_t *origin);
 int _PyCompile_SoacReferenceOrigin(struct _PyCompiler *, _Py_SourceLocation,
                                   const void *original, int kind, expr_context_ty);
 int _PyCompile_SoacFinalReferenceInstruction(_PyCompile_CodeUnitMetadata *,
                                             int ordinal, int opcode, int oparg,
                                             _PySoacReadOrigins);
 int _PyCompile_SoacFinishReferences(_PyCompile_CodeUnitMetadata *, int count);
+
+/* Native ownership facts in the same compile-local source catalogue. */
+typedef struct {
+    int role;
+    int generator;
+} _PySoacScopeBindingContext;
+
+_PySoacScopeBindingContext _PyCompile_SoacScopeBindingContext(
+    struct _PyCompiler *, int role, int generator);
+void _PyCompile_SoacRestoreScopeBindingContext(
+    struct _PyCompiler *, _PySoacScopeBindingContext);
+int _PyCompile_SoacScopePhase(struct _PyCompiler *, int phase);
+int _PyCompile_SoacScopeEvent(struct _PyCompiler *, int event_kind, int auxiliary);
+int _PyCompile_SoacScopeNonIterator(struct _PyCompiler *, int generator);
+int _PyCompile_SoacRestoreLocal(struct _PyCompiler *, int local_index);
 
 /* Original source operation provenance, only for the existing opt-in product.
  * None of these compiler hooks grants runtime or source-body authority. */

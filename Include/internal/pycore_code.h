@@ -679,6 +679,15 @@ extern PyObject *_PyCode_CloneSoacAnnotationReplay(PyCodeObject *);
 PyAPI_FUNC(int) _PyCode_CheckSoacAnnotationReplay(PyObject *);
 
 
+/* Native frame/binder parameter vector, including unused/defaulted and
+ * variadic parameters. Pure layout only: no callback, allocation or ownership. */
+static inline Py_ssize_t
+_PyCode_NumFrameParameters(PyCodeObject *code)
+{
+    return (Py_ssize_t)code->co_argcount + code->co_kwonlyargcount +
+        !!(code->co_flags & CO_VARARGS) + !!(code->co_flags & CO_VARKEYWORDS);
+}
+
 #ifdef __cplusplus
 }
 #endif

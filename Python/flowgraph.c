@@ -3773,10 +3773,12 @@ insert_prefix_instructions(_PyCompile_CodeUnitMetadata *umd, basicblock *entrybl
                 PyMem_RawFree(sorted);
                 return ERROR;
             }
-            if (_PyCompile_SoacEntryCell(umd, oldindex) < 0) {
+            uint32_t soac_origin = 0;
+            if (_PyCompile_SoacEntryCell(umd, oldindex, &soac_origin) < 0) {
                 PyMem_RawFree(sorted);
                 return ERROR;
             }
+            entryblock->b_instr[ncellsused].i_soac_origins.lane[0] = soac_origin;
             ncellsused += 1;
         }
         PyMem_RawFree(sorted);
@@ -3791,7 +3793,9 @@ insert_prefix_instructions(_PyCompile_CodeUnitMetadata *umd, basicblock *entrybl
             .i_except = NULL,
         };
         RETURN_IF_ERROR(basicblock_insert_instruction(entryblock, 0, &copy_frees));
-        RETURN_IF_ERROR(_PyCompile_SoacEntryFreeVars(umd, nfreevars));
+        uint32_t soac_origin = 0;
+        RETURN_IF_ERROR(_PyCompile_SoacEntryFreeVars(umd, nfreevars, &soac_origin));
+        entryblock->b_instr[0].i_soac_origins.lane[0] = soac_origin;
     }
 
     return SUCCESS;

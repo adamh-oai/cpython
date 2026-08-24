@@ -54,38 +54,44 @@ PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSource(
     const char *source, Py_ssize_t length, PyObject *filename, int optimize);
 
 /* Compile the same authenticated source once, returning (code, strings,
- * (Py_SOAC_CLASS_BINDINGS_SCHEMA, nodes, class_recipes, operation_tables)). All containers are
- * exact immutable tuples. Each node refers to an exact member of code's final
- * constant tree; metadata never authorizes execution of that member.
- * strings is an exact tuple of (line, column, end_line, end_column, text)
- * entries for future-stringized annotations in that native AST. The returned
- * ordinary data is not an execution or optimizer capability.
+ * (4, unchanged_CodeNodes, ScopeBindingRecipes, unchanged_OperationTables)).
+ * One exact immutable scope recipe belongs to every retained native code node.
+ * This is native compiler/binder data, not projection or execution authority.
+ * All containers are exact immutable tuples. Unchanged nodes are
+ * (id,parent_id,exact_code,scope_kind,symtable_kind,source_span).
+ * Unchanged strings entries are (line,column,end_line,end_column,text) for
+ * future-stringized annotations in the same native AST. Spans use native
+ * UTF-8 byte columns; None means unavailable, never an invented location.
  *
- * Version 3 preserves these class rows (IDs nonnegative, optional values None):
- * node = (id, parent_id, exact_code, scope_kind, symtable_kind, source_span)
- * recipe = (class_id, owners, initializers, regions, captures, exports, accesses)
- * owner = (id, kind, final_localsplus_index, native_kind_byte, region_id)
- * initializer = (phase, entry_owner_id, role, incoming_free_ordinal_or_None)
- * region = (id, parent_region_id, source_span, ordered_entry_ops, restores)
- * entry_op = (kind, final_slot_index, allocation_or_saved_owner_id)
- * restore = (final_slot_index, saved_owner_id)
- * current_slot = (Py_SOAC_CLASS_CURRENT_SLOT, final_slot_index)
- * capture = (child_id, creation_span, child_freevar_ordinal, current_slot)
- * export = (role, current_slot)
- * access = (original_Name_span, context, mode, current_slot)
- * source_span = (line, UTF8_byte_column, end_line, end_UTF8_byte_column),
- * or None when unavailable. Zero-width spans are permitted, not invented.
+ * scope=(code_id, slot_seeds, entry_prefix, owners, regions, captures,
+ *        accesses, class_actions_or_None, gaps)
+ * seed=(final_slot, native_kind, FrameCleared0/BoundParameter1, ordinal_or_None)
+ * owner=(id, kind, final_slot, native_kind, region_or_None)
+ * region=(id,parent,kind,source_span,outer_iterable_span,is_async,protection,
+ *         entry_ops,restores,source_bindings,events)
+ * event=(phase,step,kind,slot_or_None,owner_or_None,auxiliary_or_None,emissions)
+ * emission=(ordinal,lane,form,first_operand,second_or_None,native_opcode,
+ *           actual_opcode_byte_offset,handler_or_None,wire3_context_or_None)
+ * handler=(target_ordinal,unwind_depth,preserve_lasti)
+ * capture=(child_id,creation_span,free_ordinal,current_slot,region_or_None)
+ * access=(original_Name_span,context,mode,current_slot,region_or_None)
+ * class_actions=(header_initializers,exports), absent outside native classes
+ * scope_gap=(reason,region_or_None,event_key_or_None,ordinal_or_None,
+ *            lane_or_None,native_opcode_or_None,context_or_None)
  *
- * Current slots, not allocation IDs, select closure/frame values after joins.
- * SaveClear moves the actual current raw value; MakeCellFromCurrent wraps that
- * raw value and replaces its slot only on success. Entry ops precede native
- * SETUP_FINALLY: restores protect the entered body/result, not partial entry.
- * Failed entry drops completed saved tokens as ordinary operand temporaries. */
+ * Seeds describe successful native binding; actual TakeBinding tokens still
+ * have to move into the corresponding runtime primaries. MAKE_CELL uses the
+ * actual current value. SaveClear/MakeCell precede the private restoration
+ * handler, so partial prefix failure does not acquire an invented rollback.
+ * OperationTable compiler-origin and fused-restore gaps remain unchanged.
+ * Native source-operation tuple/tag definitions below retain wire3 meanings.
+ * Exact scope tuple/tag constraints are specified by the joint SCHEMA-V4.md.
+ */
 PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSourceDetails(
     const char *source, Py_ssize_t length, PyObject *filename, int optimize);
 
 /* Fixed wire values, independent of internal compiler enum numbering. */
-#define Py_SOAC_CLASS_BINDINGS_SCHEMA 3
+#define Py_SOAC_CLASS_BINDINGS_SCHEMA 4
 /* Source-operation receipts share the SAME final code-node tree.
  * table = (code_id, instruction_count, code_size_bytes, exact_native_names,
  *          reads, stores, calls, gaps)
@@ -267,6 +273,52 @@ PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSourceDetails(
 #define Py_SOAC_CLASS_ACCESS_RAW_SLOT 0
 #define Py_SOAC_CLASS_ACCESS_CELL_VALUE 1
 #define Py_SOAC_CLASS_ACCESS_NAMESPACE_OR_CELL 2
+
+/* Wire4: one shared ownership-data recipe per retained native CodeNode.
+ * These tags describe native compiler/binder facts, never execution grants. */
+#define Py_SOAC_SCOPE_SEED_CLEARED 0
+#define Py_SOAC_SCOPE_SEED_PARAMETER 1
+#define Py_SOAC_EAGER_LIST 0
+#define Py_SOAC_EAGER_SET 1
+#define Py_SOAC_EAGER_DICT 2
+#define Py_SOAC_SCOPE_NO_PRIVATE_HANDLER 0
+#define Py_SOAC_SCOPE_FINALLY_AFTER_PREFIX 1
+#define Py_SOAC_SCOPE_BINDING_TARGET 0
+#define Py_SOAC_SCOPE_BINDING_WALRUS 1
+#define Py_SOAC_SCOPE_PHASE_ENTRY 0
+#define Py_SOAC_SCOPE_PHASE_ISOLATION 1
+#define Py_SOAC_SCOPE_PHASE_BODY 2
+#define Py_SOAC_SCOPE_PHASE_ERROR_CLEANUP 3
+#define Py_SOAC_SCOPE_PHASE_NORMAL_RESTORE 4
+#define Py_SOAC_SCOPE_PHASE_ERROR_RESTORE 5
+#define Py_SOAC_SCOPE_COPY_FREE 0
+#define Py_SOAC_SCOPE_ENTRY_CELL 1
+#define Py_SOAC_SCOPE_SAVE_CLEAR 2
+#define Py_SOAC_SCOPE_REGION_CELL 3
+#define Py_SOAC_SCOPE_PROTECT_ENTER 4
+#define Py_SOAC_SCOPE_BUILD_COLLECTION 5
+#define Py_SOAC_SCOPE_GET_ITER 6
+#define Py_SOAC_SCOPE_GET_AITER 7
+#define Py_SOAC_SCOPE_DISCARD_RESULT 8
+#define Py_SOAC_SCOPE_RESTORE_SLOT 9
+#define Py_SOAC_SCOPE_PROPAGATE 10
+#define Py_SOAC_SCOPE_PROTECT_EXIT 11
+#define Py_SOAC_SCOPE_ERROR_ENTRY 12
+#define Py_SOAC_SCOPE_RESTORE_ROTATION 13
+#define Py_SOAC_SCOPE_ENTRY_ROTATION 14
+#define Py_SOAC_SCOPE_COLLECTION_ROTATION 15
+#define Py_SOAC_SCOPE_FORM_DIRECT 0
+#define Py_SOAC_SCOPE_FORM_STORE_PAIR 1
+#define Py_SOAC_SCOPE_FORM_STORE_LOAD 2
+#define Py_SOAC_SCOPE_GAP_ELIMINATED 0
+#define Py_SOAC_SCOPE_GAP_UNSUPPORTED 1
+#define Py_SOAC_SCOPE_GAP_MISSING_ORIGIN 2
+#define Py_SOAC_SCOPE_GAP_PROTECTION 3
+#define Py_SOAC_SCOPE_GAP_DIVERGENT 4
+#define Py_SOAC_SCOPE_GAP_CONTEXT 5
+#define Py_SOAC_SCOPE_GAP_SUSPENSION 6
+#define Py_SOAC_SCOPE_GAP_PAIRED_RESTORE 7
+#define Py_SOAC_SCOPE_GAP_NONITERATOR 8
 
 /* Execute SETUP_ANNOTATIONS against the explicit actual local namespace. */
 PyAPI_FUNC(int) PySoac_SetupAnnotations(PyObject *locals);

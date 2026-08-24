@@ -2134,8 +2134,7 @@ _PySoacCall_CaptureInfoV1(PySoacSourceCallInfoV1 *out, uint32_t kind,
     assert(PyFunction_Check(func) && PyCode_Check(code));
     assert(func->func_code == (PyObject *)code);
     Py_ssize_t supplied = (Py_ssize_t)code->co_argcount + code->co_kwonlyargcount;
-    Py_ssize_t parameters = supplied + !!(code->co_flags & CO_VARARGS) +
-                           !!(code->co_flags & CO_VARKEYWORDS);
+    Py_ssize_t parameters = _PyCode_NumFrameParameters(code);
     assert(parameters <= code->co_nlocalsplus);
     *out = (PySoacSourceCallInfoV1){
         .kind = kind,
