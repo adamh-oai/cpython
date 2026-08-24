@@ -223,7 +223,7 @@ soac_dataclass_validate_bridge(_PyInterpreterFrame *parent, PyObject *builtin,
           !PyDict_CheckExact(args[3]) || !PyType_Check(args[4]) ||
           args[4] != (PyObject *)invocation->actual_type ||
           invocation->class_owner == NULL ||
-          PyType_GetSoacContractOwner(args[4]) != invocation->class_owner))) {
+          _PySOAC_GetTypeConstructionOwner(args[4]) != invocation->class_owner))) {
         return soac_dataclass_fail(invocation, "dataclass bridge operands are not authentic");
     }
     PySoacDataclassFrameView view = {
