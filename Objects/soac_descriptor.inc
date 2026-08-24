@@ -357,7 +357,6 @@ PySoac_NewBuiltinDescriptor(PyObject *factory, PyObject *function,
         return NULL;
     }
     if (!PyFunction_Check(function) ||
-        (PyObject *)((PyFunctionObject *)function)->func_code != verified_code ||
         !PyCode_Check((PyObject *)((PyFunctionObject *)function)->func_code) ||
         namespace_witness == Py_None || expected_owner == Py_None) {
         PyErr_SetString(PyExc_TypeError, "descriptor construction needs a function, code, and live owners");
