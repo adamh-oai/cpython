@@ -1088,9 +1088,8 @@ PyTypeObject PyGen_Type = {
 };
 
 static PyObject *
-make_gen(PyTypeObject *type, PyFunctionObject *func)
+make_gen(PyTypeObject *type, PyFunctionObject *func, PyCodeObject *code)
 {
-    PyCodeObject *code = (PyCodeObject *)func->func_code;
     int slots = _PyFrame_NumSlotsForCodeObject(code);
     PyGenObject *gen = PyObject_GC_NewVar(PyGenObject, type, slots);
     if (gen == NULL) {
@@ -1113,17 +1112,19 @@ static PyObject *
 compute_cr_origin(int origin_depth, _PyInterpreterFrame *current_frame);
 
 PyObject *
-_Py_MakeCoro(PyFunctionObject *func)
+_Py_MakeCoro(PyFunctionObject *func, PyCodeObject *code)
 {
-    int coro_flags = ((PyCodeObject *)func->func_code)->co_flags &
+    /* Argument binding can replace func_code. The active frame owns the
+     * code whose kind and storage must survive that reentrant mutation. */
+    int coro_flags = code->co_flags &
         (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR);
     assert(coro_flags);
     if (coro_flags == CO_GENERATOR) {
-        return make_gen(&PyGen_Type, func);
+        return make_gen(&PyGen_Type, func, code);
     }
     if (coro_flags == CO_ASYNC_GENERATOR) {
         PyAsyncGenObject *ag;
-        ag = (PyAsyncGenObject *)make_gen(&PyAsyncGen_Type, func);
+        ag = (PyAsyncGenObject *)make_gen(&PyAsyncGen_Type, func, code);
         if (ag == NULL) {
             return NULL;
         }
@@ -1135,7 +1136,7 @@ _Py_MakeCoro(PyFunctionObject *func)
     }
 
     assert (coro_flags == CO_COROUTINE);
-    PyObject *coro = make_gen(&PyCoro_Type, func);
+    PyObject *coro = make_gen(&PyCoro_Type, func, code);
     if (!coro) {
         return NULL;
     }

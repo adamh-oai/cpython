@@ -1900,8 +1900,14 @@ initialize_locals(PyThreadState *tstate, PyFunctionObject *func,
                 continue;
             PyObject *varname = PyTuple_GET_ITEM(co->co_localsplusnames, i);
             if (func->func_kwdefaults != NULL) {
+                /* Equality can replace func_kwdefaults and release its last
+                 * reference. Keep this lookup's mapping alive, then reload
+                 * the function field for the next missing parameter. */
+                PyObject *kwdefaults = Py_NewRef(func->func_kwdefaults);
                 PyObject *def;
-                if (PyDict_GetItemRef(func->func_kwdefaults, varname, &def) < 0) {
+                int found = PyDict_GetItemRef(kwdefaults, varname, &def);
+                Py_DECREF(kwdefaults);
+                if (found < 0) {
                     goto fail_post_args;
                 }
                 if (def) {

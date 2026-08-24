@@ -280,7 +280,7 @@ extern int _PyEval_EnsureBuiltinsWithModule(
     PyObject *,
     PyObject **p_builtins);
 
-PyAPI_FUNC(PyObject *)_Py_MakeCoro(PyFunctionObject *func);
+PyAPI_FUNC(PyObject *)_Py_MakeCoro(PyFunctionObject *func, PyCodeObject *code);
 
 /* Handle signals, pending calls, GIL drop request
    and asynchronous exception */
