@@ -405,7 +405,7 @@ soac_dataclass_frame_offsets(PyObject *self, PyObject *unused)
                          "frame_object_data_offset", offsetof(PyFrameObject, _f_frame_data),
                          "role", offsetof(_PyInterpreterFrame, soac_dataclass_role),
                          "invocation", offsetof(_PyInterpreterFrame, soac_dataclass_invocation),
-                         "checked_activation", offsetof(_PyInterpreterFrame, soac_dataclass_checked_activation),
+                         "checked_activation", offsetof(_PyInterpreterFrame, soac_checked_activation),
                          "localsplus", offsetof(_PyInterpreterFrame, localsplus),
                          "thread_base_frame_pointer", offsetof(PyThreadState, base_frame),
                          "thread_soft_limit", offsetof(_PyThreadStateImpl, c_stack_soft_limit),

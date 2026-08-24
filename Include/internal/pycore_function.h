@@ -15,6 +15,23 @@ PyAPI_FUNC(PyObject *) _PyFunction_Vectorcall(
     PyObject *kwnames);
 
 
+enum {
+    FUNC_SOAC_OWNER_NONE,
+    FUNC_SOAC_OWNER_ATTACHED,
+    FUNC_SOAC_OWNER_TERMINAL,
+    /* Native birth provenance, independent of mutable pre-seal func_code.
+     * Same existing owner edge/byte: this is a backend discriminator only.
+     * The interpreter callback must still authenticate exact owner/code. */
+    FUNC_SOAC_OWNER_INTERPRETER_ATTACHED,
+};
+
+static inline int
+_PyFunction_HasSoacStrictOwner(PyFunctionObject *function)
+{
+    return function->func_soac_strict_owner_state == FUNC_SOAC_OWNER_ATTACHED ||
+        function->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED;
+}
+
 #define FUNC_VERSION_UNSET 0
 #define FUNC_VERSION_CLEARED 1
 #define FUNC_VERSION_FIRST_VALID 2

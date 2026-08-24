@@ -30,7 +30,7 @@ soac_source_entry_matches(PyFunctionObject *function,
      * provenance, not Rust-body correspondence or execution authority.
      * The owner ID is installed with that actual one-shot owner, not the
      * old unchecked direct-call field (which may correctly remain zero). */
-    if (function->func_soac_strict_owner_state != FUNC_SOAC_OWNER_ATTACHED ||
+    if (!_PyFunction_HasSoacStrictOwner(function) ||
         function->func_soac_strict_owner == NULL ||
         function->func_soac_strict_owner != spec->expected_owner ||
         function->func_soac_metadata == NULL ||

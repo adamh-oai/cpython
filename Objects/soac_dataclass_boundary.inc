@@ -415,7 +415,7 @@ soac_dataclass_activation_matches(SoacDataclassActivation *activation,
 int
 _PySOAC_DataclassCheckBound(_PyInterpreterFrame *frame)
 {
-    PyObject *object = frame->soac_dataclass_checked_activation;
+    PyObject *object = frame->soac_checked_activation;
     if (object == NULL || !Py_IS_TYPE(object, &SoacDataclassActivation_Type)) {
         return soac_dataclass_error("generated binding has no captured activation");
     }
@@ -450,7 +450,7 @@ int
 _PySOAC_DataclassCheckRequiredFrame(_PyInterpreterFrame *frame)
 {
     PyObject *function = PyStackRef_AsPyObjectBorrow(frame->f_funcobj);
-    PyObject *object = frame->soac_dataclass_checked_activation;
+    PyObject *object = frame->soac_checked_activation;
     if (object == NULL) {
         if (function == NULL || !PyFunction_Check(function)) {
             return 0;
@@ -500,8 +500,8 @@ soac_dataclass_value_site(SoacDataclassActivation *activation,
 int
 _PySOAC_DataclassHasValueSite(_PyInterpreterFrame *frame)
 {
-    PyObject *object = frame->soac_dataclass_checked_activation;
-    if (object == NULL) {
+    PyObject *object = frame->soac_checked_activation;
+    if (object == NULL || _PySOAC_InterpreterIsActivation(object)) {
         return 0;
     }
     if (!Py_IS_TYPE(object, &SoacDataclassActivation_Type)) {
@@ -522,7 +522,7 @@ soac_dataclass_checked_value_call(_PyInterpreterFrame *frame, PyObject *callable
         return NULL;
     }
     SoacDataclassActivation *activation =
-        (SoacDataclassActivation *)frame->soac_dataclass_checked_activation;
+        (SoacDataclassActivation *)frame->soac_checked_activation;
     const PySoacDataclassValueSite *site = soac_dataclass_value_site(activation, frame);
     PyObject *canonical = PySoac_GetDataclassBuiltin(Py_SOAC_DATACLASS_BRIDGE_VALUE);
     if (site == NULL || canonical == NULL || callable != canonical || nargs != 1 ||

@@ -1,7 +1,7 @@
-/* Observation only: capture a matching actual CREATE object without entering
- * Python from a function watcher. In particular, DESTROY can arrive with an
- * exception already pending, before a ctypes callback could save that state.
- * Tests mutate a captured function later, outside the watcher callback. */
+/* Observation only: default capture never enters Python from a watcher.
+ * Optional CREATE-only probe tests actual reentry; DESTROY remains untouched
+ * because it can arrive with an exception already pending. The explicit
+ * observer list/callback owners are accounted equally in ordinary controls. */
 
 static int soac_capture_function_create(PyFunction_WatchEvent,
                                          PyFunctionObject *, PyObject *);
@@ -21,6 +21,7 @@ clear_soac_function_create_watch(module_state *state)
     Py_CLEAR(state->soac_create_globals);
     Py_CLEAR(state->soac_create_name);
     Py_CLEAR(state->soac_create_captures);
+    Py_CLEAR(state->soac_create_callback);
     PyErr_SetRaisedException(exception);
 }
 
@@ -48,6 +49,18 @@ soac_capture_function_create(PyFunction_WatchEvent event,
             state->soac_create_captures != NULL &&
             _PyUnicode_Equal(state->soac_create_name, function->func_name)) {
             status = PyList_Append(state->soac_create_captures, (PyObject *)function);
+            if (status == 0 && state->soac_create_callback != NULL &&
+                state->soac_create_callback != Py_None) {
+                /* The observer may unwatch reentrantly. Keep only its callable,
+                 * never another subject function/code/map/value owner. */
+                PyObject *callback = Py_NewRef(state->soac_create_callback);
+                PyObject *result = PyObject_CallOneArg(callback, (PyObject *)function);
+                status = result == NULL ? -1 : 0;
+                PyObject *error = PyErr_GetRaisedException();
+                Py_XDECREF(result);
+                Py_DECREF(callback);
+                PyErr_SetRaisedException(error);
+            }
         }
     }
     Py_XDECREF(module);
@@ -68,14 +81,16 @@ soac_function_create_watch(PyObject *self, PyObject *args)
     PyErr_SetString(PyExc_RuntimeError, "this function watcher fixture requires the GIL");
     return NULL;
 #else
-    PyObject *globals, *name, *captures;
-    if (!PyArg_ParseTuple(args, "OOO:soac_function_create_watch",
-                          &globals, &name, &captures)) {
+    PyObject *globals, *name, *captures, *callback = Py_None;
+    if (!PyArg_ParseTuple(args, "OOO|O:soac_function_create_watch",
+                          &globals, &name, &captures, &callback)) {
         return NULL;
     }
     if (!PyDict_CheckExact(globals) || !PyUnicode_CheckExact(name) ||
-        !PyList_CheckExact(captures)) {
-        PyErr_SetString(PyExc_TypeError, "exact globals, name and capture list required");
+        !PyList_CheckExact(captures) ||
+        (callback != Py_None && !PyCallable_Check(callback))) {
+        PyErr_SetString(PyExc_TypeError,
+                        "exact globals/name/capture list and optional callable required");
         return NULL;
     }
     module_state *state = get_module_state(self);
@@ -90,6 +105,7 @@ soac_function_create_watch(PyObject *self, PyObject *args)
     state->soac_create_globals = Py_NewRef(globals);
     state->soac_create_name = Py_NewRef(name);
     state->soac_create_captures = Py_NewRef(captures);
+    state->soac_create_callback = Py_NewRef(callback);
     state->soac_create_watcher_plus_one = id + 1;
     PyObject *result = PyLong_FromLong(id);
     if (result == NULL) {

@@ -15,6 +15,7 @@ extern "C" {
 #include "pycore_pystate.h"       // _PyThreadState_GET()
 #include "pycore_stats.h"         // EVAL_CALL_STAT_INC()
 #include "pycore_soac_lifetime_frame.h"
+#include "pycore_soac_interpreter.h"
 #include "pycore_typedefs.h"      // _PyInterpreterFrame
 
 
@@ -120,6 +121,9 @@ _PyEval_EvalFrame(PyThreadState *tstate, _PyInterpreterFrame *frame, int throwfl
     EVAL_CALL_STAT_INC(EVAL_CALL_TOTAL);
     if (tstate->interp->eval_frame == NULL) {
         return _PyEval_EvalFrameDefault(tstate, frame, throwflag);
+    }
+    if (_PySOAC_InterpreterCheckEvalHook(frame) < 0) {
+        return NULL;
     }
     return tstate->interp->eval_frame(tstate, frame, throwflag);
 }

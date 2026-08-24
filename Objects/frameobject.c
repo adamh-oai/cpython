@@ -1988,7 +1988,7 @@ frame_dealloc(PyObject *op)
         (frame->owner == FRAME_OWNED_BY_FRAME_OBJECT || _PyFrame_IsSoacLifetime(frame))) {
         frame->soac_dataclass_role = 0;
         Py_CLEAR(frame->soac_dataclass_invocation);
-        Py_CLEAR(frame->soac_dataclass_checked_activation);
+        _PySOAC_CheckedFrameClear(frame, Py_SOAC_INTERPRETER_FRAME_CLEARED);
         if (_PyFrame_IsSoacLifetime(frame)) {
             frame->owner = FRAME_OWNED_BY_SOAC_CLEARED;
             _PyFrame_ClearSoacLifetimeEnvironment(frame);
@@ -2045,7 +2045,7 @@ frame_tp_clear(PyObject *op)
     }
     f->f_frame->soac_dataclass_role = 0;
     Py_CLEAR(f->f_frame->soac_dataclass_invocation);
-    Py_CLEAR(f->f_frame->soac_dataclass_checked_activation);
+    _PySOAC_CheckedFrameClear(f->f_frame, Py_SOAC_INTERPRETER_FRAME_CLEARED);
     Py_CLEAR(f->f_trace);
     Py_CLEAR(f->f_extra_locals);
     Py_CLEAR(f->f_locals_cache);

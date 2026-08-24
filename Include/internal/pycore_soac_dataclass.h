@@ -27,7 +27,8 @@ PyAPI_FUNC(PyObject *) _PySOAC_DataclassObjectCallFromFrame(
     _PyInterpreterFrame *parent, PyObject *callable, PyObject *args,
     PyObject *kwargs);
 PyAPI_FUNC(PyObject *) _PySOAC_FunctionFromFrame(
-    PyObject *code, PyObject *globals, _PyInterpreterFrame *producer);
+    PyObject *code, PyObject *globals, _PyInterpreterFrame *producer,
+    const _Py_CODEUNIT *this_instr);
 /* Native creation-boundary registration only; these do not read late Python
  * bindings. Helpers' ordinary C entry is always context-free. */
 extern int _PySOAC_DataclassCaptureBuiltin(

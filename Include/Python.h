@@ -131,6 +131,7 @@ __pragma(warning(disable: 4201))
 #include "cpython/context.h"
 #include "modsupport.h"
 #include "compile.h"
+#include "cpython/soac_interpreter.h"
 #include "pythonrun.h"
 #include "pylifecycle.h"
 #include "ceval.h"

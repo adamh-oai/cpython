@@ -776,6 +776,9 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
      * or reference clearing can re-enter application code. */
     interp->soac.annotation_replay_closed = 1;
     interp->soac.annotation_replay_resolver = NULL;
+    /* Existing activations may still retire during shutdown: keep the
+     * immutable scalar table, but forbid new entry and registration. */
+    interp->soac.interpreter_closed = 1;
     interp->soac.dataclass_closed = 1;
     memset(&interp->soac.dataclass_callbacks, 0,
            sizeof(interp->soac.dataclass_callbacks));
@@ -1569,6 +1572,7 @@ init_threadstate(_PyThreadStateImpl *_tstate,
     _tstate->base_frame.visited = 0;
     _tstate->base_frame.soac_dataclass_role = 0;
     _tstate->base_frame.soac_dataclass_invocation = NULL;
+    _tstate->base_frame.soac_checked_activation = NULL;
 #ifdef Py_DEBUG
     _tstate->base_frame.lltrace = 0;
 #endif

@@ -10,6 +10,7 @@
 #include "pycore_stackref.h"      // PyStackRef_AsPyObjectBorrow()
 #include "pycore_stats.h"         // CALL_STAT_INC()
 #include "pycore_soac_dataclass.h"
+#include "pycore_soac_interpreter.h"
 #include "pycore_soac_lifetime_frame.h"
 
 #ifdef __cplusplus
@@ -62,38 +63,16 @@ static inline PyCodeObject *_PyFrame_GetCode(_PyInterpreterFrame *f) {
     return (PyCodeObject *)executable;
 }
 
-/* All native entry paths, including specialized/tier-two frame pushes and
-   generator throw, must check the actual frame before its first instruction.
-   Neither a future flag nor an authenticated source ID is an execution grant.
-   The SOAC runtime currently executes strict functions through its own entry. */
+/* All native entries, including specialized frame pushes and generator
+   throw, require the actual ordinary frame's checked activation. Native
+   lifetime facades remain non-executable, and code identity alone is no grant. */
 static inline int
 _PyFrame_CheckSoacExecution(_PyInterpreterFrame *frame)
 {
     if (_PyFrame_CheckSoacLifetimeExecution(frame) < 0) {
         return -1;
     }
-    if (!(_PyFrame_GetCode(frame)->co_flags & CO_FUTURE_STRICT)) {
-        PyObject *function = PyStackRef_AsPyObjectBorrow(frame->f_funcobj);
-        if (frame->soac_dataclass_checked_activation != NULL ||
-            (function != NULL && PyFunction_Check(function) &&
-             ((PyFunctionObject *)function)->func_soac_required_boundary)) {
-            if (_PySOAC_DataclassCheckRequiredFrame(frame) < 0) {
-                return -1;
-            }
-        }
-        if (frame->soac_dataclass_invocation != NULL ||
-            (frame->previous != NULL &&
-             frame->previous->soac_dataclass_invocation != NULL)) {
-            return _PySOAC_DataclassEnterFrame(frame);
-        }
-        return 0;
-    }
-    PyObject *exception = PySoac_GetStrictRuntimeUnavailableError();
-    if (exception != NULL) {
-        PyErr_SetString(exception,
-                        "strict code execution requires an authenticated runtime entry");
-    }
-    return -1;
+    return _PySOAC_CheckedFrameExecution(frame);
 }
 
 // Similar to _PyFrame_GetCode(), but return NULL if the frame is invalid or
@@ -228,10 +207,10 @@ static inline void _PyFrame_Copy(_PyInterpreterFrame *src, _PyInterpreterFrame *
     dest->instr_ptr = src->instr_ptr;
     dest->soac_dataclass_role = src->soac_dataclass_role;
     dest->soac_dataclass_invocation = src->soac_dataclass_invocation;
-    dest->soac_dataclass_checked_activation = src->soac_dataclass_checked_activation;
+    dest->soac_checked_activation = src->soac_checked_activation;
     src->soac_dataclass_role = 0;
     src->soac_dataclass_invocation = NULL;
-    src->soac_dataclass_checked_activation = NULL;
+    src->soac_checked_activation = NULL;
 #ifdef Py_GIL_DISABLED
     dest->tlbc_index = src->tlbc_index;
 #endif
@@ -294,7 +273,7 @@ _PyFrame_Initialize(
     frame->visited = 0;
     frame->soac_dataclass_role = 0;
     frame->soac_dataclass_invocation = NULL;
-    frame->soac_dataclass_checked_activation = NULL;
+    frame->soac_checked_activation = NULL;
 #ifdef Py_DEBUG
     frame->lltrace = 0;
 #endif
@@ -490,7 +469,7 @@ _PyFrame_PushTrampolineUnchecked(PyThreadState *tstate, PyCodeObject *code, int 
     frame->visited = 0;
     frame->soac_dataclass_role = 0;
     frame->soac_dataclass_invocation = NULL;
-    frame->soac_dataclass_checked_activation = NULL;
+    frame->soac_checked_activation = NULL;
 #ifdef Py_DEBUG
     frame->lltrace = 0;
 #endif

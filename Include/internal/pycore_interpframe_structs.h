@@ -62,7 +62,9 @@ struct _PyInterpreterFrame {
      * when execution ends, even if a Python traceback retains the frame. */
     unsigned int soac_dataclass_role;
     PyObject *soac_dataclass_invocation;
-    PyObject *soac_dataclass_checked_activation;
+    /* One mutually exclusive generated-dataclass or interpreter activation.
+     * This metadata edge retires before ordinary escaped-frame promotion. */
+    PyObject *soac_checked_activation;
 #if !defined(Py_GIL_DISABLED) && defined(Py_STACKREF_DEBUG)
     /* Diagnostic-only borrowed view of f_executable. Signal/watchdog dumps
      * cannot consult the mutable debug handle table or an attached tstate.

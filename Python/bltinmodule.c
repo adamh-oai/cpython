@@ -8,6 +8,7 @@
 #include "pycore_compile.h"       // _PyAST_Compile()
 #include "pycore_fileutils.h"     // _PyFile_Flush
 #include "pycore_floatobject.h"   // _PyFloat_ExactDealloc()
+#include "pycore_function.h"      // actual native interpreter owner discriminator
 #include "pycore_interp.h"        // _PyInterpreterState_GetConfig()
 #include "pycore_long.h"          // _PyLong_CompactValue
 #include "pycore_modsupport.h"    // _PyArg_NoKwnames()
@@ -16,6 +17,8 @@
 #include "pycore_pystate.h"       // _PyThreadState_GET()
 #include "pycore_pythonrun.h"     // _Py_SourceAsString()
 #include "pycore_soac_dataclass.h" // Native builtin creation witnesses
+#include "pycore_soac_interpreter.h" // explicit actual source class edge
+#include "pycore_soac_type.h"        // same constructor with native C support
 #include "pycore_tuple.h"         // _PyTuple_Recycle()
 
 #include "clinic/bltinmodule.c.h"
@@ -245,14 +248,40 @@ PySoac_FinishClass(PyObject *name, PyObject *cell, PyObject *cls)
     return 0;
 }
 
-/* AC: cannot convert yet, waiting for *args support */
+static int
+interpreter_build_class_error(const char *message)
+{
+    if (!PyErr_Occurred()) {
+        PyObject *error = PySoac_GetStrictRuntimeUnavailableError();
+        if (error != NULL) {
+            PyErr_SetString(error, message);
+        }
+    }
+    return -1;
+}
+
+static void
+interpreter_build_class_clear_metadata(PyObject **slot)
+{
+    PyObject *object = *slot;
+    *slot = NULL;
+    PyObject *pending = PyErr_GetRaisedException();
+    PyErr_SetRaisedException(Py_XNewRef(pending));
+    Py_XDECREF(object);
+    PyErr_SetRaisedException(pending);
+}
+
+/* One shared implementation: public/C calls pass no source context. Only an
+ * actual opcode-dispatched unchanged builtin carries its frozen parent view. */
 static PyObject *
-builtin___build_class__(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
-                        PyObject *kwnames)
+builtin_build_class_with_source(
+    PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames,
+    const PySoacInterpreterFrameViewV1 *source_parent)
 {
     PyObject *func, *name, *winner, *prep;
     PyObject *cls = NULL, *cell = NULL, *ns = NULL, *meta = NULL, *orig_bases = NULL;
     PyObject *mkw = NULL, *bases = NULL;
+    PyObject *namespace_state = NULL, *construction_handle = NULL;
     int isclass = 0;   /* initialize to prevent gcc warning */
 
     if (nargs < 2) {
@@ -351,15 +380,57 @@ builtin___build_class__(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
     }
     PyThreadState *tstate = _PyThreadState_GET();
     EVAL_CALL_STAT_INC(EVAL_CALL_BUILD_CLASS);
-    cell = _PyEval_Vector(tstate, (PyFunctionObject *)func, ns, NULL, 0, NULL);
+    int source_namespace = source_parent != NULL &&
+        ((PyFunctionObject *)func)->func_soac_strict_owner_state ==
+            FUNC_SOAC_OWNER_INTERPRETER_ATTACHED;
+    if (source_namespace) {
+        const _PySoacInterpreterEntryV1 entry = {
+            .kind = Py_SOAC_INTERPRETER_CLASS_NAMESPACE,
+            .boundary_snapshot = 0,
+            .subject_owner = ((PyFunctionObject *)func)->func_soac_strict_owner,
+            .parent = source_parent,
+            .namespace_state_out = &namespace_state,
+        };
+        cell = _PySOAC_InterpreterEvalVector(
+            tstate, (PyFunctionObject *)func, ns, NULL, 0, NULL, &entry);
+        if (cell != NULL && namespace_state == NULL) {
+            interpreter_build_class_error("class namespace did not transfer its completed state");
+            goto error;
+        }
+    }
+    else {
+        cell = _PyEval_Vector(tstate, (PyFunctionObject *)func, ns, NULL, 0, NULL);
+    }
     if (cell != NULL) {
         if (bases != orig_bases) {
             if (PyMapping_SetItemString(ns, "__orig_bases__", orig_bases) < 0) {
                 goto error;
             }
         }
-        PyObject *margs[3] = {name, bases, ns};
-        cls = PyObject_VectorcallDict(meta, margs, 3, mkw);
+        if (source_namespace) {
+            if (tstate->interp->soac.interpreter_closed ||
+                tstate->interp->soac.interpreter_callbacks.abi_version !=
+                    Py_SOAC_INTERPRETER_ABI_V1) {
+                interpreter_build_class_error("interpreter class preparation is unavailable");
+                goto error;
+            }
+            int status = tstate->interp->soac.interpreter_callbacks.prepare_type(
+                namespace_state, source_parent, func, meta, name, bases, ns, mkw,
+                &construction_handle);
+            if (status != 0 || PyErr_Occurred()) {
+                interpreter_build_class_error("interpreter class preparation failed");
+                goto error;
+            }
+        }
+        if (construction_handle != NULL) {
+            cls = _PySOAC_TypeFromInterpreterConstructionHandle(
+                construction_handle, func, meta, name, bases, ns, mkw);
+        }
+        else {
+            /* Explicit decline is before any protected type installation. */
+            PyObject *margs[3] = {name, bases, ns};
+            cls = PyObject_VectorcallDict(meta, margs, 3, mkw);
+        }
         if (cls != NULL && PyType_Check(cls) && PyCell_Check(cell)) {
             PyObject *cell_cls = PyCell_GetRef((PyCellObject *)cell);
             if (cell_cls != cls) {
@@ -383,6 +454,10 @@ builtin___build_class__(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
         }
     }
 error:
+    /* Any handle-borrowed operand views were unpublished by its private
+     * consume interval. Retire metadata before the unchanged C owner cleanup. */
+    interpreter_build_class_clear_metadata(&construction_handle);
+    interpreter_build_class_clear_metadata(&namespace_state);
     Py_XDECREF(cell);
     Py_XDECREF(ns);
     Py_XDECREF(meta);
@@ -392,6 +467,98 @@ error:
     }
     Py_DECREF(bases);
     return cls;
+}
+
+/* AC: cannot convert yet, waiting for *args support */
+static PyObject *
+builtin___build_class__(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                        PyObject *kwnames)
+{
+    return builtin_build_class_with_source(self, args, nargs, kwnames, NULL);
+}
+
+static int
+interpreter_is_native_build_class(PyObject *callable)
+{
+    return _PyCFunction_HasDefaultVectorcall(callable) &&
+        PyCFunction_GET_FLAGS(callable) == (METH_FASTCALL | METH_KEYWORDS) &&
+        PyCFunction_GET_FUNCTION(callable) == _PyCFunction_CAST(builtin___build_class__);
+}
+
+/* Mirror only the native METH_FASTCALL|METH_KEYWORDS C entry protocol:
+ * same recursion enter/leave, no wrapper function or duplicated argv owners.
+ * Outer vectorcall/ObjectCall paths retain their actual result-check order. */
+static PyObject *
+interpreter_call_build_class(
+    PyObject *callable, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames,
+    const PySoacInterpreterFrameViewV1 *parent)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    if (_Py_EnterRecursiveCallTstate(tstate, " while calling a Python object")) {
+        return NULL;
+    }
+    PyObject *result = builtin_build_class_with_source(
+        PyCFunction_GET_SELF(callable), args, nargs, kwnames, parent);
+    _Py_LeaveRecursiveCallTstate(tstate);
+    return result;
+}
+
+PyObject *
+_PySOAC_InterpreterBuildClassFromFrame(
+    _PyInterpreterFrame *parent, const _Py_CODEUNIT *instruction,
+    PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kwnames)
+{
+    if (!interpreter_is_native_build_class(callable)) {
+        return _PySOAC_DataclassVectorcallFromFrame(parent, callable, args, nargsf, kwnames);
+    }
+    PySoacInterpreterFrameViewV1 view;
+    int selected = _PySOAC_InterpreterParentView(parent, instruction, &view);
+    if (selected <= 0) {
+        return selected < 0 ? NULL
+            : _PySOAC_DataclassVectorcallFromFrame(parent, callable, args, nargsf, kwnames);
+    }
+    PyObject *result = interpreter_call_build_class(
+        callable, args, PyVectorcall_NARGS(nargsf), kwnames, &view);
+    view.self = NULL;
+    return _Py_CheckFunctionResult(_PyThreadState_GET(), callable, result, NULL);
+}
+
+PyObject *
+_PySOAC_InterpreterObjectCallFromFrame(
+    _PyInterpreterFrame *parent, const _Py_CODEUNIT *instruction,
+    PyObject *callable, PyObject *args, PyObject *kwargs)
+{
+    if (!interpreter_is_native_build_class(callable)) {
+        return _PySOAC_DataclassObjectCallFromFrame(parent, callable, args, kwargs);
+    }
+    PySoacInterpreterFrameViewV1 view;
+    int selected = _PySOAC_InterpreterParentView(parent, instruction, &view);
+    if (selected <= 0) {
+        return selected < 0 ? NULL
+            : _PySOAC_DataclassObjectCallFromFrame(parent, callable, args, kwargs);
+    }
+    /* Exact _PyVectorcall_Call unpack/free/result-check order. Public C entry
+     * remains context-free; only this real opcode edge supplies parent. */
+    Py_ssize_t nargs = PyTuple_GET_SIZE(args);
+    if (kwargs == NULL || PyDict_GET_SIZE(kwargs) == 0) {
+        PyObject *result = interpreter_call_build_class(
+            callable, _PyTuple_ITEMS(args), nargs, NULL, &view);
+        view.self = NULL;
+        return result;
+    }
+    PyThreadState *tstate = _PyThreadState_GET();
+    PyObject *kwnames;
+    PyObject *const *arguments = _PyStack_UnpackDict(
+        tstate, _PyTuple_ITEMS(args), nargs, kwargs, &kwnames);
+    if (arguments == NULL) {
+        view.self = NULL;
+        return NULL;
+    }
+    PyObject *result = interpreter_call_build_class(
+        callable, arguments, nargs, kwnames, &view);
+    view.self = NULL;
+    _PyStack_UnpackDict_Free(arguments, nargs, kwnames);
+    return _Py_CheckFunctionResult(tstate, callable, result, NULL);
 }
 
 PyDoc_STRVAR(build_class_doc,

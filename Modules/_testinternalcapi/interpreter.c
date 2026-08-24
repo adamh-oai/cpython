@@ -83,6 +83,10 @@ Test_EvalFrame(PyThreadState *tstate, _PyInterpreterFrame *frame, int throwflag)
     entry.frame.owner = FRAME_OWNED_BY_INTERPRETER;
     entry.frame.visited = 0;
     entry.frame.return_offset = 0;
+    /* Test trampoline is a provenance barrier, just like ceval's shim. */
+    entry.frame.soac_dataclass_role = 0;
+    entry.frame.soac_dataclass_invocation = NULL;
+    entry.frame.soac_checked_activation = NULL;
 #ifdef Py_DEBUG
     entry.frame.lltrace = 0;
 #endif

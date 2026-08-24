@@ -537,7 +537,7 @@ _PySOAC_DataclassVectorcallFromFrame(_PyInterpreterFrame *parent,
                                     PyObject *callable, PyObject *const *args,
                                     size_t nargsf, PyObject *kwnames)
 {
-    if (parent != NULL && parent->soac_dataclass_checked_activation != NULL &&
+    if (parent != NULL && parent->soac_checked_activation != NULL &&
         _PySOAC_DataclassHasValueSite(parent)) {
         return soac_dataclass_checked_value_call(
             parent, callable, args, PyVectorcall_NARGS(nargsf), kwnames);
@@ -620,7 +620,7 @@ _PySOAC_DataclassObjectCallFromFrame(_PyInterpreterFrame *parent,
                                     PyObject *kwargs)
 {
     int checked_site = parent != NULL &&
-        parent->soac_dataclass_checked_activation != NULL &&
+        parent->soac_checked_activation != NULL &&
         _PySOAC_DataclassHasValueSite(parent);
     if (!checked_site && (parent == NULL || parent->soac_dataclass_invocation == NULL ||
         (!soac_dataclass_direct_python_callable(callable) &&

@@ -13,7 +13,7 @@ _PyFrame_Traverse(_PyInterpreterFrame *frame, visitproc visit, void *arg)
     Py_VISIT(frame->frame_obj);
     Py_VISIT(frame->f_locals);
     Py_VISIT(frame->soac_dataclass_invocation);
-    Py_VISIT(frame->soac_dataclass_checked_activation);
+    Py_VISIT(frame->soac_checked_activation);
     if (_PyFrame_IsSoacLifetime(frame)) {
         if (frame->soac_lifetime_owned_environment & SOAC_LIFETIME_OWNS_GLOBALS) {
             Py_VISIT(frame->f_globals);
@@ -138,7 +138,7 @@ _PyFrame_ClearExceptCode(_PyInterpreterFrame *frame)
     assert(_PyThreadState_GET()->current_frame != frame);
     frame->soac_dataclass_role = 0;
     Py_CLEAR(frame->soac_dataclass_invocation);
-    Py_CLEAR(frame->soac_dataclass_checked_activation);
+    _PySOAC_CheckedFrameClear(frame, Py_SOAC_INTERPRETER_FRAME_CLEARED);
     if (frame->frame_obj) {
         PyFrameObject *f = frame->frame_obj;
         frame->frame_obj = NULL;

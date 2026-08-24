@@ -102,12 +102,6 @@ func_soac_mutation_error(const char *message)
     }
 }
 
-enum {
-    FUNC_SOAC_OWNER_NONE,
-    FUNC_SOAC_OWNER_ATTACHED,
-    FUNC_SOAC_OWNER_TERMINAL,
-};
-
 static void
 func_soac_runtime_error(const char *message)
 {
@@ -258,7 +252,7 @@ func_set_soac_strict_owner(PyObject *object, PyObject *owner,
                         "strict source owner requires a nonzero identity");
         return -1;
     }
-    if (func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_ATTACHED) {
+    if (_PyFunction_HasSoacStrictOwner(func)) {
         if (func->func_soac_strict_owner == owner &&
             (!has_identity || func->func_soac_source_owner_id == identity)) {
             return 0;
@@ -314,7 +308,7 @@ PyFunction_MarkSoacRequiredBoundary(PyObject *object, PyObject *owner)
     }
     PyFunctionObject *func = (PyFunctionObject *)object;
     if (owner == NULL ||
-        func->func_soac_strict_owner_state != FUNC_SOAC_OWNER_ATTACHED ||
+        !_PyFunction_HasSoacStrictOwner(func) ||
         func->func_soac_strict_owner != owner) {
         func_soac_runtime_error("required strict boundary needs its attached live function owner");
         return -1;
@@ -347,7 +341,7 @@ PySoac_CloneAnnotationReplayCode(PyObject *provider, PyObject *expected_owner,
     PyFunctionObject *func = (PyFunctionObject *)provider;
     PyCodeObject *code = (PyCodeObject *)verified_code;
     if (expected_owner == NULL ||
-        func->func_soac_strict_owner_state != FUNC_SOAC_OWNER_ATTACHED ||
+        !_PyFunction_HasSoacStrictOwner(func) ||
         func->func_soac_strict_owner != expected_owner ||
         func->func_code != verified_code ||
         code->_co_soac_strict_source_id == 0 ||
@@ -363,7 +357,7 @@ PySoac_CloneAnnotationReplayCode(PyObject *provider, PyObject *expected_owner,
     Py_INCREF(code);
     PyObject *result = _PyCode_CloneSoacAnnotationReplay(code);
     if (result != NULL &&
-        (func->func_soac_strict_owner_state != FUNC_SOAC_OWNER_ATTACHED ||
+        (!_PyFunction_HasSoacStrictOwner(func) ||
          func->func_soac_strict_owner != expected_owner ||
          func->func_code != verified_code)) {
         Py_DECREF(code);
@@ -463,7 +457,7 @@ _PyFunction_FromConstructor(PyFrameConstructor *constr)
 
 static PyObject *
 func_new_with_qualname(PyObject *code, PyObject *globals, PyObject *qualname,
-                       _PyInterpreterFrame *producer)
+                       _PyInterpreterFrame *producer, const _Py_CODEUNIT *this_instr)
 {
     assert(globals != NULL);
     assert(PyDict_Check(globals));
@@ -564,6 +558,17 @@ func_new_with_qualname(PyObject *code, PyObject *globals, PyObject *qualname,
     }
     Py_XDECREF(record);
     record = NULL;
+    if (_PySOAC_InterpreterBirth(producer, this_instr, op) < 0) {
+        /* No CREATE event has been emitted. Do not free a function directly:
+         * a malformed trusted callback may have observed it. Tombstone first,
+         * then release only the constructor's existing owner. */
+        PyObject *exception = PyErr_GetRaisedException();
+        op->func_soac_strict_owner_state = FUNC_SOAC_OWNER_TERMINAL;
+        _PyObject_GC_TRACK(op);
+        Py_DECREF(op);
+        PyErr_SetRaisedException(exception);
+        return NULL;
+    }
     if (((code_obj->co_flags & CO_NESTED) == 0) ||
         (code_obj->co_flags & CO_METHOD)) {
         // Use deferred reference counting for top-level functions, but not
@@ -593,14 +598,14 @@ error:
 PyObject *
 PyFunction_NewWithQualName(PyObject *code, PyObject *globals, PyObject *qualname)
 {
-    return func_new_with_qualname(code, globals, qualname, NULL);
+    return func_new_with_qualname(code, globals, qualname, NULL, NULL);
 }
 
 PyObject *
 _PySOAC_FunctionFromFrame(PyObject *code, PyObject *globals,
-                         _PyInterpreterFrame *producer)
+                         _PyInterpreterFrame *producer, const _Py_CODEUNIT *this_instr)
 {
-    return func_new_with_qualname(code, globals, NULL, producer);
+    return func_new_with_qualname(code, globals, NULL, producer, this_instr);
 }
 
 /*

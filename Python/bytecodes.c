@@ -315,6 +315,16 @@ dummy_func(
         macro(STORE_FAST) = _SWAP_FAST + POP_TOP;
 
         replicate(8) op(_SWAP_FAST, (value -- trash)) {
+            if (frame->soac_checked_activation != NULL) {
+                /* Tier one's actual opcode prologue has saved this native
+                 * instruction before any callback. Capture it once. */
+                const _Py_CODEUNIT *soac_instr = frame->instr_ptr;
+                int checked = _PySOAC_InterpreterDefinitionStore(
+                    frame, soac_instr, 0, PyStackRef_AsPyObjectBorrow(value));
+                if (checked < 0) {
+                    ERROR_NO_POP();
+                }
+            }
             _PyStackRef tmp = GETLOCAL(oparg);
             GETLOCAL(oparg) = value;
             DEAD(value);
@@ -326,6 +336,14 @@ dummy_func(
         };
 
         inst(STORE_FAST_LOAD_FAST, (value1 -- value2)) {
+            if (frame->soac_checked_activation != NULL) {
+                const _Py_CODEUNIT *soac_instr = frame->instr_ptr;
+                int checked = _PySOAC_InterpreterDefinitionStore(
+                    frame, soac_instr, 0, PyStackRef_AsPyObjectBorrow(value1));
+                if (checked < 0) {
+                    ERROR_NO_POP();
+                }
+            }
             uint32_t oparg1 = oparg >> 4;
             uint32_t oparg2 = oparg & 15;
             _PyStackRef tmp = GETLOCAL(oparg1);
@@ -336,12 +354,29 @@ dummy_func(
         }
 
         inst(STORE_FAST_STORE_FAST, (value2, value1 --)) {
+            const _Py_CODEUNIT *soac_instr = frame->instr_ptr;
+            if (frame->soac_checked_activation != NULL) {
+                int checked = _PySOAC_InterpreterDefinitionStore(
+                    frame, soac_instr, 0, PyStackRef_AsPyObjectBorrow(value1));
+                if (checked < 0) {
+                    ERROR_NO_POP();
+                }
+            }
             uint32_t oparg1 = oparg >> 4;
             uint32_t oparg2 = oparg & 15;
             _PyStackRef tmp = GETLOCAL(oparg1);
             GETLOCAL(oparg1) = value1;
             DEAD(value1);
             PyStackRef_XCLOSE(tmp);
+            /* Lane zero publishes and closes its old owner before lane one's
+             * callback. A rejected second lane does not undo lane zero. */
+            if (frame->soac_checked_activation != NULL) {
+                int checked = _PySOAC_InterpreterDefinitionStore(
+                    frame, soac_instr, 1, PyStackRef_AsPyObjectBorrow(value2));
+                if (checked < 0) {
+                    ERROR_NO_POP();
+                }
+            }
             tmp = GETLOCAL(oparg2);
             GETLOCAL(oparg2) = value2;
             DEAD(value2);
@@ -1095,6 +1130,8 @@ dummy_func(
             assert(PyFunction_Check(getitem_o));
             uint32_t cached_version = FT_ATOMIC_LOAD_UINT32_RELAXED(ht->_spec_cache.getitem_version);
             DEOPT_IF(((PyFunctionObject *)getitem_o)->func_version != cached_version);
+            DEOPT_IF(((PyFunctionObject *)getitem_o)->func_soac_strict_owner_state ==
+                     FUNC_SOAC_OWNER_INTERPRETER_ATTACHED);
             PyCodeObject *code = (PyCodeObject *)PyFunction_GET_CODE(getitem_o);
             assert(code->co_argcount == 2);
             DEOPT_IF(!_PyThreadState_HasStackSpace(tstate, code->co_framesize));
@@ -1273,7 +1310,28 @@ dummy_func(
         // The stack effect here is a bit misleading.
         // retval is popped from the stack, but res
         // is pushed to a different frame, the callers' frame.
-        inst(RETURN_VALUE, (retval -- res)) {
+        op(_CHECK_SOAC_RETURN, (retval -- retval)) {
+#if TIER_ONE
+            if (frame->soac_checked_activation != NULL) {
+                const _Py_CODEUNIT *soac_instr = frame->instr_ptr;
+                int checked = _PySOAC_CheckedFrameReturn(
+                    frame, soac_instr, PyStackRef_AsPyObjectBorrow(retval));
+                if (checked < 0) {
+                    goto soac_return_error;
+                }
+            }
+#endif
+        }
+
+        op(_RETURN_VALUE, (retval -- res)) {
+#if TIER_ONE
+            if (frame->soac_checked_activation != NULL) {
+                int checked = _PySOAC_CheckedFrameReturnCommit(frame);
+                if (checked < 0) {
+                    goto soac_return_error;
+                }
+            }
+#endif
             assert(frame->owner != FRAME_OWNED_BY_INTERPRETER);
             _PyStackRef temp = PyStackRef_MakeHeapSafe(retval);
             DEAD(retval);
@@ -1290,6 +1348,8 @@ dummy_func(
             LLTRACE_RESUME_FRAME();
         }
 
+        macro(RETURN_VALUE) = _CHECK_SOAC_RETURN + _RETURN_VALUE;
+
         tier1 op(_RETURN_VALUE_EVENT, (val -- val)) {
             int err = _Py_call_instrumentation_arg(
                     tstate, PY_MONITORING_EVENT_PY_RETURN,
@@ -1298,8 +1358,9 @@ dummy_func(
         }
 
         macro(INSTRUMENTED_RETURN_VALUE) =
+            _CHECK_SOAC_RETURN +
             _RETURN_VALUE_EVENT +
-            RETURN_VALUE;
+            _RETURN_VALUE;
 
         inst(GET_AITER, (obj -- iter)) {
             unaryfunc getter = NULL;
@@ -1423,6 +1484,7 @@ dummy_func(
             PyGenObject *gen = (PyGenObject *)PyStackRef_AsPyObjectBorrow(receiver);
             DEOPT_IF(Py_TYPE(gen) != &PyGen_Type && Py_TYPE(gen) != &PyCoro_Type);
             DEOPT_IF(_PyGen_IsSoacManaged(gen));
+            DEOPT_IF(gen->gi_iframe.soac_checked_activation != NULL);
             DEOPT_IF(!gen_try_set_executing((PyGenObject *)gen));
             STAT_INC(SEND, hit);
             _PyInterpreterFrame *pushed_frame = &gen->gi_iframe;
@@ -1584,6 +1646,14 @@ dummy_func(
         }
 
         inst(STORE_NAME, (v -- )) {
+            if (frame->soac_checked_activation != NULL) {
+                const _Py_CODEUNIT *soac_instr = frame->instr_ptr;
+                int checked = _PySOAC_InterpreterDefinitionStore(
+                    frame, soac_instr, 0, PyStackRef_AsPyObjectBorrow(v));
+                if (checked < 0) {
+                    ERROR_NO_POP();
+                }
+            }
             PyObject *name = GETITEM(FRAME_CO_NAMES, oparg);
             PyObject *ns = LOCALS();
             int err;
@@ -1744,6 +1814,14 @@ dummy_func(
         }
 
         inst(STORE_GLOBAL, (v --)) {
+            if (frame->soac_checked_activation != NULL) {
+                const _Py_CODEUNIT *soac_instr = frame->instr_ptr;
+                int checked = _PySOAC_InterpreterDefinitionStore(
+                    frame, soac_instr, 0, PyStackRef_AsPyObjectBorrow(v));
+                if (checked < 0) {
+                    ERROR_NO_POP();
+                }
+            }
             PyObject *name = GETITEM(FRAME_CO_NAMES, oparg);
             int err = PyDict_SetItem(GLOBALS(), name, PyStackRef_AsPyObjectBorrow(v));
             PyStackRef_CLOSE(v);
@@ -1997,6 +2075,14 @@ dummy_func(
         }
 
         inst(STORE_DEREF, (v --)) {
+            if (frame->soac_checked_activation != NULL) {
+                const _Py_CODEUNIT *soac_instr = frame->instr_ptr;
+                int checked = _PySOAC_InterpreterDefinitionStore(
+                    frame, soac_instr, 0, PyStackRef_AsPyObjectBorrow(v));
+                if (checked < 0) {
+                    ERROR_NO_POP();
+                }
+            }
             PyCellObject *cell = (PyCellObject *)PyStackRef_AsPyObjectBorrow(GETLOCAL(oparg));
             PyCell_SetTakeRef(cell, PyStackRef_AsPyObjectSteal(v));
         }
@@ -2584,6 +2670,7 @@ dummy_func(
             assert((oparg & 1) == 0);
             assert(Py_IS_TYPE(fget, &PyFunction_Type));
             PyFunctionObject *f = (PyFunctionObject *)fget;
+            DEOPT_IF(f->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED);
             PyCodeObject *code = (PyCodeObject *)f->func_code;
             DEOPT_IF((code->co_flags & (CO_VARKEYWORDS | CO_VARARGS | CO_OPTIMIZED)) != CO_OPTIMIZED);
             DEOPT_IF(code->co_kwonlyargcount);
@@ -2618,6 +2705,7 @@ dummy_func(
             PyFunctionObject *f = (PyFunctionObject *)getattribute;
             assert(func_version != 0);
             DEOPT_IF(f->func_version != func_version);
+            DEOPT_IF(f->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED);
             PyCodeObject *code = (PyCodeObject *)f->func_code;
             assert(code->co_argcount == 2);
             DEOPT_IF(!_PyThreadState_HasStackSpace(tstate, code->co_framesize));
@@ -3014,7 +3102,8 @@ dummy_func(
         tier1 op(_JIT, (--)) {
         #ifdef _Py_TIER2
             _Py_BackoffCounter counter = this_instr[1].counter;
-            if (!IS_JIT_TRACING() && backoff_counter_triggers(counter) &&
+            if (frame->soac_checked_activation == NULL &&
+                !IS_JIT_TRACING() && backoff_counter_triggers(counter) &&
                 this_instr->op.code == JUMP_BACKWARD_JIT &&
                 next_instr->op.code != ENTER_EXECUTOR) {
                 /* Back up over EXTENDED_ARGs so executor is inserted at the correct place */
@@ -3087,7 +3176,8 @@ dummy_func(
             /* If the eval breaker is set then stay in tier 1.
              * This avoids any potentially infinite loops
              * involving _RESUME_CHECK */
-            if (_Py_atomic_load_uintptr_relaxed(&tstate->eval_breaker) & _PY_EVAL_EVENTS_MASK) {
+            if (frame->soac_checked_activation != NULL ||
+                (_Py_atomic_load_uintptr_relaxed(&tstate->eval_breaker) & _PY_EVAL_EVENTS_MASK)) {
                 opcode = executor->vm_data.opcode;
                 oparg = (oparg & ~255) | executor->vm_data.oparg;
                 next_instr = this_instr;
@@ -3496,6 +3586,7 @@ dummy_func(
             PyGenObject *gen = (PyGenObject *)PyStackRef_AsPyObjectBorrow(iter);
             DEOPT_IF(Py_TYPE(gen) != &PyGen_Type);
             DEOPT_IF(_PyGen_IsSoacManaged(gen));
+            DEOPT_IF(gen->gi_iframe.soac_checked_activation != NULL);
             DEOPT_IF(!gen_try_set_executing((PyGenObject *)gen));
             STAT_INC(FOR_ITER, hit);
             _PyInterpreterFrame *pushed_frame = &gen->gi_iframe;
@@ -3753,7 +3844,7 @@ dummy_func(
         specializing op(_SPECIALIZE_CALL, (counter/1, callable, self_or_null, unused[oparg] -- callable, self_or_null, unused[oparg])) {
             #if ENABLE_SPECIALIZATION
             if (ADAPTIVE_COUNTER_TRIGGERS(counter) &&
-                frame->soac_dataclass_checked_activation == NULL) {
+                frame->soac_checked_activation == NULL) {
                 next_instr = this_instr;
                 _Py_Specialize_Call(callable, self_or_null, next_instr, oparg + !PyStackRef_IsNull(self_or_null));
                 DISPATCH_SAME_OPARG();
@@ -3765,9 +3856,9 @@ dummy_func(
 
         op(_CHECK_NO_SOAC_GENERATED_ACTIVATION, (--)) {
             /* An ordinary FunctionType copy can warm this shared code first.
-             * Checked generated frames must still reach explicit call-site
+             * Checked frames must still reach their explicit call-site
              * dispatch; never inherit a copy's specialized builtin call. */
-            DEOPT_IF(frame->soac_dataclass_checked_activation != NULL);
+            DEOPT_IF(frame->soac_checked_activation != NULL);
         }
 
         op(_MAYBE_EXPAND_METHOD, (callable, self_or_null, unused[oparg] -- callable, self_or_null, unused[oparg])) {
@@ -3794,7 +3885,7 @@ dummy_func(
                 total_args++;
             }
             if (Py_TYPE(callable_o) == &PyFunction_Type &&
-                (frame->soac_dataclass_checked_activation == NULL ||
+                (frame->soac_checked_activation == NULL ||
                  !_PySOAC_DataclassHasValueSite(frame)) &&
                 !IS_PEP523_HOOKED(tstate) &&
                 _PySoacVMCall_IsRegisteredV1(callable_o)) {
@@ -3817,7 +3908,7 @@ dummy_func(
                 // commits this evaluator before any callback-capable binding.
                 _PyFrameEvalFunction eval_frame_before_binding;
                 if (Py_TYPE(callable_o) == &PyFunction_Type &&
-                    (frame->soac_dataclass_checked_activation == NULL ||
+                    (frame->soac_checked_activation == NULL ||
                      !_PySOAC_DataclassHasValueSite(frame)) &&
                     (eval_frame_before_binding = tstate->interp->eval_frame) == NULL &&
                     ((PyFunctionObject *)callable_o)->vectorcall == _PyFunction_Vectorcall)
@@ -3912,12 +4003,14 @@ dummy_func(
             EXIT_IF(!PyFunction_Check(callable_o));
             PyFunctionObject *func = (PyFunctionObject *)callable_o;
             EXIT_IF(func->func_version != func_version);
+            EXIT_IF(func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED);
         }
 
         tier2 op(_CHECK_FUNCTION_VERSION_INLINE, (func_version/2, callable_o/4 --)) {
             assert(PyFunction_Check(callable_o));
             PyFunctionObject *func = (PyFunctionObject *)callable_o;
             EXIT_IF(func->func_version != func_version);
+            EXIT_IF(func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED);
         }
 
         macro(CALL_PY_GENERAL) =
@@ -3938,6 +4031,8 @@ dummy_func(
             PyObject *func = ((PyMethodObject *)callable_o)->im_func;
             EXIT_IF(!PyFunction_Check(func));
             EXIT_IF(((PyFunctionObject *)func)->func_version != func_version);
+            EXIT_IF(((PyFunctionObject *)func)->func_soac_strict_owner_state ==
+                    FUNC_SOAC_OWNER_INTERPRETER_ATTACHED);
             EXIT_IF(!PyStackRef_IsNull(null));
         }
 
@@ -4214,6 +4309,7 @@ dummy_func(
             // Public vectorcall replacement invalidates the function version,
             // not this type-version cache. Check before allocating an instance.
             DEOPT_IF(init_func == NULL || init_func->vectorcall != _PyFunction_Vectorcall);
+            DEOPT_IF(init_func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED);
             PyCodeObject *code = (PyCodeObject *)init_func->func_code;
             DEOPT_IF(!_PyThreadState_HasStackSpace(tstate, code->co_framesize + _Py_InitCleanup.co_framesize));
             STAT_INC(CALL, hit);
@@ -4728,7 +4824,7 @@ dummy_func(
             }
             int positional_args = total_args - (int)PyTuple_GET_SIZE(kwnames_o);
             if (Py_TYPE(callable_o) == &PyFunction_Type &&
-                (frame->soac_dataclass_checked_activation == NULL ||
+                (frame->soac_checked_activation == NULL ||
                  !_PySOAC_DataclassHasValueSite(frame)) &&
                 !IS_PEP523_HOOKED(tstate) &&
                 _PySoacVMCall_IsRegisteredV1(callable_o)) {
@@ -4752,7 +4848,7 @@ dummy_func(
                 // commits this evaluator before any callback-capable binding.
                 _PyFrameEvalFunction eval_frame_before_binding;
                 if (Py_TYPE(callable_o) == &PyFunction_Type &&
-                    (frame->soac_dataclass_checked_activation == NULL ||
+                    (frame->soac_checked_activation == NULL ||
                      !_PySOAC_DataclassHasValueSite(frame)) &&
                     (eval_frame_before_binding = tstate->interp->eval_frame) == NULL &&
                     ((PyFunctionObject *)callable_o)->vectorcall == _PyFunction_Vectorcall)
@@ -4831,6 +4927,7 @@ dummy_func(
             EXIT_IF(!PyFunction_Check(callable_o));
             PyFunctionObject *func = (PyFunctionObject *)callable_o;
             EXIT_IF(func->func_version != func_version);
+            EXIT_IF(func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED);
         }
 
         macro(CALL_KW_PY) =
@@ -4850,6 +4947,8 @@ dummy_func(
             PyObject *func = ((PyMethodObject *)callable_o)->im_func;
             EXIT_IF(!PyFunction_Check(func));
             EXIT_IF(((PyFunctionObject *)func)->func_version != func_version);
+            EXIT_IF(((PyFunctionObject *)func)->func_soac_strict_owner_state ==
+                    FUNC_SOAC_OWNER_INTERPRETER_ATTACHED);
             EXIT_IF(!PyStackRef_IsNull(null));
         }
 
@@ -4878,7 +4977,7 @@ dummy_func(
         specializing op(_SPECIALIZE_CALL_KW, (counter/1, callable, self_or_null, unused[oparg], unused -- callable, self_or_null, unused[oparg], unused)) {
             #if ENABLE_SPECIALIZATION
             if (ADAPTIVE_COUNTER_TRIGGERS(counter) &&
-                frame->soac_dataclass_checked_activation == NULL) {
+                frame->soac_checked_activation == NULL) {
                 next_instr = this_instr;
                 _Py_Specialize_CallKw(callable, next_instr, oparg + !PyStackRef_IsNull(self_or_null));
                 DISPATCH_SAME_OPARG();
@@ -4970,7 +5069,7 @@ dummy_func(
             assert(!_PyErr_Occurred(tstate));
             if (opcode != INSTRUMENTED_CALL_FUNCTION_EX &&
                 Py_TYPE(func) == &PyFunction_Type &&
-                (frame->soac_dataclass_checked_activation == NULL ||
+                (frame->soac_checked_activation == NULL ||
                  !_PySOAC_DataclassHasValueSite(frame)) &&
                 !IS_PEP523_HOOKED(tstate) &&
                 _PySoacVMCall_IsRegisteredV1(func)) {
@@ -5012,8 +5111,8 @@ dummy_func(
                     if (err) {
                         ERROR_NO_POP();
                     }
-                    result_o = _PySOAC_DataclassObjectCallFromFrame(
-                        frame, func, callargs, kwargs);
+                    result_o = _PySOAC_InterpreterObjectCallFromFrame(
+                        frame, this_instr, func, callargs, kwargs);
 
                     if (!PyFunction_Check(func) && !PyMethod_Check(func)) {
                         if (result_o == NULL) {
@@ -5061,8 +5160,8 @@ dummy_func(
                     assert(PyTuple_CheckExact(callargs));
                     PyObject *kwargs = PyStackRef_AsPyObjectBorrow(kwargs_st);
                     assert(kwargs == NULL || PyDict_CheckExact(kwargs));
-                    result_o = _PySOAC_DataclassObjectCallFromFrame(
-                        frame, func, callargs, kwargs);
+                    result_o = _PySOAC_InterpreterObjectCallFromFrame(
+                        frame, this_instr, func, callargs, kwargs);
                 }
                 PyStackRef_XCLOSE(kwargs_st);
                 PyStackRef_CLOSE(callargs_st);
@@ -5076,7 +5175,7 @@ dummy_func(
         specializing op(_SPECIALIZE_CALL_FUNCTION_EX, (counter/1, func, unused, unused, unused -- func, unused, unused, unused)) {
         #if ENABLE_SPECIALIZATION
             if (ADAPTIVE_COUNTER_TRIGGERS(counter) &&
-                frame->soac_dataclass_checked_activation == NULL) {
+                frame->soac_checked_activation == NULL) {
                 next_instr = this_instr;
                 _Py_Specialize_CallFunctionEx(func, next_instr);
                 DISPATCH_SAME_OPARG();
@@ -5152,8 +5251,8 @@ dummy_func(
             assert(PyTuple_CheckExact(callargs));
             PyObject *kwargs = PyStackRef_AsPyObjectBorrow(kwargs_st);
             assert(kwargs == NULL || PyDict_CheckExact(kwargs));
-            PyObject *result_o = _PySOAC_DataclassObjectCallFromFrame(
-                frame, func, callargs, kwargs);
+            PyObject *result_o = _PySOAC_InterpreterObjectCallFromFrame(
+                frame, frame->instr_ptr, func, callargs, kwargs);
             PyStackRef_XCLOSE(kwargs_st);
             PyStackRef_CLOSE(callargs_st);
             DEAD(null);
@@ -5178,8 +5277,9 @@ dummy_func(
         inst(MAKE_FUNCTION, (codeobj_st -- func)) {
             PyObject *codeobj = PyStackRef_AsPyObjectBorrow(codeobj_st);
 
+            const _Py_CODEUNIT *soac_instr = frame->instr_ptr;
             PyFunctionObject *func_obj = (PyFunctionObject *)
-                _PySOAC_FunctionFromFrame(codeobj, GLOBALS(), frame);
+                _PySOAC_FunctionFromFrame(codeobj, GLOBALS(), frame, soac_instr);
 
             PyStackRef_CLOSE(codeobj_st);
             ERROR_IF(func_obj == NULL);
@@ -5199,15 +5299,28 @@ dummy_func(
                 DECREF_INPUTS();
                 ERROR_IF(true);
             }
+            const _Py_CODEUNIT *soac_instr = frame->instr_ptr;
             PyObject *attr = PyStackRef_AsPyObjectSteal(attr_st);
-            func_out = func_in;
-            DEAD(func_in);
             assert(PyFunction_Check(func));
             size_t offset = _Py_FunctionAttributeOffsets[oparg];
             assert(offset != 0);
             PyObject **ptr = (PyObject **)(((char *)func) + offset);
             assert(*ptr == NULL);
             *ptr = attr;
+            if (frame->soac_checked_activation != NULL) {
+                int err = _PySOAC_InterpreterFunctionAttribute(
+                    frame, soac_instr, (PyFunctionObject *)func,
+                    (uint32_t)oparg, attr);
+                if (err < 0) {
+                    /* attr has moved into the function; keep its actual
+                     * function input live for the ordinary error unwind. */
+                    ERROR_NO_POP();
+                }
+            }
+            /* The callback may replace attr: do not read that borrowed
+             * installed value again after the publication event. */
+            func_out = func_in;
+            DEAD(func_in);
         }
 
         inst(RETURN_GENERATOR, (-- res)) {
@@ -5899,6 +6012,31 @@ dummy_func(
             goto exception_unwind;
         }
 
+        spilled label(soac_return_error) {
+            assert(_PyErr_Occurred(tstate));
+            SAVE_STACK();
+            STOP_TRACING();
+            RELOAD_STACK();
+            assert(frame->owner != FRAME_OWNED_BY_INTERPRETER);
+            if (!_PyFrame_IsIncomplete(frame)) {
+                PyFrameObject *f = _PyFrame_GetFrameObject(frame);
+                if (f != NULL) {
+                    PyTraceBack_Here(f);
+                }
+            }
+            _PyEval_MonitorRaise(tstate, frame, next_instr-1);
+            /* No callee exception-table search: this is the returned value
+             * boundary, after source finally/handled-state retirement. The
+             * original result remains on the native stack and closes once. */
+            _PyStackRef *stackbase = _PyFrame_Stackbase(frame);
+            while (frame->stackpointer > stackbase) {
+                _PyStackRef ref = _PyFrame_StackPop(frame);
+                PyStackRef_XCLOSE(ref);
+            }
+            monitor_unwind(tstate, frame, next_instr-1);
+            goto exit_unwind;
+        }
+
         spilled label(exception_unwind) {
             SAVE_STACK();
             STOP_TRACING();
@@ -5910,6 +6048,10 @@ dummy_func(
             if (handled == 0) {
                 // No handlers, so exit.
                 assert(_PyErr_Occurred(tstate));
+                /* Completion runs only after native handlers/finally are
+                 * exhausted, while all remaining source operands still
+                 * have their original owners.  It preserves this error. */
+                _PySOAC_CheckedFrameFailed(frame, frame->instr_ptr);
                 /* Pop remaining stack entries. */
                 _PyStackRef *stackbase = _PyFrame_Stackbase(frame);
                 while (frame->stackpointer > stackbase) {
@@ -6023,6 +6165,7 @@ dummy_func(
             frame->instr_ptr = prev_instr;
             opcode = next_instr->op.code;
             bool stop_tracing = (
+                frame->soac_checked_activation != NULL ||
                 opcode == WITH_EXCEPT_START ||
                 opcode == RERAISE ||
                 opcode == CLEANUP_THROW ||
@@ -6087,6 +6230,7 @@ dummy_func(
  dispatch_opcode:
  error:
  exception_unwind:
+ soac_return_error:
  exit_unwind:
  handle_eval_breaker:
  resume_frame:
