@@ -6655,7 +6655,7 @@ type_update_dict(PyTypeObject *type, PyDictObject *dict, PyObject *name,
         ? _PyDict_SetItem_LockHeld(dict, name, value)
         : _PyDict_SetItemForSoacDataclassMember(
             (PyObject *)dict, name, value, member_operation,
-            PyType_GetSoacContractOwner((PyObject *)type));
+            _PySOAC_GetTypeConstructionOwner((PyObject *)type));
     if (result < 0) {
         if (member_operation != NULL) {
             /* A failed exact provenance/phase check is not a missing

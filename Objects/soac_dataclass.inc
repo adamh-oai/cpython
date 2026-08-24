@@ -59,6 +59,11 @@ typedef struct {
     PyObject *class_owner;
     PyObject *name;
     PyObject *function;
+    /* First-check destinations may become logically stale across callbacks.
+     * The mandatory second check clears/rederives them before use. Existing
+     * operation operands provide support; no new owner or function/code pin. */
+    uint64_t *pending_birth;
+    uint64_t pending_identity;
     int finished;
 } SoacDataclassMember;
 
@@ -999,6 +1004,8 @@ soac_dataclass_member_traverse(SoacDataclassMember *member, visitproc visit, voi
 static int
 soac_dataclass_member_clear(SoacDataclassMember *member)
 {
+    member->pending_birth = NULL;
+    member->pending_identity = 0;
     if (!member->finished && member->invocation != NULL) {
         member->finished = 1;
         soac_dataclass_expire(member->invocation, SOAC_DC_FAILED);
@@ -1098,6 +1105,8 @@ _PySOAC_DataclassBeginMember(PyObject *object, PyObject *actual_type,
     member->class_owner = Py_NewRef(class_owner);
     member->name = Py_NewRef(name);
     member->function = Py_NewRef(function);
+    member->pending_birth = NULL;
+    member->pending_identity = 0;
     member->finished = 0;
     PyObject_GC_Track(member);
     /* Metadata is permanent BEFORE a dictionary watcher can observe the
@@ -1140,6 +1149,69 @@ _PySOAC_DataclassCheckMember(PyObject *object, PyObject *actual_type,
                                           class_owner, name, function, member->record);
 }
 
+int
+_PySOAC_DataclassPendingMemberCheck(PyObject *object, PyObject *dict,
+                                    PyObject *name, PyObject *function,
+                                    PyObject *owner)
+{
+    if (object == NULL || !Py_IS_TYPE(object, &SoacDataclassMember_Type)) {
+        return soac_dataclass_error("expected a native pending member operation");
+    }
+    SoacDataclassMember *member = (SoacDataclassMember *)object;
+    /* Never dereference a target saved before an equality/watcher callback. */
+    member->pending_birth = NULL;
+    member->pending_identity = 0;
+    if (_PySOAC_DataclassCheckMember(object, member->actual_type,
+                                     owner, name, function) < 0) return -1;
+    uint64_t *target = NULL;
+    int selected = _PySOAC_PendingTypeMemberTarget(
+        member->actual_type, owner, member->invocation->pending_type_root,
+        dict, name, member->record->role, &target);
+    if (selected < 0) {
+        return soac_dataclass_fail(member->invocation,
+                                   "pending member native state changed");
+    }
+    if (selected == 1) {
+        member->pending_birth = target;
+        member->pending_identity = member->record->identity;
+    }
+    return selected;
+}
+
+void
+_PySOAC_DataclassPendingMemberCommit(PyObject *object)
+{
+    assert(object != NULL && Py_IS_TYPE(object, &SoacDataclassMember_Type));
+    SoacDataclassMember *member = (SoacDataclassMember *)object;
+    assert(!member->finished && member->pending_identity != 0 &&
+           member->record->phase == SOAC_DC_RECORD_CONSUMING &&
+           member->record->identity == member->pending_identity);
+    if (member->pending_birth != NULL) {
+        *member->pending_birth = member->pending_identity;
+    }
+    member->record->phase = SOAC_DC_RECORD_INSTALLED;
+    member->pending_birth = NULL;
+    member->pending_identity = 0;
+}
+
+int
+_PySOAC_DataclassMatchesInstalledHook(PyObject *object, uint64_t birth,
+                                      unsigned int role)
+{
+    if (object == NULL || !PyFunction_Check(object) || birth == 0 ||
+        (role != Py_SOAC_DATACLASS_FROZEN_SETATTR &&
+         role != Py_SOAC_DATACLASS_FROZEN_DELATTR)) return 0;
+    PyFunctionObject *function = (PyFunctionObject *)object;
+    SoacDataclassRecord *record = soac_dataclass_record(function);
+    if (record == NULL) return PyErr_Occurred() ? -1 : 0;
+    /* COMPLETE may retain its immutable installed record, but no active
+     * invocation/type owner is recovered or granted by this comparison. */
+    return record->identity == birth && record->role == role &&
+        record->phase == SOAC_DC_RECORD_INSTALLED &&
+        function->func_soac_strict_id == birth &&
+        soac_dataclass_original_code(record, function);
+}
+
 void
 _PySOAC_DataclassFinishMember(PyObject *object, int succeeded)
 {
@@ -1147,6 +1219,8 @@ _PySOAC_DataclassFinishMember(PyObject *object, int succeeded)
         return;
     }
     SoacDataclassMember *member = (SoacDataclassMember *)object;
+    member->pending_birth = NULL;
+    member->pending_identity = 0;
     if (member->finished || member->invocation == NULL) {
         return;
     }

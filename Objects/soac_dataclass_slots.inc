@@ -113,9 +113,21 @@ _PySOAC_DataclassValidateCopiedHook(_PySoacDataclassSlotsContext *context,
                                          "replacement cannot copy an unsupported attribute hook");
     }
     PyTypeObject *original = (PyTypeObject *)context->arguments[4];
-    PyObject *installed = PyDict_GetItemWithError(original->tp_dict, name);
+    uint64_t birth = 0;
+    int pending = _PySOAC_PendingTypeCopiedHook(
+        (PyObject *)original, context->invocation->pending_type_root,
+        name, function, &birth);
+    if (pending < 0) {
+        return _PySOAC_DataclassFailSlots(context,
+                                         "pending copied hook is not an exact native publication");
+    }
+    /* Legacy permanent namespaces are already normalized. Pending namespaces
+     * use only the callback-free stored-entry scan above, never key equality. */
+    PyObject *installed = pending ? function
+        : PyDict_GetItemWithError(original->tp_dict, name);
     SoacDataclassRecord *record = soac_dataclass_record((PyFunctionObject *)function);
     if (installed != function || record == NULL ||
+        (pending && record->identity != birth) ||
         record->invocation != context->invocation || record->role != role ||
         record->phase != SOAC_DC_RECORD_INSTALLED ||
         ((PyFunctionObject *)function)->func_soac_strict_id == 0 ||
@@ -123,6 +135,21 @@ _PySOAC_DataclassValidateCopiedHook(_PySoacDataclassSlotsContext *context,
         return _PySOAC_DataclassFailSlots(context,
                                          "replacement hook is not this invocation's installed frozen member");
     }
+    return 0;
+}
+
+int
+_PySOAC_DataclassCopiedHookBirth(_PySoacDataclassSlotsContext *context,
+                                 PyObject *name, PyObject *function,
+                                 uint64_t *birth_out)
+{
+    *birth_out = 0;
+    if (_PySOAC_DataclassValidateCopiedHook(context, name, function) < 0) return -1;
+    SoacDataclassRecord *record = soac_dataclass_record((PyFunctionObject *)function);
+    if (record == NULL) {
+        return _PySOAC_DataclassFailSlots(context, "copied hook creation is unavailable");
+    }
+    *birth_out = record->identity;
     return 0;
 }
 

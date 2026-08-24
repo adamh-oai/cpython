@@ -66,6 +66,11 @@ struct SoacTypeContract {
      * frozen hooks cannot change. Cleared before Ready or any failure release. */
     PyObject *initial_frozen_setattr;
     PyObject *initial_frozen_delattr;
+    /* Pending hooks carry only immutable native birth identities. The actual
+     * current dictionary value must still prove its same creation record,
+     * role, code and installed phase; pointer/name/strict-ID alone never match. */
+    uint64_t pending_frozen_setattr_birth;
+    uint64_t pending_frozen_delattr_birth;
     uint32_t flags;
     uint32_t dictionary_mode;
     int sealed;
@@ -438,6 +443,8 @@ soac_state_clear(SoacTypeContract *state)
     state->type = NULL;
     state->initial_frozen_setattr = NULL;
     state->initial_frozen_delattr = NULL;
+    state->pending_frozen_setattr_birth = 0;
+    state->pending_frozen_delattr_birth = 0;
     Py_CLEAR(state->owner);
     Py_CLEAR(state->annotation_provider);
     Py_CLEAR(state->fields);
@@ -825,6 +832,8 @@ soac_class_dictionary_policy(PyObject *owner, PyObject *dict, PyObject *key,
         state->type = NULL;
         state->initial_frozen_setattr = NULL;
         state->initial_frozen_delattr = NULL;
+        state->pending_frozen_setattr_birth = 0;
+        state->pending_frozen_delattr_birth = 0;
         return 0;
     }
     if (operation == PyDict_SOAC_VALIDATE_INITIAL) {
@@ -832,6 +841,26 @@ soac_class_dictionary_policy(PyObject *owner, PyObject *dict, PyObject *key,
          * earlier input dict: allocations may have run unrelated GC callbacks. */
         if (soac_object_slot_name_index(state, key) >= 0) {
             return soac_validate_existing_slot_descriptor(state, key, value);
+        }
+        if (!state->sealed && state->construction != NULL &&
+            value != NULL && key != NULL && PyUnicode_CheckExact(key)) {
+            unsigned int role = _PyUnicode_Equal(key, &_Py_ID(__setattr__))
+                ? Py_SOAC_DATACLASS_FROZEN_SETATTR
+                : _PyUnicode_Equal(key, &_Py_ID(__delattr__))
+                    ? Py_SOAC_DATACLASS_FROZEN_DELATTR : 0;
+            uint64_t birth = role == Py_SOAC_DATACLASS_FROZEN_SETATTR
+                ? state->pending_frozen_setattr_birth
+                : role == Py_SOAC_DATACLASS_FROZEN_DELATTR
+                    ? state->pending_frozen_delattr_birth : 0;
+            if (birth != 0) {
+                int match = _PySOAC_DataclassMatchesInstalledHook(value, birth, role);
+                if (match < 0) return -1;
+                if (match != 1) {
+                    return soac_type_state_error("pending frozen hook creation changed");
+                }
+                return soac_contract_live(state) < 0
+                    ? -1 : soac_final_override(state->type, key);
+            }
         }
         if (!state->sealed && value != NULL && key != NULL &&
             PyUnicode_CheckExact(key) &&
@@ -1104,6 +1133,64 @@ failed_binding:
     return -1;
 }
 
+/* Pending namespaces remain ordinary dictionaries until final admission.
+ * Look only at existing entries and their stored hashes: an arbitrary key's
+ * equality/hash may mutate either supporting dictionary and release a hook.
+ * A non-exact colliding key is an explicit unavailable proof, not permission
+ * to normalize the dictionary early or call its equality for classification. */
+static int
+soac_pending_stored_hook(PyTypeObject *type, PyObject *name, PyObject **out)
+{
+    *out = NULL;
+    if (type->tp_dict == NULL || !PyDict_CheckExact(type->tp_dict) ||
+        name == NULL || !PyUnicode_CheckExact(name)) {
+        return soac_type_state_error("pending frozen hook dictionary is unavailable");
+    }
+    Py_hash_t wanted_hash = _PyObject_HashFast(name);  /* exact native name only */
+    if (wanted_hash == -1) return -1;
+    Py_ssize_t position = 0;
+    PyObject *key, *value;
+    Py_hash_t stored_hash;
+    while (_PyDict_Next(type->tp_dict, &position, &key, &value, &stored_hash)) {
+        if (stored_hash != wanted_hash) continue;
+        if (!PyUnicode_CheckExact(key)) {
+            if (!PyErr_Occurred()) {
+                PyObject *error = PySoac_GetStrictRuntimeUnavailableError();
+                if (error != NULL) {
+                    PyErr_SetString(error,
+                        "pending frozen hook has an ambiguous non-exact stored key");
+                }
+            }
+            return -1;
+        }
+        if (_PyUnicode_Equal(key, name)) *out = value;
+    }
+    return 0;
+}
+
+static int
+soac_pending_copy_hook_births(PyTypeObject *type, SoacTypeContract *state,
+                              _PySoacDataclassSlotsContext *context, int initial)
+{
+    PyObject *names[] = {&_Py_ID(__setattr__), &_Py_ID(__delattr__)};
+    uint64_t *destinations[] = {&state->pending_frozen_setattr_birth,
+                               &state->pending_frozen_delattr_birth};
+    for (size_t i = 0; i < Py_ARRAY_LENGTH(names); ++i) {
+        PyObject *current = NULL;
+        uint64_t birth = 0;
+        if (soac_pending_stored_hook(type, names[i], &current) < 0 ||
+            (current != NULL &&
+             _PySOAC_DataclassCopiedHookBirth(context, names[i], current, &birth) < 0)) {
+            return -1;
+        }
+        if (!initial && *destinations[i] != birth) {
+            return soac_type_state_error("pending copied hook changed during owner binding");
+        }
+        *destinations[i] = birth;
+    }
+    return 0;
+}
+
 static void
 soac_retire_pending_handle_inputs(SoacConstructionHandle *handle)
 {
@@ -1166,6 +1253,11 @@ soac_bind_pending_type(PyTypeObject *type, SoacConstructionHandle *handle,
         soac_fail_construction(handle);
         return -1;
     }
+    if (slots_context != NULL &&
+        soac_pending_copy_hook_births(type, state, slots_context, 1) < 0) {
+        soac_fail_construction(handle);
+        return -1;
+    }
     int status = handle->spec.bind_type == NULL ? 0
         : handle->spec.bind_type(owner, (PyObject *)type);
     /* Pending preparation may reenter. Constructor C owners support actual
@@ -1177,7 +1269,8 @@ soac_bind_pending_type(PyTypeObject *type, SoacConstructionHandle *handle,
         return soac_type_state_error("pending native owner binding failed");
     }
     if (slots_context != NULL &&
-        _PySOAC_DataclassBindSlotsType(slots_context, (PyObject *)type, owner) < 0) {
+        (_PySOAC_DataclassBindSlotsType(slots_context, (PyObject *)type, owner) < 0 ||
+         soac_pending_copy_hook_births(type, state, slots_context, 0) < 0)) {
         soac_fail_construction(handle);
         return -1;
     }
@@ -1741,6 +1834,8 @@ _PySOAC_TypeContractBeginTeardown(PyTypeObject *type)
         state->type = NULL;
         state->initial_frozen_setattr = NULL;
         state->initial_frozen_delattr = NULL;
+        state->pending_frozen_setattr_birth = 0;
+        state->pending_frozen_delattr_birth = 0;
     }
 }
 

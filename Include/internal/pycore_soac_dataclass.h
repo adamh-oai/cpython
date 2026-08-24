@@ -49,6 +49,10 @@ extern int _PySOAC_DataclassBindSlotsType(
     _PySoacDataclassSlotsContext *, PyObject *, PyObject *);
 extern int _PySOAC_DataclassValidateCopiedHook(
     _PySoacDataclassSlotsContext *, PyObject *, PyObject *);
+extern int _PySOAC_DataclassCopiedHookBirth(
+    _PySoacDataclassSlotsContext *, PyObject *, PyObject *, uint64_t *);
+extern int _PySOAC_DataclassMatchesInstalledHook(
+    PyObject *function, uint64_t birth, unsigned int role);
 extern int _PySOAC_DataclassFailSlots(_PySoacDataclassSlotsContext *, const char *);
 extern PyObject *_PySOAC_TypeFromDataclassSlotsHandle(
     _PySoacDataclassSlotsContext *, PyObject *);
@@ -82,6 +86,18 @@ extern PyObject *_PySOAC_DataclassBeginMember(
 extern int _PySOAC_DataclassCheckMember(
     PyObject *operation, PyObject *actual_type, PyObject *expected_class_owner,
     PyObject *name, PyObject *function);
+
+/* The selected dictionary kernel calls Check before lookup and again after
+ * its last equality/watcher callback, immediately before physical effect.
+ * incoming_exact_name is the original native member name, NOT a canonical
+ * stored key. Returns 1 pending, 0 legacy, -1 refusal. Success is callback- and
+ * allocation-free. A first check is never a reusable mutation permit. */
+extern int _PySOAC_DataclassPendingMemberCheck(
+    PyObject *operation, PyObject *actual_dict, PyObject *incoming_exact_name,
+    PyObject *value, PyObject *expected_class_owner);
+/* Physical dictionary effect and this scalar birth publication are adjacent:
+ * no callback or failure is allowed between them. No operand/owner is added. */
+extern void _PySOAC_DataclassPendingMemberCommit(PyObject *operation);
 
 /* Mark completion/failure before releasing any references. The caller then
  * decrefs the operation. Failure leaves previous restrictions installed. */

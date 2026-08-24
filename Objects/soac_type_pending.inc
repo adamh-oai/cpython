@@ -330,3 +330,94 @@ _PySOAC_EndPendingTypeAdapter(PyObject *object, int failed)
     if (failed) soac_fail_construction(root);
     root->active_adapters--;
 }
+
+/* The dict kernel owns its real policy guard. These checks select only this
+ * open, actual pending type; they never use a dictionary busy bit as authority. */
+int
+_PySOAC_PendingTypeMemberTarget(PyObject *object, PyObject *owner,
+                                PyObject *expected_root, PyObject *dict,
+                                PyObject *name, unsigned int role,
+                                uint64_t **birth_out)
+{
+    *birth_out = NULL;
+    if (object == NULL || !PyType_Check(object)) {
+        return soac_type_state_error("pending member requires an actual type");
+    }
+    PyTypeObject *type = (PyTypeObject *)object;
+    SoacTypeContract *state = soac_type_state(type);
+    if (state == NULL || state->construction == NULL ||
+        state->phase == Py_SOAC_TYPE_STATE_ENFORCED) return 0;
+    SoacConstructionHandle *root = soac_construction_root(state->construction);
+    if (Py_TYPE(type) != &PyType_Type ||
+        soac_type_phase(state) != Py_SOAC_TYPE_STATE_PENDING ||
+        state->terminal || state->sealed || state->permanent_contract_published ||
+        state->type != type || state->owner != owner || owner == NULL ||
+        state->interpreter != _PyInterpreterState_GET() ||
+        (PyObject *)root != expected_root ||
+        root->lineage_phase != SOAC_LINEAGE_OPEN || !root->active_adapters ||
+        dict == NULL || type->tp_dict != dict || !PyDict_CheckExact(dict) ||
+        !(type->tp_flags & Py_TPFLAGS_READY) || (type->tp_flags & Py_TPFLAGS_READYING) ||
+        name == NULL || !PyUnicode_CheckExact(name) ||
+        role < Py_SOAC_DATACLASS_MEMBER || role > Py_SOAC_DATACLASS_FROZEN_DELATTR) {
+        return soac_type_state_error("pending member owner, namespace or lineage changed");
+    }
+    if (soac_final_override(type, name) < 0) return -1;
+    if (role == Py_SOAC_DATACLASS_FROZEN_SETATTR) {
+        *birth_out = &state->pending_frozen_setattr_birth;
+    }
+    else if (role == Py_SOAC_DATACLASS_FROZEN_DELATTR) {
+        *birth_out = &state->pending_frozen_delattr_birth;
+    }
+    return 1;
+}
+
+int
+_PySOAC_MatchesPendingMemberPolicy(PyObject *owner,
+                                   PyDict_SoacPolicyCallback validate,
+                                   PyObject *dict, PyObject *expected_owner)
+{
+    if (owner == NULL || !Py_IS_TYPE(owner, &SoacTypeContract_Type) ||
+        validate != soac_class_dictionary_policy) return 0;
+    SoacTypeContract *state = (SoacTypeContract *)owner;
+    return state->owner == expected_owner && expected_owner != NULL &&
+        !state->terminal && !state->sealed && !state->permanent_contract_published &&
+        state->interpreter == _PyInterpreterState_GET() &&
+        state->construction != NULL &&
+        soac_type_phase(state) == Py_SOAC_TYPE_STATE_PENDING &&
+        soac_construction_root(state->construction)->lineage_phase == SOAC_LINEAGE_OPEN &&
+        state->class_dictionary_policy_installed && state->inherited_final_names != NULL &&
+        state->type != NULL && state->type->tp_dict == dict;
+}
+
+int
+_PySOAC_PendingTypeCopiedHook(PyObject *object, PyObject *expected_root,
+                             PyObject *name, PyObject *function, uint64_t *birth_out)
+{
+    *birth_out = 0;
+    if (object == NULL || !PyType_Check(object)) {
+        return soac_type_state_error("copied hook requires an actual original type");
+    }
+    PyTypeObject *type = (PyTypeObject *)object;
+    SoacTypeContract *state = soac_type_state(type);
+    if (state == NULL || state->construction == NULL) return 0;
+    if (state->type != type || state->terminal || state->sealed ||
+        state->permanent_contract_published || state->owner == NULL ||
+        state->interpreter != _PyInterpreterState_GET() ||
+        soac_type_phase(state) != Py_SOAC_TYPE_STATE_PENDING ||
+        (PyObject *)soac_construction_root(state->construction) != expected_root ||
+        soac_construction_root(state->construction)->lineage_phase != SOAC_LINEAGE_OPEN ||
+        name == NULL || !PyUnicode_CheckExact(name)) {
+        return soac_type_state_error("pending original hook publication is unavailable");
+    }
+    uint64_t birth = _PyUnicode_Equal(name, &_Py_ID(__setattr__))
+        ? state->pending_frozen_setattr_birth
+        : _PyUnicode_Equal(name, &_Py_ID(__delattr__))
+            ? state->pending_frozen_delattr_birth : 0;
+    PyObject *current = NULL;
+    if (soac_pending_stored_hook(type, name, &current) < 0) return -1;
+    if (birth == 0 || current != function) {
+        return soac_type_state_error("pending copied hook does not match its native publication");
+    }
+    *birth_out = birth;
+    return 1;
+}
