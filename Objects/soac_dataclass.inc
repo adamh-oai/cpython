@@ -15,6 +15,15 @@ typedef enum {
     SOAC_DC_TERMINAL,
 } SoacDataclassPhase;
 
+/* One existing root-state scalar distinguishes ownership retirement boundaries.
+ * Only a selected interpreter call needs metadata through post-clear completion.
+ * The public legacy C vectorcall retains its original eager failure retirement. */
+typedef enum {
+    SOAC_DC_ROOT_INACTIVE = 0,
+    SOAC_DC_ROOT_LEGACY_C_VECTORCALL,
+    SOAC_DC_ROOT_SELECTED_INTERPRETER_CALL,
+} SoacDataclassRootTransport;
+
 typedef struct {
     PyObject_HEAD
     int64_t interpreter_id;
@@ -35,7 +44,7 @@ typedef struct {
     const _Py_CODEUNIT *root_instruction;
     struct _PySoacInterpreterCallV1 *root_deferred;
     unsigned int root_stage;
-    int root_active;
+    SoacDataclassRootTransport root_transport;
 } SoacDataclassInvocation;
 
 typedef enum {
@@ -123,15 +132,18 @@ soac_dataclass_expire(SoacDataclassInvocation *invocation,
     invocation->replacement_type = NULL;
     invocation->slots_started = 0;
     invocation->member_pending = 0;
-    /* A failed root may still be executing finally or catching a helper
-     * error. Keep its SAME metadata owner until exact post-clear completion;
-     * all execution/admission state and value-bearing associations are already
-     * terminal. No source input/type/globals owner is retained here. */
-    PyObject *owner = invocation->root_active ? NULL : invocation->owner;
+    /* A selected interpreter root may still be executing finally or catching
+     * a helper error. Keep its SAME metadata owner until exact post-clear
+     * completion. Legacy C transport has no such callback: preserve its
+     * original owner retirement before an unpublished function is destroyed.
+     * All execution/admission state and value associations are terminal first. */
+    int selected_root = invocation->root_transport ==
+        SOAC_DC_ROOT_SELECTED_INTERPRETER_CALL;
+    PyObject *owner = selected_root ? NULL : invocation->owner;
     PyObject *class_owner = invocation->class_owner;
     PyObject *replacement_owner = invocation->replacement_owner;
     PyObject *replacement_weakref = invocation->replacement_weakref;
-    if (!invocation->root_active) invocation->owner = NULL;
+    if (!selected_root) invocation->owner = NULL;
     invocation->class_owner = NULL;
     invocation->replacement_owner = NULL;
     invocation->replacement_weakref = NULL;
@@ -372,7 +384,7 @@ PySoac_NewDataclassInvocation(PyObject *owner)
     invocation->root_instruction = NULL;
     invocation->root_deferred = NULL;
     invocation->root_stage = 0;
-    invocation->root_active = 0;
+    invocation->root_transport = SOAC_DC_ROOT_INACTIVE;
     PyObject_GC_Track(invocation);
     return (PyObject *)invocation;
 }
@@ -693,9 +705,12 @@ _PySOAC_DataclassObjectCallFromFrame(_PyInterpreterFrame *parent,
     return result;
 }
 
-int
-_PySOAC_DataclassBeginRoot(PyObject *object, unsigned int stage, PyObject *callable)
+static int
+soac_dataclass_begin_root(PyObject *object, unsigned int stage, PyObject *callable,
+                          SoacDataclassRootTransport transport)
 {
+    assert(transport == SOAC_DC_ROOT_LEGACY_C_VECTORCALL ||
+           transport == SOAC_DC_ROOT_SELECTED_INTERPRETER_CALL);
     SoacDataclassInvocation *invocation = soac_dataclass_invocation(object);
     if (invocation == NULL) return -1;
     if (stage != Py_SOAC_DATACLASS_ROOT_FACTORY &&
@@ -703,7 +718,8 @@ _PySOAC_DataclassBeginRoot(PyObject *object, unsigned int stage, PyObject *calla
         return soac_dataclass_fail(invocation, "invalid dataclass root stage");
     SoacDataclassPhase expected = stage == Py_SOAC_DATACLASS_ROOT_FACTORY
         ? SOAC_DC_NEW : SOAC_DC_CLASS_BOUND;
-    if (invocation->root_active || invocation->phase != expected ||
+    if (invocation->root_transport != SOAC_DC_ROOT_INACTIVE ||
+        invocation->phase != expected ||
         invocation->owner == NULL || callable == NULL ||
         !PyFunction_Check(callable) ||
         ((PyFunctionObject *)callable)->vectorcall != _PyFunction_Vectorcall ||
@@ -711,11 +727,18 @@ _PySOAC_DataclassBeginRoot(PyObject *object, unsigned int stage, PyObject *calla
             (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR)) ||
         _PyInterpreterState_GET()->eval_frame != NULL)
         return soac_dataclass_fail(invocation, "dataclass root invocation is not available");
-    invocation->root_active = 1;
+    invocation->root_transport = transport;
     invocation->root_stage = stage;
     invocation->phase = stage == Py_SOAC_DATACLASS_ROOT_FACTORY
         ? SOAC_DC_FACTORY_ACTIVE : SOAC_DC_APPLY_ACTIVE;
     return 0;
+}
+
+int
+_PySOAC_DataclassBeginRoot(PyObject *object, unsigned int stage, PyObject *callable)
+{
+    return soac_dataclass_begin_root(
+        object, stage, callable, SOAC_DC_ROOT_SELECTED_INTERPRETER_CALL);
 }
 
 int
@@ -729,7 +752,8 @@ _PySOAC_DataclassAttachRoot(
         return soac_dataclass_error("dataclass root has no exact owned attachment");
     SoacDataclassInvocation *invocation = soac_dataclass_invocation(*owned);
     if (invocation == NULL) return -1;
-    if (!invocation->root_active || invocation->root_stage != stage ||
+    if (invocation->root_transport != SOAC_DC_ROOT_SELECTED_INTERPRETER_CALL ||
+        invocation->root_stage != stage ||
         invocation->root_frame != NULL)
         return soac_dataclass_fail(invocation, "dataclass root attachment was replayed");
     /* Validate the native bound ordinary frame using the existing root recipe.
@@ -753,7 +777,8 @@ _PySOAC_DataclassTakeRoot(
     PyObject *object = frame->soac_dataclass_invocation;
     if (object == NULL || !Py_IS_TYPE(object, &SoacDataclassInvocation_Type)) return;
     SoacDataclassInvocation *invocation = (SoacDataclassInvocation *)object;
-    if (!invocation->root_active || invocation->root_frame != frame) return;
+    if (invocation->root_transport != SOAC_DC_ROOT_SELECTED_INTERPRETER_CALL ||
+        invocation->root_frame != frame) return;
     *owned = object;
     *stage = invocation->root_stage;
     *caller = invocation->root_caller;
@@ -774,7 +799,8 @@ _PySOAC_DataclassRootOwner(PyObject *object)
     if (object == NULL || !Py_IS_TYPE(object, &SoacDataclassInvocation_Type)) return NULL;
     SoacDataclassInvocation *invocation = (SoacDataclassInvocation *)object;
     /* Internal exact continuation only; not a new public owner getter. */
-    return invocation->root_active ? invocation->owner : NULL;
+    return invocation->root_transport == SOAC_DC_ROOT_SELECTED_INTERPRETER_CALL
+        ? invocation->owner : NULL;
 }
 
 int
@@ -782,7 +808,9 @@ _PySOAC_DataclassFinishRoot(PyObject *object, unsigned int stage, PyObject *resu
 {
     SoacDataclassInvocation *invocation = soac_dataclass_invocation(object);
     if (invocation == NULL) return -1;
-    if (!invocation->root_active || invocation->root_stage != stage ||
+    if ((invocation->root_transport != SOAC_DC_ROOT_LEGACY_C_VECTORCALL &&
+         invocation->root_transport != SOAC_DC_ROOT_SELECTED_INTERPRETER_CALL) ||
+        invocation->root_stage != stage ||
         invocation->root_frame != NULL || result == NULL ||
         !soac_dataclass_is_running(invocation) || invocation->member_pending ||
         (stage == Py_SOAC_DATACLASS_ROOT_APPLY &&
@@ -806,7 +834,7 @@ _PySOAC_DataclassReleaseRoot(PyObject *object)
     if (object == NULL || !Py_IS_TYPE(object, &SoacDataclassInvocation_Type)) return;
     SoacDataclassInvocation *invocation = (SoacDataclassInvocation *)object;
     assert(invocation->root_frame == NULL);
-    invocation->root_active = 0;
+    invocation->root_transport = SOAC_DC_ROOT_INACTIVE;
     invocation->root_stage = 0;
     invocation->root_caller = NULL;
     invocation->root_instruction = NULL;
@@ -829,7 +857,8 @@ PySoac_DataclassVectorcall(PyObject *object, unsigned int stage,
     }
     if (invocation->phase == SOAC_DC_DECLINED)
         return PyObject_Vectorcall(callable, args, nargsf, kwnames);
-    if (_PySOAC_DataclassBeginRoot(object, stage, callable) < 0) return NULL;
+    if (soac_dataclass_begin_root(object, stage, callable,
+                                 SOAC_DC_ROOT_LEGACY_C_VECTORCALL) < 0) return NULL;
     /* Legacy C transport keeps its ordinary borrowed argv semantics. Only the
      * shared phase validation was factored; no interpreter completion repeats. */
     PyObject *result = _PySOAC_DataclassEvalVector(
