@@ -2102,11 +2102,12 @@ dict_new_soac_type(PyObject *self, PyObject *args)
         return NULL;
     }
     PySoacTypeConstructionSpec spec = {
-        .abi_version = 1, .flags = 0, .owner = owner,
+        .abi_version = Py_SOAC_TYPE_CONTRACT_ABI, .flags = 0, .owner = owner,
         .namespace_function = namespace_function, .name = name,
         .bases = bases, .namespace = namespace, .keywords = keywords,
         .fields = fields, .protected_names = empty, .final_methods = empty,
         .new_instance_dict = soac_test_instance_factory,
+        .bind_type = NULL,
     };
     PyObject *handle = PyType_NewSoacConstructionHandle(&spec);
     PyObject *type = handle == NULL ? NULL

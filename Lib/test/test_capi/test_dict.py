@@ -856,6 +856,12 @@ class SoacDictPolicyTests(unittest.TestCase):
         self.assertIsNone(ref())
 
     def test_terminal_gc_clear_never_unseals_or_reenables_writes(self):
+        ctypes = import_helper.import_module("ctypes")
+        get_error = ctypes.pythonapi.PySoac_GetStrictRuntimeUnavailableError
+        get_error.argtypes = []
+        get_error.restype = ctypes.c_void_p
+        # The native getter is borrowed, not a new py_object reference.
+        unavailable = ctypes.cast(get_error(), ctypes.py_object).value
         d = {"x": 1}
         owner = self.protect(d, {"x": int})
         self.assertTrue(_testcapi.dict_matches_soac_policy(d, owner))
@@ -866,11 +872,11 @@ class SoacDictPolicyTests(unittest.TestCase):
         self.assertTrue(_testcapi.dict_has_soac_policy(d))
         self.assertFalse(_testcapi.dict_matches_soac_policy(d, owner))
         self.assertEqual(d, {})
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(unavailable):
             d["x"] = 2
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(unavailable):
             d.update({"x": 2})
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(unavailable):
             _testcapi.dict_seal_soac_namespace(d)
 
     @support.requires_subprocess()

@@ -1689,9 +1689,9 @@ class SizeofTest(unittest.TestCase):
             def bar(cls):
                 pass
             # staticmethod
-            check(foo, size('PP'))
+            check(foo, size('PPB'))
             # classmethod
-            check(bar, size('PP'))
+            check(bar, size('PPB'))
         # generator
         def get_gen(): yield 1
         check(get_gen(), size('6P4c' + INTERPRETER_FRAME + 'P'))
@@ -1739,7 +1739,7 @@ class SizeofTest(unittest.TestCase):
             def setx(self, value): self.__x = value
             def delx(self): del self.__x
             x = property(getx, setx, delx, "")
-            check(x, size('5Pi'))
+            check(x, size('5PiB'))
         # PyCapsule
         try:
             import _datetime

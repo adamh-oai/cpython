@@ -96,6 +96,167 @@ error:
     return NULL;
 }
 
+/* Split class construction for a trusted compiler-owned namespace evaluator.
+ * These objects are ordinary construction pieces, never strict provenance.
+ * Base resolution and metaclass selection deliberately use the same native
+ * helpers and callback order as builtin___build_class__ below. */
+PyObject *
+PySoac_PrepareClass(PyObject *name, PyObject *orig_bases, PyObject *keywords,
+                    int requires_class_cell)
+{
+    if (!PyUnicode_Check(name) || !PyTuple_CheckExact(orig_bases) ||
+        !PyDict_CheckExact(keywords) ||
+        (requires_class_cell != 0 && requires_class_cell != 1)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "class preparation requires a string, exact bases/keywords, and a cell flag");
+        return NULL;
+    }
+    /* __build_class__ receives already-evaluated keyword values in its
+     * argument array. Freeze those bindings before __mro_entries__ callbacks
+     * can mutate the caller's dictionary; values themselves remain shared. */
+    PyObject *mkw = PyDict_Copy(keywords);
+    if (mkw == NULL) {
+        return NULL;
+    }
+    PyObject *bases = update_bases(orig_bases, _PyTuple_ITEMS(orig_bases),
+                                   PyTuple_GET_SIZE(orig_bases));
+    if (bases == NULL) {
+        Py_DECREF(mkw);
+        return NULL;
+    }
+    if (bases == orig_bases) {
+        Py_INCREF(bases);
+    }
+    PyObject *meta = NULL, *ns = NULL, *prep = NULL, *cell = NULL, *result = NULL;
+    if (PyDict_Pop(mkw, &_Py_ID(metaclass), &meta) < 0) {
+        goto done;
+    }
+    int isclass = meta != NULL && PyType_Check(meta);
+    if (meta == NULL) {
+        if (PyTuple_GET_SIZE(bases) == 0) {
+            meta = Py_NewRef(&PyType_Type);
+        }
+        else {
+            meta = Py_NewRef(Py_TYPE(PyTuple_GET_ITEM(bases, 0)));
+        }
+        isclass = 1;
+    }
+    if (isclass) {
+        PyObject *winner = (PyObject *)_PyType_CalculateMetaclass((PyTypeObject *)meta, bases);
+        if (winner == NULL) {
+            goto done;
+        }
+        if (winner != meta) {
+            Py_SETREF(meta, Py_NewRef(winner));
+        }
+    }
+    if (PyObject_GetOptionalAttr(meta, &_Py_ID(__prepare__), &prep) < 0) {
+        goto done;
+    }
+    if (prep == NULL) {
+        ns = PyDict_New();
+    }
+    else {
+        PyObject *args[2] = {name, bases};
+        ns = PyObject_VectorcallDict(prep, args, 2, mkw);
+        Py_CLEAR(prep);
+    }
+    if (ns == NULL) {
+        goto done;
+    }
+    if (!PyMapping_Check(ns)) {
+        PyErr_Format(PyExc_TypeError,
+                     "%.200s.__prepare__() must return a mapping, not %.200s",
+                     isclass ? ((PyTypeObject *)meta)->tp_name : "<metaclass>",
+                     Py_TYPE(ns)->tp_name);
+        goto done;
+    }
+    /* A class cell is a fresh closure local, not a value supplied by a custom
+     * __prepare__ namespace. It is published only after the namespace body. */
+    cell = requires_class_cell ? PyCell_New(NULL) : Py_NewRef(Py_None);
+    if (cell != NULL) {
+        result = PyTuple_Pack(5, meta, ns, bases, mkw, cell);
+    }
+done:
+    Py_XDECREF(cell);
+    Py_XDECREF(prep);
+    Py_XDECREF(ns);
+    Py_XDECREF(meta);
+    Py_XDECREF(mkw);
+    Py_DECREF(bases);
+    return result;
+}
+
+static int
+soac_check_class_preparation(PyObject *preparation)
+{
+    if (!PyTuple_CheckExact(preparation) || PyTuple_GET_SIZE(preparation) != 5 ||
+        !PyMapping_Check(PyTuple_GET_ITEM(preparation, 1)) ||
+        !PyTuple_CheckExact(PyTuple_GET_ITEM(preparation, 2)) ||
+        !PyDict_CheckExact(PyTuple_GET_ITEM(preparation, 3)) ||
+        (PyTuple_GET_ITEM(preparation, 4) != Py_None &&
+         !PyCell_Check(PyTuple_GET_ITEM(preparation, 4)))) {
+        PyErr_SetString(PyExc_TypeError, "invalid native class preparation tuple");
+        return -1;
+    }
+    return 0;
+}
+
+int
+PySoac_CompleteClassNamespace(PyObject *preparation, PyObject *original_bases)
+{
+    if (soac_check_class_preparation(preparation) < 0) {
+        return -1;
+    }
+    if (!PyTuple_CheckExact(original_bases)) {
+        PyErr_SetString(PyExc_TypeError, "original class bases must be an exact tuple");
+        return -1;
+    }
+    PyObject *ns = PyTuple_GET_ITEM(preparation, 1);
+    PyObject *cell = PyTuple_GET_ITEM(preparation, 4);
+    if (cell != Py_None && PyMapping_SetItemString(ns, "__classcell__", cell) < 0) {
+        return -1;
+    }
+    if (PyTuple_GET_ITEM(preparation, 2) != original_bases &&
+        PyMapping_SetItemString(ns, "__orig_bases__", original_bases) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
+int
+PySoac_FinishClass(PyObject *name, PyObject *preparation, PyObject *cls)
+{
+    if (!PyUnicode_Check(name)) {
+        PyErr_SetString(PyExc_TypeError, "class name must be a string");
+        return -1;
+    }
+    if (soac_check_class_preparation(preparation) < 0) {
+        return -1;
+    }
+    PyObject *cell = PyTuple_GET_ITEM(preparation, 4);
+    if (!PyType_Check(cls) || !PyCell_Check(cell)) {
+        return 0;
+    }
+    PyObject *cell_cls = PyCell_GetRef((PyCellObject *)cell);
+    if (cell_cls != cls) {
+        if (cell_cls == NULL) {
+            PyErr_Format(PyExc_RuntimeError,
+                         "__class__ not set defining %.200R as %.200R. "
+                         "Was __classcell__ propagated to type.__new__?", name, cls);
+        }
+        else {
+            PyErr_Format(PyExc_TypeError,
+                         "__class__ set to %.200R defining %.200R as %.200R",
+                         cell_cls, name, cls);
+        }
+        Py_XDECREF(cell_cls);
+        return -1;
+    }
+    Py_DECREF(cell_cls);
+    return 0;
+}
+
 /* AC: cannot convert yet, waiting for *args support */
 static PyObject *
 builtin___build_class__(PyObject *self, PyObject *const *args, Py_ssize_t nargs,

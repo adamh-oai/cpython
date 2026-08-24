@@ -16,6 +16,7 @@ typedef struct {
     PyObject *prop_doc;
     PyObject *prop_name;
     int getter_doc;
+    unsigned char prop_soac_sealed;
 } propertyobject;
 
 typedef propertyobject _PyPropertyObject;

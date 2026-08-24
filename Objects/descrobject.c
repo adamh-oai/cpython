@@ -1512,6 +1512,54 @@ PyWrapper_New(PyObject *d, PyObject *self)
 
 #define _propertyobject_CAST(op)    ((propertyobject *)(op))
 
+static void
+property_soac_mutation_error(const char *message)
+{
+    PyObject *exception = PySoac_GetStrictMutationError();
+    if (exception != NULL) {
+        PyErr_SetString(exception, message);
+    }
+}
+
+PyObject *
+_PySoac_PropertyFunction(PyObject *self, int slot)
+{
+    if (!Py_IS_TYPE(self, &PyProperty_Type)) {
+        PyErr_SetString(PyExc_TypeError, "expected an exact property descriptor");
+        return NULL;
+    }
+    propertyobject *property = (propertyobject *)self;
+    PyObject *function;
+    switch (slot) {
+        case 0: function = property->prop_get; break;
+        case 1: function = property->prop_set; break;
+        case 2: function = property->prop_del; break;
+        default:
+            PyErr_SetString(PyExc_ValueError, "property function slot must be 0, 1, or 2");
+            return NULL;
+    }
+    return function != NULL ? function : Py_None;  /* borrowed */
+}
+
+int
+_PySoac_SealProperty(PyObject *self, PyObject *get,
+                    PyObject *set, PyObject *del)
+{
+    if (!Py_IS_TYPE(self, &PyProperty_Type)) {
+        PyErr_SetString(PyExc_TypeError, "expected an exact property descriptor");
+        return -1;
+    }
+    propertyobject *property = (propertyobject *)self;
+    if ((property->prop_get != NULL ? property->prop_get : Py_None) != get ||
+        (property->prop_set != NULL ? property->prop_set : Py_None) != set ||
+        (property->prop_del != NULL ? property->prop_del : Py_None) != del) {
+        property_soac_mutation_error("property component identity changed before sealing");
+        return -1;
+    }
+    property->prop_soac_sealed = 1;
+    return 0;
+}
+
 /*
 class property(object):
 
@@ -1841,6 +1889,10 @@ property_init_impl(propertyobject *self, PyObject *fget, PyObject *fset,
                    PyObject *fdel, PyObject *doc)
 /*[clinic end generated code: output=01a960742b692b57 input=dfb5dbbffc6932d5]*/
 {
+    if (self->prop_soac_sealed) {
+        property_soac_mutation_error("cannot reinitialize a sealed strict property");
+        return -1;
+    }
     if (fget == Py_None)
         fget = NULL;
     if (fset == Py_None)

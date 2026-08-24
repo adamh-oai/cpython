@@ -2,6 +2,7 @@
 
 #include "Python.h"
 #include "pycore_code.h"          // _PyCode_VerifyStateless()
+#include "pycore_descrobject.h"   // propertyobject
 #include "pycore_dict.h"          // _Py_INCREF_DICT()
 #include "pycore_function.h"      // _PyFunction_Vectorcall
 #include "pycore_long.h"          // _PyLong_GetOne()
@@ -1677,11 +1678,41 @@ typedef struct {
     PyObject_HEAD
     PyObject *cm_callable;
     PyObject *cm_dict;
+    unsigned char cm_soac_sealed;
 } classmethod;
 
 #define _PyClassMethod_CAST(cm) \
     (assert(PyObject_TypeCheck((cm), &PyClassMethod_Type)), \
      _Py_CAST(classmethod*, cm))
+
+PyObject *
+_PySoac_ClassMethodFunction(PyObject *self)
+{
+    if (!Py_IS_TYPE(self, &PyClassMethod_Type)) {
+        PyErr_SetString(PyExc_TypeError, "expected an exact classmethod descriptor");
+        return NULL;
+    }
+    PyObject *function = ((classmethod *)self)->cm_callable;
+    if (function == NULL) {
+        PyErr_SetString(PyExc_TypeError, "uninitialized classmethod descriptor");
+    }
+    return function;  /* borrowed */
+}
+
+int
+_PySoac_SealClassMethod(PyObject *self, PyObject *expected)
+{
+    PyObject *function = _PySoac_ClassMethodFunction(self);
+    if (function == NULL) {
+        return -1;
+    }
+    if (function != expected) {
+        func_soac_mutation_error("classmethod component identity changed before sealing");
+        return -1;
+    }
+    ((classmethod *)self)->cm_soac_sealed = 1;
+    return 0;
+}
 
 static void
 cm_dealloc(PyObject *self)
@@ -1725,6 +1756,10 @@ static int
 cm_set_callable(classmethod *cm, PyObject *callable)
 {
     assert(callable != NULL);
+    if (cm->cm_soac_sealed) {
+        func_soac_mutation_error("cannot reinitialize a sealed strict classmethod");
+        return -1;
+    }
     if (cm->cm_callable == callable) {
         // cm_init() sets the same callable than cm_new()
         return 0;
@@ -1941,11 +1976,56 @@ typedef struct {
     PyObject_HEAD
     PyObject *sm_callable;
     PyObject *sm_dict;
+    unsigned char sm_soac_sealed;
 } staticmethod;
 
 #define _PyStaticMethod_CAST(cm) \
     (assert(PyObject_TypeCheck((cm), &PyStaticMethod_Type)), \
      _Py_CAST(staticmethod*, cm))
+
+PyObject *
+_PySoac_StaticMethodFunction(PyObject *self)
+{
+    if (!Py_IS_TYPE(self, &PyStaticMethod_Type)) {
+        PyErr_SetString(PyExc_TypeError, "expected an exact staticmethod descriptor");
+        return NULL;
+    }
+    PyObject *function = ((staticmethod *)self)->sm_callable;
+    if (function == NULL) {
+        PyErr_SetString(PyExc_TypeError, "uninitialized staticmethod descriptor");
+    }
+    return function;  /* borrowed */
+}
+
+int
+_PySoac_SealStaticMethod(PyObject *self, PyObject *expected)
+{
+    PyObject *function = _PySoac_StaticMethodFunction(self);
+    if (function == NULL) {
+        return -1;
+    }
+    if (function != expected) {
+        func_soac_mutation_error("staticmethod component identity changed before sealing");
+        return -1;
+    }
+    ((staticmethod *)self)->sm_soac_sealed = 1;
+    return 0;
+}
+
+int
+_PySoac_IsDescriptorSealed(PyObject *self)
+{
+    if (Py_IS_TYPE(self, &PyStaticMethod_Type)) {
+        return ((staticmethod *)self)->sm_soac_sealed != 0;
+    }
+    if (Py_IS_TYPE(self, &PyClassMethod_Type)) {
+        return ((classmethod *)self)->cm_soac_sealed != 0;
+    }
+    if (Py_IS_TYPE(self, &PyProperty_Type)) {
+        return ((propertyobject *)self)->prop_soac_sealed != 0;
+    }
+    return 0;
+}
 
 static void
 sm_dealloc(PyObject *self)
@@ -1986,6 +2066,10 @@ static int
 sm_set_callable(staticmethod *sm, PyObject *callable)
 {
     assert(callable != NULL);
+    if (sm->sm_soac_sealed) {
+        func_soac_mutation_error("cannot reinitialize a sealed strict staticmethod");
+        return -1;
+    }
     if (sm->sm_callable == callable) {
         // sm_init() sets the same callable than sm_new()
         return 0;

@@ -307,7 +307,7 @@ PyAPI_FUNC(uint64_t) PyType_GetSoacFunctionId(PyObject *);
 
 /* The C-only caller must authenticate the source plan. Ordinary Python cannot
  * construct these interpreter-owned handles or install type capabilities. */
-#define Py_SOAC_TYPE_CONTRACT_ABI 1
+#define Py_SOAC_TYPE_CONTRACT_ABI 2
 #define Py_SOAC_TYPE_FINAL 1u
 typedef struct {
     uint32_t abi_version;
@@ -323,6 +323,9 @@ typedef struct {
     PyObject *final_methods;
     int (*check_instance_write)(PyObject *, PyObject *, PyObject *, PyObject *);
     PyObject *(*new_instance_dict)(PyObject *, PyObject *);
+    /* Bind the actual type into an already-reserved owner edge. Must not
+     * allocate or call Python; runs before PyType_Ready and user callbacks. */
+    int (*bind_type)(PyObject *, PyObject *);
 } PySoacTypeConstructionSpec;
 
 PyAPI_FUNC(PyObject *) PyType_NewSoacConstructionHandle(const PySoacTypeConstructionSpec *);
@@ -330,6 +333,33 @@ PyAPI_FUNC(PyObject *) PyType_FromSoacConstructionHandle(PyObject *, PyObject *)
 PyAPI_FUNC(int) PyType_SealSoacContract(PyObject *, PyObject *);
 PyAPI_FUNC(int) PyType_HasSoacContract(PyObject *);
 PyAPI_FUNC(int) PyType_IsSoacSealed(PyObject *);
+/* Borrowed owner; NULL/no error for ordinary types, runtime-unavailable error
+ * for an irreversibly terminal or foreign-interpreter contract. */
+PyAPI_FUNC(PyObject *) PyType_GetSoacContractOwner(PyObject *);
+
+/* Class construction pieces, not authentication capabilities. Preparation is
+ * the exact tuple (metaclass, namespace, resolved_bases, keywords, classcell).
+ * The caller executes its namespace body between Prepare and Complete, then
+ * invokes the selected metaclass/native constructor before Finish. */
+PyAPI_FUNC(PyObject *) PySoac_PrepareClass(PyObject *, PyObject *, PyObject *, int);
+PyAPI_FUNC(int) PySoac_CompleteClassNamespace(PyObject *, PyObject *);
+PyAPI_FUNC(int) PySoac_FinishClass(PyObject *, PyObject *, PyObject *);
+
+/* Exact builtin descriptor reads for pre-Ready owner binding. Success only
+ * borrows existing references: no attribute lookup, allocation, or callback.
+ * Property slots are fget=0, fset=1, fdel=2; absent slots return borrowed None. */
+PyAPI_FUNC(PyObject *) _PySoac_StaticMethodFunction(PyObject *);
+PyAPI_FUNC(PyObject *) _PySoac_ClassMethodFunction(PyObject *);
+PyAPI_FUNC(PyObject *) _PySoac_PropertyFunction(PyObject *, int);
+/* Permanent component seals. All expected identities are checked before the
+ * descriptor changes; absent property accessors are represented by Py_None.
+ * These C-only operations do not establish source or construction ownership. */
+PyAPI_FUNC(int) _PySoac_SealStaticMethod(PyObject *, PyObject *);
+PyAPI_FUNC(int) _PySoac_SealClassMethod(PyObject *, PyObject *);
+PyAPI_FUNC(int) _PySoac_SealProperty(PyObject *, PyObject *, PyObject *, PyObject *);
+/* No-error, no-allocation predicate: 1 only for an exact builtin descriptor
+ * with a permanent seal, 0 for any ordinary, non-exact, or unsealed object. */
+PyAPI_FUNC(int) _PySoac_IsDescriptorSealed(PyObject *);
 
 PyAPI_FUNC(int) PyObject_Print(PyObject *, FILE *, int);
 PyAPI_FUNC(void) _Py_BreakPoint(void);

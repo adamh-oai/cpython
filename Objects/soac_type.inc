@@ -463,6 +463,16 @@ soac_install_type_contract(PyTypeObject *type, SoacConstructionHandle *handle)
     ((PyHeapTypeObject *)type)->ht_soac_contract = (PyObject *)state;
     type->tp_flags |= Py_TPFLAGS_SOAC_CONTRACT;
     PyObject_GC_Track(state);
+    if (spec->bind_type != NULL && spec->bind_type(spec->owner, (PyObject *)type) < 0) {
+        state->terminal = 1;
+        if (!PyErr_Occurred()) {
+            PyObject *error = PySoac_GetStrictRuntimeUnavailableError();
+            if (error != NULL) {
+                PyErr_SetString(error, "strict type owner rejected actual type binding");
+            }
+        }
+        return -1;
+    }
     if (PyDict_SetSoacPolicy(type->tp_dict, (PyObject *)state,
                              soac_class_dictionary_policy, 0) < 0) {
         state->terminal = 1;
@@ -517,6 +527,28 @@ int
 PyType_HasSoacContract(PyObject *object)
 {
     return PyType_Check(object) && soac_type_contract((PyTypeObject *)object) != NULL;
+}
+
+PyObject *
+PyType_GetSoacContractOwner(PyObject *object)
+{
+    if (!PyType_Check(object)) {
+        return NULL;
+    }
+    PyTypeObject *type = (PyTypeObject *)object;
+    SoacTypeContract *state = soac_type_contract(type);
+    if (state == NULL && !(type->tp_flags & Py_TPFLAGS_SOAC_CONTRACT)) {
+        return NULL;
+    }
+    if (state == NULL || state->terminal || state->owner == NULL ||
+        state->interpreter != _PyInterpreterState_GET()) {
+        PyObject *error = PySoac_GetStrictRuntimeUnavailableError();
+        if (error != NULL) {
+            PyErr_SetString(error, "strict class owner is unavailable in this execution");
+        }
+        return NULL;
+    }
+    return state->owner;  /* borrowed */
 }
 
 int

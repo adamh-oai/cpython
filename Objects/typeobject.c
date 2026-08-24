@@ -4608,7 +4608,7 @@ type_new_set_doc(PyTypeObject *type, PyObject* dict)
 
 
 static int
-type_new_staticmethod(PyObject *dict, PyObject *attr)
+type_new_staticmethod(PyObject *dict, PyObject *attr, int soac_owned)
 {
     PyObject *func = PyDict_GetItemWithError(dict, attr);
     if (func == NULL) {
@@ -4625,6 +4625,12 @@ type_new_staticmethod(PyObject *dict, PyObject *attr)
     if (static_func == NULL) {
         return -1;
     }
+    /* Only this fresh wrapper has native construction provenance. A supplied
+       descriptor must never become immutable merely by appearing in a class. */
+    if (soac_owned && _PySoac_SealStaticMethod(static_func, func) < 0) {
+        Py_DECREF(static_func);
+        return -1;
+    }
     if (PyDict_SetItem(dict, attr, static_func) < 0) {
         Py_DECREF(static_func);
         return -1;
@@ -4635,7 +4641,7 @@ type_new_staticmethod(PyObject *dict, PyObject *attr)
 
 
 static int
-type_new_classmethod(PyObject *dict, PyObject *attr)
+type_new_classmethod(PyObject *dict, PyObject *attr, int soac_owned)
 {
     PyObject *func = PyDict_GetItemWithError(dict, attr);
     if (func == NULL) {
@@ -4650,6 +4656,10 @@ type_new_classmethod(PyObject *dict, PyObject *attr)
 
     PyObject *method = PyClassMethod_New(func);
     if (method == NULL) {
+        return -1;
+    }
+    if (soac_owned && _PySoac_SealClassMethod(method, func) < 0) {
+        Py_DECREF(method);
         return -1;
     }
 
@@ -4864,16 +4874,17 @@ type_new_set_attrs(const type_new_ctx *ctx, PyTypeObject *type)
 
     /* Special-case __new__: if it's a plain function,
        make it a static function */
-    if (type_new_staticmethod(dict, &_Py_ID(__new__)) < 0) {
+    int soac_owned = ctx->soac_handle != NULL;
+    if (type_new_staticmethod(dict, &_Py_ID(__new__), soac_owned) < 0) {
         return -1;
     }
 
     /* Special-case __init_subclass__ and __class_getitem__:
        if they are plain functions, make them classmethods */
-    if (type_new_classmethod(dict, &_Py_ID(__init_subclass__)) < 0) {
+    if (type_new_classmethod(dict, &_Py_ID(__init_subclass__), soac_owned) < 0) {
         return -1;
     }
-    if (type_new_classmethod(dict, &_Py_ID(__class_getitem__)) < 0) {
+    if (type_new_classmethod(dict, &_Py_ID(__class_getitem__), soac_owned) < 0) {
         return -1;
     }
 
