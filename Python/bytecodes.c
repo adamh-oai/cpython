@@ -2668,6 +2668,9 @@ dummy_func(
             assert(Py_TYPE(owner_o)->tp_flags & Py_TPFLAGS_MANAGED_DICT);
             PyDictObject *dict = _PyObject_GetManagedDict(owner_o);
             DEOPT_IF(dict == NULL);
+            #ifndef Py_GIL_DISABLED
+            DEOPT_IF(dict->_ma_watcher_tag & _PyDict_SOAC_POLICY_TAG);
+            #endif
             DEOPT_IF(!LOCK_OBJECT(dict));
             assert(PyDict_CheckExact((PyObject *)dict));
             PyObject *name = GETITEM(FRAME_CO_NAMES, oparg);

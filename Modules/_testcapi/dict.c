@@ -1,6 +1,235 @@
 #include "parts.h"
 #include "util.h"
 
+/* Deliberately test-only native ownership.  There is no Python-accessible
+   policy replacement or arbitrary-dictionary terminal cleanup method. */
+typedef struct {
+    PyObject_HEAD
+    PyObject *dict;
+    PyObject *schema;
+    PyObject *finals;
+    PyObject *callback;
+    PyObject *keepalive;
+    int terminal;
+} SoacTestOwner;
+
+static int
+soac_test_owner_traverse(PyObject *op, visitproc visit, void *arg)
+{
+    SoacTestOwner *owner = (SoacTestOwner *)op;
+    Py_VISIT(Py_TYPE(op));
+    Py_VISIT(owner->dict);
+    Py_VISIT(owner->schema);
+    Py_VISIT(owner->finals);
+    Py_VISIT(owner->callback);
+    Py_VISIT(owner->keepalive);
+    return 0;
+}
+
+static int
+soac_test_owner_clear(PyObject *op)
+{
+    SoacTestOwner *owner = (SoacTestOwner *)op;
+    Py_CLEAR(owner->dict);
+    Py_CLEAR(owner->schema);
+    Py_CLEAR(owner->finals);
+    Py_CLEAR(owner->callback);
+    Py_CLEAR(owner->keepalive);
+    return 0;
+}
+
+static void
+soac_test_owner_dealloc(PyObject *op)
+{
+    PyTypeObject *type = Py_TYPE(op);
+    PyObject_GC_UnTrack(op);
+    soac_test_owner_clear(op);
+    type->tp_free(op);
+    Py_DECREF(type);
+}
+
+static PyObject *
+soac_test_owner_terminal(PyObject *op, void *context)
+{
+    return PyBool_FromLong(((SoacTestOwner *)op)->terminal);
+}
+
+static PyObject *
+soac_test_owner_clear_for_test(PyObject *op, PyObject *Py_UNUSED(args))
+{
+    SoacTestOwner *owner = (SoacTestOwner *)op;
+    assert(owner->dict != NULL);
+    /* Exercise the actual unreachable-GC slot, only for this fixture's
+       permanently bound dictionary.  Not an unseal or a general C wrapper. */
+    if (Py_TYPE(owner->dict)->tp_clear(owner->dict) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyGetSetDef soac_test_owner_getset[] = {
+    {"terminal", soac_test_owner_terminal, NULL, NULL, NULL},
+    {NULL}
+};
+
+static PyMethodDef soac_test_owner_methods[] = {
+    {"clear_for_test", soac_test_owner_clear_for_test, METH_NOARGS, NULL},
+    {NULL}
+};
+
+static PyType_Slot soac_test_owner_slots[] = {
+    {Py_tp_traverse, soac_test_owner_traverse},
+    {Py_tp_clear, soac_test_owner_clear},
+    {Py_tp_dealloc, soac_test_owner_dealloc},
+    {Py_tp_getset, soac_test_owner_getset},
+    {Py_tp_methods, soac_test_owner_methods},
+    {0, NULL}
+};
+
+static PyType_Spec soac_test_owner_spec = {
+    .name = "_testcapi._SoacDictOwner",
+    .basicsize = sizeof(SoacTestOwner),
+    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC |
+             Py_TPFLAGS_DISALLOW_INSTANTIATION,
+    .slots = soac_test_owner_slots,
+};
+
+static int
+soac_test_validate(PyObject *op, PyObject *dict, PyObject *key,
+                   PyObject *value, int operation, PyObject *provenance)
+{
+    SoacTestOwner *owner = (SoacTestOwner *)op;
+    if (operation == PyDict_SOAC_CACHE_INSERT || operation == PyDict_SOAC_CACHE_REPLACE) {
+        PyErr_SetString(PyExc_TypeError, "SOAC test owner has no cache provider");
+        return -1;
+    }
+    assert(provenance == NULL);
+    if (operation == PyDict_SOAC_VALIDATE_INITIAL) {
+        assert(!PyDict_MatchesSoacPolicy(dict, op, soac_test_validate, 0));
+    }
+    if (operation == PyDict_SOAC_TERMINAL_TEARDOWN) {
+        owner->terminal = 1;
+        return 0;
+    }
+    assert(!owner->terminal);
+    if (operation == PyDict_SOAC_CLEAR) {
+        Py_ssize_t pos = 0;
+        PyObject *stored_key;
+        while (PyDict_Next(dict, &pos, &stored_key, NULL)) {
+            int final = PySet_Contains(owner->finals, stored_key);
+            if (final < 0) {
+                return -1;
+            }
+            if (final) {
+                PyErr_SetString(PyExc_TypeError, "immutable SOAC test binding");
+                return -1;
+            }
+        }
+    }
+    if (operation == PyDict_SOAC_SET || operation == PyDict_SOAC_SET_EXISTING ||
+        operation == PyDict_SOAC_VALIDATE_INITIAL) {
+        PyObject *expected = PyDict_GetItemWithError(owner->schema, key);
+        if (expected == NULL) {
+            if (!PyErr_Occurred()) {
+                PyErr_SetString(PyExc_TypeError, "undeclared SOAC test field");
+            }
+            return -1;
+        }
+        if (expected != Py_None && Py_TYPE(value) != (PyTypeObject *)expected) {
+            PyErr_SetString(PyExc_TypeError, "incorrect SOAC test field value");
+            return -1;
+        }
+    }
+    if (key != NULL && operation != PyDict_SOAC_VALIDATE_INITIAL) {
+        int final = PySet_Contains(owner->finals, key);
+        if (final < 0) {
+            return -1;
+        }
+        if (final && (operation == PyDict_SOAC_SET_EXISTING ||
+                      operation == PyDict_SOAC_DELETE)) {
+            PyErr_SetString(PyExc_TypeError, "immutable SOAC test binding");
+            return -1;
+        }
+    }
+    if (operation != PyDict_SOAC_VALIDATE_INITIAL && owner->callback != Py_None) {
+        PyObject *result = PyObject_CallFunction(
+            owner->callback, "OOOi", dict, key == NULL ? Py_None : key,
+            value == NULL ? Py_None : value, operation);
+        if (result == NULL) {
+            return -1;
+        }
+        Py_DECREF(result);
+    }
+    return 0;
+}
+
+static PyObject *
+dict_set_soac_policy(PyObject *self, PyObject *args)
+{
+    PyObject *dict, *schema, *finals = NULL;
+    PyObject *callback = Py_None, *keepalive = Py_None;
+    if (!PyArg_ParseTuple(args, "OO|OOO", &dict, &schema, &finals,
+                          &callback, &keepalive)) {
+        return NULL;
+    }
+    if (!PyDict_CheckExact(schema)) {
+        PyErr_SetString(PyExc_TypeError, "expected an exact schema dictionary");
+        return NULL;
+    }
+    Py_ssize_t pos = 0;
+    PyObject *key, *expected;
+    while (PyDict_Next(schema, &pos, &key, &expected)) {
+        if (!PyUnicode_CheckExact(key) ||
+            (expected != Py_None && !PyType_Check(expected))) {
+            PyErr_SetString(PyExc_TypeError, "invalid SOAC test schema");
+            return NULL;
+        }
+    }
+    PyObject *type = PyType_FromSpec(&soac_test_owner_spec);
+    if (type == NULL) {
+        return NULL;
+    }
+    SoacTestOwner *owner = (SoacTestOwner *)((PyTypeObject *)type)->tp_alloc(
+        (PyTypeObject *)type, 0);
+    Py_DECREF(type);
+    if (owner == NULL) {
+        return NULL;
+    }
+    owner->dict = Py_NewRef(dict);
+    owner->schema = PyDict_Copy(schema);
+    owner->finals = PyFrozenSet_New(finals);
+    owner->callback = Py_NewRef(callback);
+    owner->keepalive = Py_NewRef(keepalive);
+    if (owner->schema == NULL || owner->finals == NULL ||
+        PyDict_SetSoacPolicy(dict, (PyObject *)owner, soac_test_validate, 0) < 0) {
+        Py_DECREF(owner);
+        return NULL;
+    }
+    return (PyObject *)owner;
+}
+
+static PyObject *
+dict_seal_soac_namespace(PyObject *self, PyObject *dict)
+{
+    RETURN_INT(PyDict_SealSoacNamespace(dict));
+}
+
+static PyObject *
+dict_has_soac_policy(PyObject *self, PyObject *dict)
+{
+    return PyBool_FromLong(PyDict_HasSoacPolicy(dict));
+}
+
+static PyObject *
+dict_matches_soac_policy(PyObject *self, PyObject *args)
+{
+    PyObject *dict, *owner;
+    if (!PyArg_ParseTuple(args, "OO", &dict, &owner)) {
+        return NULL;
+    }
+    return PyBool_FromLong(PyDict_MatchesSoacPolicy(dict, owner, soac_test_validate, 0));
+}
+
 static PyObject *
 dict_containsstring(PyObject *self, PyObject *args)
 {
@@ -259,6 +488,10 @@ test_dict_iteration(PyObject* self, PyObject *Py_UNUSED(ignored))
 
 
 static PyMethodDef test_methods[] = {
+    {"dict_set_soac_policy", dict_set_soac_policy, METH_VARARGS},
+    {"dict_seal_soac_namespace", dict_seal_soac_namespace, METH_O},
+    {"dict_has_soac_policy", dict_has_soac_policy, METH_O},
+    {"dict_matches_soac_policy", dict_matches_soac_policy, METH_VARARGS},
     {"dict_containsstring", dict_containsstring, METH_VARARGS},
     {"dict_getitemref", dict_getitemref, METH_VARARGS},
     {"dict_getitemstringref", dict_getitemstringref, METH_VARARGS},

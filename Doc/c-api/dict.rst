@@ -58,6 +58,12 @@ Dictionary Objects
 
    Empty an existing dictionary of all key-value pairs.
 
+   In the SOAC interpreter, this non-rejectable API is unsupported on a live
+   sealed SOAC namespace.  A rejected SOAC clear terminates the process; it
+   never silently ignores the write, leaves an exception behind this ``void``
+   API, or removes the policy.  The Python :meth:`dict.clear` method instead
+   raises an exception before mutation.  See :ref:`soac-dict-policies`.
+
 
 .. c:function:: int PyDict_Contains(PyObject *p, PyObject *key)
 
@@ -442,6 +448,128 @@ Dictionary Objects
    it before returning.
 
    .. versionadded:: 3.12
+
+
+.. _soac-dict-policies:
+
+SOAC Dictionary Policies
+------------------------
+
+These SOAC-specific APIs enforce native-owned policies on authoritative exact
+dictionaries without changing the layout or size of :c:type:`PyDictObject`.
+They are not part of upstream CPython or its Stable ABI.  A per-interpreter
+side table owns policy metadata; the dictionary, not the interpreter, owns and
+traverses the policy's Python owner reference.
+
+The initial production boundary supports namespaces with exact :class:`str`
+keys.  Dictionary subclasses, free-threaded builds, and the interpreter-owned
+``sys``, ``builtins``, and ``sys.modules`` dictionaries are rejected.  Use a
+loader-owned builtins snapshot.  A policy does not establish fixed instance
+layout, stable physical field indices, type immutability, or a compiled-code
+capability.  Those require separately verified native owners.
+
+.. c:type:: int (*PyDict_SoacPolicyCallback)(PyObject *owner, PyObject *dict, PyObject *key, PyObject *value, int operation, PyObject *provenance)
+
+   Validate a proposed mutation before it is committed.  Return ``0`` on
+   success, or ``-1`` with an exception set on rejection.  The callback must
+   use native checks against its private owner state, not execute arbitrary
+   Python, release the GIL, or mutate the dictionary.  It may be called more
+   than once for a bulk write, so validation must have no externally visible
+   side effects.  Same-dictionary reentrant mutations are rejected through the
+   validation, lookup, watcher notification, and commit interval.
+
+   ``PyDict_SOAC_SET`` means a logically absent binding.  ``PyDict_SOAC_SET_EXISTING``
+   means a current binding or an earlier write to the same name in staged bulk
+   input, even if the actual destination does not yet contain that name.
+   ``PyDict_SOAC_DELETE`` removes a present binding, with *value* equal to
+   ``NULL``.  ``PyDict_SOAC_CLEAR`` removes visible contents and has both *key*
+   and *value* equal to ``NULL``.  Failed single-key validation leaves the
+   dictionary unchanged.  Old values remain alive until after the commit and
+   guard release, so their finalizers may update other permitted bindings.
+
+   ``PyDict_SOAC_VALIDATE_INITIAL`` validates existing contents before policy
+   publication and is never emitted by a public mutation API.
+   ``PyDict_SOAC_CACHE_INSERT`` is reserved for private native memoization of
+   an absent binding, with a non-``NULL`` provider passed as *provenance*.
+   ``PyDict_SOAC_CACHE_REPLACE`` describes an existing binding and requires
+   separate owner approval.  A class annotation provider may finish after a
+   nested invocation has populated its cache; its legitimate completion may
+   replace that result.  A module owner need not grant that permission.
+   The owner must identity-match its immutable captured provider and validate
+   the exact approved key and value; for class annotation caches these are
+   ``__annotations__`` and an exact dictionary.  All public operations,
+   initial validation, and terminal notifications pass ``NULL`` provenance.
+   There is no ambient cache-write permission that a reentrant public write
+   could acquire.  Owners without such a provider must reject cache requests.
+
+   ``PyDict_SOAC_TERMINAL_TEARDOWN`` is a non-rejectable, irreversible
+   notification before unreachable-GC or terminal module cleanup invalidates
+   contents.  The owner must prevent dependent execution before returning.
+   It must not fail or execute Python.  No public write becomes legal again;
+   terminal dictionaries retain their policy marker and reject all mutations.
+
+.. c:function:: int PyDict_SetSoacPolicy(PyObject *dict, PyObject *owner, PyDict_SoacPolicyCallback validate, unsigned int flags)
+
+   Install a permanent policy on an exact dictionary.  *owner* and *validate*
+   must not be ``NULL``; *flags* must be zero.  Existing keys must be exact
+   strings.  Existing values are validated with ``PyDict_SOAC_VALIDATE_INITIAL``
+   before installation succeeds, so an immutable owner needs no temporarily
+   permissive state to distinguish initialization.  A failed initial scan
+   publishes no policy.  Return ``0`` on success or ``-1`` with an exception.
+
+   There is no policy replacement, owner getter, or unseal operation.  Copies
+   are ordinary dictionaries and do not inherit authority.  The owner is a
+   strong GC-visible edge of the original dictionary.  Native callers must
+   not write dictionary storage directly or replace an authoritative instance
+   dictionary through a raw pointer.
+
+.. c:function:: int PyDict_SealSoacNamespace(PyObject *dict)
+
+   Irreversibly prohibit clearing a policy-bearing namespace.  Individual
+   writes still require the native callback's approval, including allowed
+   lexical mutable bindings and late appends.  Return ``0`` on success or
+   ``-1`` with an exception.  Repeated sealing of a live sealed namespace is
+   harmless; terminal owners cannot be resealed or revived.
+
+.. c:function:: int PyDict_HasSoacPolicy(PyObject *dict)
+
+   Return whether an exact dictionary has a policy marker.  This is a guard
+   for native direct-write paths, not proof that any type, function, or
+   optimized-storage capability has been published.
+
+.. c:function:: int PyDict_MatchesSoacPolicy(PyObject *dict, PyObject *owner, PyDict_SoacPolicyCallback validate, unsigned int flags)
+
+   Return whether a completed, live, non-mutating policy has exactly the
+   supplied owner and callback identities and supported flags (zero).  Return
+   false for terminal or initializing policies.  The caller must keep the
+   expected owner alive; a stale raw pointer is not authentication.  This
+   predicate supports reuse of an already installed matching immutable
+   policy, without replacement or exposing its owner.  Separate owner
+   publication and sealing invariants still determine runtime capabilities.
+
+Supported bulk writes accept exact dictionaries, or exact lists/tuples of
+exact two-element list/tuple pairs for sequence APIs.  Arbitrary mappings and
+iterators are rejected before their protocols run.  Exact string keys and
+values are snapshotted in order and every relevant proposal is validated
+before any destination write.  Duplicate proposals are not deduplicated:
+writing an absent final name twice is rejected atomically, while valid mutable
+duplicate writes retain their order.  A validation or source-shape failure
+therefore leaves the destination unchanged, unlike ordinary dict updates that
+may have already applied earlier items.  Commits use the same checked
+single-key kernels and revalidate after preceding value finalizers.  Allocation
+failure or a new rejection caused by a preceding finalizer may leave the
+already committed valid prefix, never an unchecked value.
+
+Python item writes, deletes, ``setdefault``, ``pop``, ``popitem``, ``clear``,
+``update``, ``|=``, and supported C equivalents use the policy.  A mutable
+checked dictionary may clear when the callback permits it; its existing
+indexed schema is retained.  ``fromkeys`` cannot reuse a policy-bearing object
+returned by a custom constructor.  Non-exact-string writes are rejected before
+hash/equality callbacks.  :c:func:`PyDict_Clear` terminates the process if a
+policy rejects it because its ``void`` signature cannot report failure; native
+code must not use it on a sealed namespace.  Private terminal GC/module
+cleanup helpers are not a public escape hatch and never revert a policy-bearing
+dictionary to ordinary mutable authority.
 
 
 Dictionary View Objects

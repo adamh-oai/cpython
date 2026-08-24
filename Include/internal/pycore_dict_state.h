@@ -11,11 +11,16 @@ extern "C" {
 #define DICT_MAX_WATCHERS 8
 #define DICT_WATCHED_MUTATION_BITS 4
 
+struct _Py_hashtable_t;
+
 struct _Py_dict_state {
     uint32_t next_keys_version;
     PyDict_WatchCallback watchers[DICT_MAX_WATCHERS];
     PyObject *key_layout_watch_types;
     PyObject *key_layout_events;
+    /* Non-owning dictionary keys; each value is owned and traversed by its
+       dictionary, never rooted by the interpreter. */
+    struct _Py_hashtable_t *soac_policies;
 };
 
 #define _dict_state_INIT \

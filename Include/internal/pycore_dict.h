@@ -4,6 +4,25 @@
 extern "C" {
 #endif
 
+#define _PyDict_SOAC_POLICY_TAG (UINT64_C(1) << 12)
+#ifdef Py_GIL_DISABLED
+#define _PyDict_HasSoacPolicy(mp) (0)
+#else
+#define _PyDict_HasSoacPolicy(mp) \
+    (((mp)->_ma_watcher_tag & _PyDict_SOAC_POLICY_TAG) != 0)
+#endif
+
+/* Only unreachable GC and terminal module cleanup may use these.  Neither
+   helper makes normal/public writes legal again. */
+extern void _PyDict_SoacBeginTeardown(PyObject *dict);
+extern void _PyDict_ClearForTeardown(PyObject *dict);
+extern int _PyDict_SetItemForTeardown(
+    PyObject *dict, PyObject *key, PyObject *value);
+/* Owner-validated native memoization.  The provider is explicit provenance,
+   never a temporary permission flag available to reentrant public writes. */
+extern int _PyDict_SetItemForRuntimeCache(
+    PyObject *dict, PyObject *key, PyObject *value, PyObject *provider);
+
 #ifndef Py_BUILD_CORE
 #  error "this header requires Py_BUILD_CORE define"
 #endif

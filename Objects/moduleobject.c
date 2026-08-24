@@ -1011,6 +1011,9 @@ _PyModule_Clear(PyObject *m)
 void
 _PyModule_ClearDict(PyObject *d)
 {
+    /* Terminal cleanup never temporarily permits ordinary namespace writes.
+       SOAC owners must disable dependent execution before contents change. */
+    _PyDict_SoacBeginTeardown(d);
     /* To make the execution order of destructors for global
        objects a bit more predictable, we first zap all objects
        whose name starts with a single underscore, before we clear
@@ -1036,7 +1039,7 @@ _PyModule_ClearDict(PyObject *d)
                     else
                         PyErr_Clear();
                 }
-                if (PyDict_SetItem(d, key, Py_None) != 0) {
+                if (_PyDict_SetItemForTeardown(d, key, Py_None) != 0) {
                     PyErr_FormatUnraisable("Exception ignored while "
                                            "clearing module dict");
                 }
@@ -1058,7 +1061,7 @@ _PyModule_ClearDict(PyObject *d)
                     else
                         PyErr_Clear();
                 }
-                if (PyDict_SetItem(d, key, Py_None) != 0) {
+                if (_PyDict_SetItemForTeardown(d, key, Py_None) != 0) {
                     PyErr_FormatUnraisable("Exception ignored while "
                                            "clearing module dict");
                 }
