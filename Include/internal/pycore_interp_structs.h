@@ -885,6 +885,7 @@ struct _is {
         Py_ssize_t strict_config_length;
         wchar_t *strict_config_path;
         uint64_t source_counter;
+        uint64_t descriptor_birth_counter;  /* Reserved once; never reused. */
         PyObject *mutation_error;
         PyObject *runtime_unavailable_error;
         PySoacAnnotationReplayResolver annotation_replay_resolver;

@@ -3238,8 +3238,84 @@ soac_new_builtin_descriptor(PyObject *self, PyObject *const *args, Py_ssize_t na
     return PySoac_NewBuiltinDescriptor(args[0], args[1], args[2], args[3], args[4]);
 }
 
+static PyObject *
+soac_descriptor_birth_exhaustion(PyObject *self, PyObject *const *args,
+                                  Py_ssize_t nargs)
+{
+    if (nargs != 5) {
+        PyErr_SetString(PyExc_TypeError, "descriptor fixture needs five operands");
+        return NULL;
+    }
+#ifdef Py_GIL_DISABLED
+    PyErr_SetString(PyExc_NotImplementedError,
+                    "counter fault injection requires the GIL build");
+    return NULL;
+#else
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    uint64_t previous = interp->soac.descriptor_birth_counter;
+    /* Expose no reset operation and never mint an ID in the altered range.
+     * Allocation/finalizer reentry also sees exhaustion, not a reusable ID. */
+    interp->soac.descriptor_birth_counter = UINT64_MAX;
+    PyObject *result = PySoac_NewBuiltinDescriptor(
+        args[0], args[1], args[2], args[3], args[4]);
+    assert(result == NULL);
+    assert(PyErr_Occurred());
+    assert(interp->soac.descriptor_birth_counter == UINT64_MAX);
+    interp->soac.descriptor_birth_counter = previous;
+    return NULL;
+#endif
+}
+
+static PyObject *
+soac_descriptor_birth_foreign(PyObject *self, PyObject *const *args,
+                              Py_ssize_t nargs)
+{
+    if (nargs != 5) {
+        PyErr_SetString(PyExc_TypeError, "descriptor fixture needs five operands");
+        return NULL;
+    }
+    PyThreadState *saved = PyThreadState_Swap(NULL);
+    PyThreadState *foreign;
+    PyInterpreterConfig config = _PyInterpreterConfig_LEGACY_INIT;
+    PyStatus status = Py_NewInterpreterFromConfig(&foreign, &config);
+    if (PyStatus_Exception(status)) {
+        PyThreadState_Swap(saved);
+        _PyErr_SetFromPyStatus(status);
+        return NULL;
+    }
+    /* The original caller pins all operands. We neither refcount nor use the
+     * foreign function/environment: each API must reject the birth's origin
+     * first and set an exception belonging to this current interpreter. */
+    int rejected = 0;
+    PyObject *error = PySoac_GetStrictRuntimeUnavailableError();
+    if (error != NULL) {
+        uint64_t identity = PySoac_GetDescriptorBirthId(args[0]);
+        rejected += identity == 0 && PyErr_ExceptionMatches(error);
+        PyErr_Clear();
+        PyObject *owner = PySoac_GetDescriptorBirthOwner(args[0]);
+        rejected += owner == NULL && PyErr_ExceptionMatches(error);
+        PyErr_Clear();
+        int matches = PySoac_MatchesDescriptorBirth(
+            args[0], args[1], args[2], args[3], args[4]);
+        rejected += matches == -1 && PyErr_ExceptionMatches(error);
+        PyErr_Clear();
+        int adopted = PySoac_AdoptBuiltinDescriptor(
+            args[0], args[1], args[2], args[3], args[4]);
+        rejected += adopted == -1 && PyErr_ExceptionMatches(error);
+        PyErr_Clear();
+    }
+    else {
+        PyErr_Clear();
+    }
+    Py_EndInterpreter(foreign);
+    PyThreadState_Swap(saved);
+    return PyLong_FromLong(rejected);
+}
+
 static PyMethodDef module_functions[] = {
     {"soac_new_builtin_descriptor", _PyCFunction_CAST(soac_new_builtin_descriptor), METH_FASTCALL},
+    {"soac_descriptor_birth_exhaustion", _PyCFunction_CAST(soac_descriptor_birth_exhaustion), METH_FASTCALL},
+    {"soac_descriptor_birth_foreign", _PyCFunction_CAST(soac_descriptor_birth_foreign), METH_FASTCALL},
     {"soac_dataclass_fixture", soac_dataclass_fixture, METH_VARARGS},
     {"soac_dataclass_fixture_call", soac_dataclass_fixture_call, METH_VARARGS},
     {"soac_dataclass_fixture_c_proxy", soac_dataclass_fixture_c_proxy, METH_O},

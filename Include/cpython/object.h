@@ -377,8 +377,14 @@ PyAPI_FUNC(PyObject *) PySoac_NewBuiltinDescriptor(
  * for ordinary, invalidated, or changed descriptors. No allocation/callback
  * on success. A recognized terminal function owner preserves its exception. */
 PyAPI_FUNC(PyObject *) PySoac_GetDescriptorBirthOwner(PyObject *descriptor);
+/* Nonzero, never-reused current-interpreter identity of this exact native
+ * birth. 0 without an exception for ordinary or invalidated births; 0 with
+ * an exception for NULL, foreign-interpreter, or terminal-owner observations.
+ * Source callers must bind their witness to the original returned birth ID;
+ * reusing the same namespace/function operands constructs a DIFFERENT birth. */
+PyAPI_FUNC(uint64_t) PySoac_GetDescriptorBirthId(PyObject *descriptor);
 /* 1 for the exact live identities, 0 for a miss, -1 for invalid NULL operands
- * or a recognized terminal owner. All non-NULL mismatches are callback-free. */
+ * or a foreign-interpreter/terminal owner. Non-error checks are callback-free. */
 PyAPI_FUNC(int) PySoac_MatchesDescriptorBirth(
     PyObject *descriptor, PyObject *namespace_witness, PyObject *function,
     PyObject *expected_function_owner, PyObject *verified_code);

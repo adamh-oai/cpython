@@ -12,6 +12,8 @@ typedef struct {
     PyObject_HEAD
     PyObject *namespace_owner;
     PyObject *code_ref;
+    int64_t interpreter_id;
+    uint64_t identity;
     uintptr_t descriptor_identity;
     uintptr_t function_identity;
     uintptr_t function_owner_identity;
@@ -129,9 +131,25 @@ soac_descriptor_birth(PyObject *descriptor, PyObject **function)
 }
 
 static int
+soac_descriptor_birth_interpreter(SoacDescriptorBirth *birth)
+{
+    if (birth->interpreter_id !=
+        PyInterpreterState_GetID(_PyInterpreterState_GET())) {
+        func_soac_runtime_error("builtin descriptor birth belongs to an unavailable interpreter");
+        return -1;
+    }
+    return 0;
+}
+
+static int
 soac_descriptor_birth_current(SoacDescriptorBirth *birth,
                               PyObject *descriptor, PyObject *function)
 {
+    /* Reject a foreign birth before accessing the function's native owner.
+     * Numeric birth IDs are interpreter-local, not cross-interpreter grants. */
+    if (soac_descriptor_birth_interpreter(birth) < 0) {
+        return -1;
+    }
     if ((birth->state != SOAC_DESCRIPTOR_PENDING &&
          birth->state != SOAC_DESCRIPTOR_ADOPTED) ||
         birth->descriptor_identity != (uintptr_t)descriptor ||
@@ -174,6 +192,23 @@ PySoac_GetDescriptorBirthOwner(PyObject *descriptor)
     return birth->namespace_owner;  /* borrowed */
 }
 
+uint64_t
+PySoac_GetDescriptorBirthId(PyObject *descriptor)
+{
+    if (descriptor == NULL) {
+        PyErr_SetString(PyExc_TypeError, "descriptor birth needs a non-NULL object");
+        return 0;
+    }
+    PyObject *function = NULL;
+    SoacDescriptorBirth *birth = soac_descriptor_birth(descriptor, &function);
+    if (birth == NULL ||
+        soac_descriptor_birth_current(birth, descriptor, function) != 1) {
+        return 0;
+    }
+    assert(birth->identity != 0);
+    return birth->identity;
+}
+
 int
 PySoac_MatchesDescriptorBirth(PyObject *descriptor, PyObject *namespace_witness,
                               PyObject *function, PyObject *expected_owner,
@@ -186,6 +221,9 @@ PySoac_MatchesDescriptorBirth(PyObject *descriptor, PyObject *namespace_witness,
     }
     PyObject *component = NULL;
     SoacDescriptorBirth *birth = soac_descriptor_birth(descriptor, &component);
+    if (birth != NULL && soac_descriptor_birth_interpreter(birth) < 0) {
+        return -1;
+    }
     if (birth == NULL || component != function ||
         birth->namespace_owner != namespace_witness ||
         birth->function_owner_identity != (uintptr_t)expected_owner ||
@@ -301,6 +339,24 @@ PySoac_NewBuiltinDescriptor(PyObject *factory, PyObject *function,
     if (soac_descriptor_check_function(function, expected_owner, verified_code) < 0) {
         return NULL;
     }
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    int64_t interpreter_id = PyInterpreterState_GetID(interp);
+    if (interpreter_id < 0) {
+        return NULL;
+    }
+    /* Reserve before any callback-capable construction allocation. Nested
+     * constructors cannot use this ID, even when this construction fails.
+     * Burning failed reservations also avoids rollback/address-reuse hazards. */
+    uint64_t identity = 0;
+    FT_MUTEX_LOCK(&interp->func_state.mutex);
+    if (interp->soac.descriptor_birth_counter != UINT64_MAX) {
+        identity = ++interp->soac.descriptor_birth_counter;
+    }
+    FT_MUTEX_UNLOCK(&interp->func_state.mutex);
+    if (identity == 0) {
+        func_soac_runtime_error("builtin descriptor birth identity space is exhausted");
+        return NULL;
+    }
     if (PyType_Ready(&SoacDescriptorBirth_Type) < 0) {
         return NULL;
     }
@@ -316,6 +372,8 @@ PySoac_NewBuiltinDescriptor(PyObject *factory, PyObject *function,
     }
     birth->namespace_owner = Py_NewRef(namespace_witness);
     birth->code_ref = code_ref;
+    birth->interpreter_id = interpreter_id;
+    birth->identity = identity;
     birth->descriptor_identity = 0;
     birth->function_identity = (uintptr_t)function;
     birth->function_owner_identity = (uintptr_t)expected_owner;

@@ -34,6 +34,17 @@ also receive no birth authority.
    The descriptor's opaque birth record owns this payload and a callback-free
    weak code reference. It owns no additional callable, function owner, class,
    or globals references beyond the descriptor's normal component reference.
+   It also stores a nonzero, interpreter-local birth ID. Reservation occurs
+   before callback-capable construction, IDs are never reused, and failed
+   constructions consume their reservation. Exhaustion rejects construction
+   with the shared runtime-unavailable exception instead of wrapping the ID.
+
+   A caller's namespace payload alone does not distinguish two births using
+   the same operands. The trusted caller must record the original returned
+   descriptor's :c:func:`PySoac_GetDescriptorBirthId` exactly once, before
+   publishing or invoking callbacks, and require that same ID at adoption.
+   Reconstructing another descriptor with an exposed namespace payload does
+   not reproduce the original ID, including after descriptor address reuse.
 
    The record is attached before the descriptor is GC tracked. Construction
    then uses ordinary builtin metadata initialization and rechecks the actual
@@ -47,15 +58,29 @@ also receive no birth authority.
    Return the borrowed namespace witness for a current completed birth. Return
    ``NULL`` without an exception for an ordinary, copied, reinitialized, or
    otherwise mismatched descriptor. A recognized terminal function owner keeps
-   its runtime-unavailable exception. This getter does not authenticate the
-   caller's namespace and grants no source or optimization capability.
+   its runtime-unavailable exception. Foreign-interpreter births also raise
+   runtime-unavailable before the function owner is accessed. This getter does
+   not authenticate the caller's namespace and grants no source or optimization
+   capability.
+
+.. c:function:: uint64_t PySoac_GetDescriptorBirthId(PyObject *descriptor)
+
+   Return the immutable nonzero ID of this current completed birth, including
+   after adoption. Return ``0`` without an exception for an ordinary, copied,
+   reinitialized, partially constructed, or otherwise mismatched descriptor.
+   Return ``0`` with an exception for a NULL argument, a foreign-interpreter
+   birth, or a recognized terminal function owner. Successful observation
+   performs no allocation, attribute lookup, equality, or weakref callback.
+   The ID adds no Python references and carries no source or JIT authority.
+   It is unique only within its originating interpreter; the native APIs
+   reject observation/adoption in a different interpreter.
 
 .. c:function:: int PySoac_MatchesDescriptorBirth(PyObject *descriptor, PyObject *namespace_witness, PyObject *function, PyObject *expected_function_owner, PyObject *verified_code)
 
    Return ``1`` only when all actual native identities still match the birth,
    ``0`` for a miss, or ``-1`` for invalid NULL operands or a recognized terminal
-   owner. Matching performs no allocation, Python attribute lookup, equality,
-   weakref callback, or code evaluation. Stored raw coordinates are only
+   owner or foreign-interpreter birth. Matching performs no allocation, Python
+   attribute lookup, equality, weakref callback, or code evaluation. Stored raw coordinates are only
    compared against the independently live actual descriptor component; they
    are never dereferenced as objects.
 
