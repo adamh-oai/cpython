@@ -1944,6 +1944,184 @@ dict_indexed_key_index(PyObject *self, PyObject *args)
 }
 
 static PyObject *
+dict_has_no_lookup_aliases(PyObject *self, PyObject *dict)
+{
+    return PyBool_FromLong(_PyDict_HasNoLookupAliases(dict));
+}
+
+static PyObject *
+dict_reserve_soac_namespace_keys(PyObject *self, PyObject *args)
+{
+    PyObject *dict, *owner, *names;
+    if (!PyArg_ParseTuple(args, "OOO", &dict, &owner, &names)) {
+        return NULL;
+    }
+    return _PyDict_ReserveSoacNamespaceKeys(dict, owner, names) < 0
+        ? NULL : Py_NewRef(Py_None);
+}
+
+static PyObject *
+dict_new_from_indexed_schema(PyObject *self, PyObject *template)
+{
+    return _PyDict_NewFromIndexedSchema(template);
+}
+
+static PyObject *
+dict_setitem_knownhash(PyObject *self, PyObject *args)
+{
+    PyObject *dict, *key, *value;
+    Py_ssize_t hash;
+    if (!PyArg_ParseTuple(args, "OOOn", &dict, &key, &value, &hash)) {
+        return NULL;
+    }
+    return _PyDict_SetItem_KnownHash(dict, key, value, (Py_hash_t)hash) < 0
+        ? NULL : Py_NewRef(Py_None);
+}
+
+static PyObject *
+dict_delitem_knownhash(PyObject *self, PyObject *args)
+{
+    PyObject *dict, *key;
+    Py_ssize_t hash;
+    if (!PyArg_ParseTuple(args, "OOn", &dict, &key, &hash)) {
+        return NULL;
+    }
+    return _PyDict_DelItem_KnownHash(dict, key, (Py_hash_t)hash) < 0
+        ? NULL : Py_NewRef(Py_None);
+}
+
+static PyObject *
+dict_setitem_and_delete_for_module(PyObject *self, PyObject *args)
+{
+    PyObject *dict, *key, *value, *companion;
+    if (!PyArg_ParseTuple(args, "OOOO", &dict, &key, &value, &companion)) {
+        return NULL;
+    }
+    int result = _PyDict_SetItemAndDeleteForModule(
+        dict, key, value == Py_None ? NULL : value, companion);
+    return result < 0 ? NULL : PyLong_FromLong(result);
+}
+
+typedef struct {
+    PyDictKeysObject *keys;
+    int failure_mode;
+} SoacTestIndexedLayout;
+
+static void
+soac_test_layout_destroy(PyObject *owner)
+{
+    SoacTestIndexedLayout *layout = PyCapsule_GetPointer(owner, "test.soac.indexed_layout");
+    assert(layout != NULL);
+    _PyDictKeys_DecRef(layout->keys);
+    PyMem_Free(layout);
+}
+
+static int
+soac_test_instance_policy(PyObject *owner, PyObject *dict, PyObject *key,
+                          PyObject *value, int operation, PyObject *provenance)
+{
+    if (operation == PyDict_SOAC_TERMINAL_TEARDOWN ||
+        operation == PyDict_SOAC_DELETE || operation == PyDict_SOAC_CLEAR) {
+        return 0;
+    }
+    if (provenance != NULL) {
+        PyErr_SetString(PyExc_TypeError, "test instance has no runtime cache provider");
+        return -1;
+    }
+    if (PyUnicode_CheckExact(key) && _PyDict_IndexedKeyIndex(dict, key) >= 0 &&
+        !PyLong_CheckExact(value)) {
+        PyErr_SetString(PyExc_TypeError, "test declared field requires an exact int");
+        return -1;
+    }
+    return 0;
+}
+
+static PyObject *
+soac_test_instance_factory(PyObject *owner, PyObject *instance)
+{
+    assert(!(Py_TYPE(instance)->tp_flags & Py_TPFLAGS_INLINE_VALUES));
+    SoacTestIndexedLayout *layout = PyCapsule_GetPointer(owner, "test.soac.indexed_layout");
+    if (layout == NULL) {
+        return NULL;
+    }
+    if (layout->failure_mode == 1) {
+        PyErr_SetString(PyExc_MemoryError, "test instance factory allocation failed");
+        return NULL;
+    }
+    PyObject *dict = _PyDict_NewWithIndexedKeySet(layout->keys);
+    if (dict != NULL && PyDict_SetSoacPolicy(dict, owner, soac_test_instance_policy,
+                                            PyDict_SOAC_ALLOW_NONSTRING_KEYS) < 0) {
+        Py_CLEAR(dict);
+    }
+    if (dict != NULL && layout->failure_mode == 2) {
+        /* Deliberately malformed factory result: allocation cleanup must drop
+           this partial edge before freeing the unpublished instance, without
+           invoking its __del__ or losing the original boundary error. */
+        if (PyDict_SetItemString(dict, "partial_instance", instance) < 0) {
+            Py_CLEAR(dict);
+        }
+    }
+    return dict;
+}
+
+static PyObject *
+dict_new_soac_type(PyObject *self, PyObject *args)
+{
+    PyObject *name, *bases, *namespace, *fields, *namespace_function;
+    int failure_mode = 0;
+    if (!PyArg_ParseTuple(args, "OOOOO|i", &name, &bases, &namespace,
+                          &fields, &namespace_function, &failure_mode)) {
+        return NULL;
+    }
+    if (failure_mode < 0 || failure_mode > 2) {
+        PyErr_SetString(PyExc_ValueError, "invalid test instance factory failure mode");
+        return NULL;
+    }
+    PyDictKeysObject *keys = _PyDict_NewIndexedKeySet(fields);
+    if (keys == NULL) {
+        return NULL;
+    }
+    SoacTestIndexedLayout *layout = PyMem_Malloc(sizeof(*layout));
+    if (layout == NULL) {
+        _PyDictKeys_DecRef(keys);
+        return PyErr_NoMemory();
+    }
+    layout->keys = keys;
+    layout->failure_mode = failure_mode;
+    PyObject *owner = PyCapsule_New(layout, "test.soac.indexed_layout", soac_test_layout_destroy);
+    if (owner == NULL) {
+        _PyDictKeys_DecRef(keys);
+        PyMem_Free(layout);
+        return NULL;
+    }
+    PyObject *empty = PyTuple_New(0), *keywords = PyDict_New();
+    if (empty == NULL || keywords == NULL) {
+        Py_XDECREF(empty);
+        Py_XDECREF(keywords);
+        Py_DECREF(owner);
+        return NULL;
+    }
+    PySoacTypeConstructionSpec spec = {
+        .abi_version = 1, .flags = 0, .owner = owner,
+        .namespace_function = namespace_function, .name = name,
+        .bases = bases, .namespace = namespace, .keywords = keywords,
+        .fields = fields, .protected_names = empty, .final_methods = empty,
+        .new_instance_dict = soac_test_instance_factory,
+    };
+    PyObject *handle = PyType_NewSoacConstructionHandle(&spec);
+    PyObject *type = handle == NULL ? NULL
+        : PyType_FromSoacConstructionHandle(handle, namespace_function);
+    if (type != NULL && PyType_SealSoacContract(type, owner) < 0) {
+        Py_CLEAR(type);
+    }
+    Py_XDECREF(handle);
+    Py_DECREF(empty);
+    Py_DECREF(keywords);
+    Py_DECREF(owner);
+    return type;
+}
+
+static PyObject *
 dict_get_indexed_item(PyObject *self, PyObject *args)
 {
     PyObject *dict;
@@ -2998,6 +3176,13 @@ static PyMethodDef module_functions[] = {
     {"dict_getitem_knownhash",  dict_getitem_knownhash,          METH_VARARGS},
     {"dict_new_indexed", dict_new_indexed, METH_O},
     {"dict_has_indexed_keys", dict_has_indexed_keys, METH_O},
+    {"dict_has_no_lookup_aliases", dict_has_no_lookup_aliases, METH_O},
+    {"dict_reserve_soac_namespace_keys", dict_reserve_soac_namespace_keys, METH_VARARGS},
+    {"dict_setitem_and_delete_for_module", dict_setitem_and_delete_for_module, METH_VARARGS},
+    {"dict_new_soac_type", dict_new_soac_type, METH_VARARGS},
+    {"dict_new_from_indexed_schema", dict_new_from_indexed_schema, METH_O},
+    {"dict_setitem_knownhash", dict_setitem_knownhash, METH_VARARGS},
+    {"dict_delitem_knownhash", dict_delitem_knownhash, METH_VARARGS},
     {"dict_indexed_key_index", dict_indexed_key_index, METH_VARARGS},
     {"dict_get_indexed_item", dict_get_indexed_item, METH_VARARGS},
     {"dict_set_indexed_item", dict_set_indexed_item, METH_VARARGS},

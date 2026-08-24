@@ -511,8 +511,17 @@ capability.  Those require separately verified native owners.
 .. c:function:: int PyDict_SetSoacPolicy(PyObject *dict, PyObject *owner, PyDict_SoacPolicyCallback validate, unsigned int flags)
 
    Install a permanent policy on an exact dictionary.  *owner* and *validate*
-   must not be ``NULL``; *flags* must be zero.  Existing keys must be exact
-   strings.  Existing values are validated with ``PyDict_SOAC_VALIDATE_INITIAL``
+   must not be ``NULL``. With *flags* zero, existing keys must be exact
+   strings and the actual dictionary is upgraded in place to stable indexed
+   namespace storage. Identity, visible contents, and insertion order are
+   preserved; every initial name and later allowed append receives a permanent
+   index. A materialized inline dictionary's former inline storage is invalidated
+   before it can bypass the authoritative dictionary.
+
+   ``PyDict_SOAC_ALLOW_NONSTRING_KEYS`` (``1``) instead selects an instance
+   dictionary policy and requires an existing stable-prefix dictionary. It
+   permits ordinary arbitrary keys and overflow without revoking the fixed
+   prefix or renumbering its fields. Existing values are validated with ``PyDict_SOAC_VALIDATE_INITIAL``
    before installation succeeds, so an immutable owner needs no temporarily
    permissive state to distinguish initialization.  A failed initial scan
    publishes no policy.  Return ``0`` on success or ``-1`` with an exception.
@@ -540,7 +549,7 @@ capability.  Those require separately verified native owners.
 .. c:function:: int PyDict_MatchesSoacPolicy(PyObject *dict, PyObject *owner, PyDict_SoacPolicyCallback validate, unsigned int flags)
 
    Return whether a completed, live, non-mutating policy has exactly the
-   supplied owner and callback identities and supported flags (zero).  Return
+   supplied owner and callback identities and exactly matching flags. Return
    false for terminal or initializing policies.  The caller must keep the
    expected owner alive; a stale raw pointer is not authentication.  This
    predicate supports reuse of an already installed matching immutable
@@ -549,7 +558,7 @@ capability.  Those require separately verified native owners.
 
 Supported bulk writes accept exact dictionaries, or exact lists/tuples of
 exact two-element list/tuple pairs for sequence APIs.  Arbitrary mappings and
-iterators are rejected before their protocols run.  Exact string keys and
+iterators are rejected before their protocols run. For namespace policies, exact string keys and
 values are snapshotted in order and every relevant proposal is validated
 before any destination write.  Duplicate proposals are not deduplicated:
 writing an absent final name twice is rejected atomically, while valid mutable
@@ -560,16 +569,122 @@ single-key kernels and revalidate after preceding value finalizers.  Allocation
 failure or a new rejection caused by a preceding finalizer may leave the
 already committed valid prefix, never an unchecked value.
 
+Instance policies allow arbitrary keys in those same supported bulk sources.
+They preserve ordinary partial-update behavior, checking and committing each
+actual resolved entry once. Projecting arbitrary mutable equality into a
+separate ``seen`` dictionary is not a write proof. Existing-key policy checks
+receive the canonical stored key, not a potentially equal input alias; the
+same guarded lookup is committed without invoking equality a second time.
+Exact-dictionary sources carry their stored hashes through the snapshot and
+commit, just like the known-hash C APIs; they do not call ``__hash__`` again.
+Sequence-of-pairs sources perform their normal per-item hash during the
+guarded commit.
+
 Python item writes, deletes, ``setdefault``, ``pop``, ``popitem``, ``clear``,
 ``update``, ``|=``, and supported C equivalents use the policy.  A mutable
 checked dictionary may clear when the callback permits it; its existing
 indexed schema is retained.  ``fromkeys`` cannot reuse a policy-bearing object
-returned by a custom constructor.  Non-exact-string writes are rejected before
-hash/equality callbacks.  :c:func:`PyDict_Clear` terminates the process if a
+returned by a custom constructor. Namespace non-exact-string writes are rejected before
+hash/equality callbacks. Instance hash/equality run with reentrant authoritative
+writes prohibited through commit. The guard is released before key/value
+finalizers; legitimate finalizers may write other allowed fields.
+:c:func:`PyDict_Clear` terminates the process if a
 policy rejects it because its ``void`` signature cannot report failure; native
 code must not use it on a sealed namespace.  Private terminal GC/module
 cleanup helpers are not a public escape hatch and never revert a policy-bearing
 dictionary to ordinary mutable authority.
+
+Stable indexed storage
+~~~~~~~~~~~~~~~~~~~~~~
+
+``_PyDict_NewIndexedKeySet(names)`` creates a shared immutable exact-string
+prefix descriptor. ``_PyDict_NewWithIndexedKeySet(prefix)`` creates an exact
+dictionary with one authoritative values array and a per-dictionary visible
+lookup table. A reserved, uninitialized name has no hash bucket and no owned
+value, so it does not affect length, iteration, equality callbacks, or normal
+missing-key behavior. Overflow accepts arbitrary keys. Growth compacts only
+unreserved overflow; prefix positions never change. Copies are ordinary
+dictionaries, preserving visible order and probe behavior without re-running
+hash/equality or duplicating persistent value storage.
+
+``_PyDict_IndexedKeyIndex(dict, name)`` returns a reserved index even when its
+binding is absent. ``_PyDict_GetIndexedItem`` reads a physical slot; using it
+as a Python name-lookup result requires ``_PyDict_HasNoLookupAliases(dict)``.
+That positive guard is sticky-false after storing a potentially aliasing key,
+including after deletion or clear. Recheck it after effects: a key's equality
+can change without any dictionary mutation. Without the guard, use full normal
+lookup; selected checked-field reads must validate the resolved value before
+granting a checked-value proof. ``_PyDict_SetIndexedItem`` uses ordinary checked
+assignment through the reserved name, including any current lookup alias.
+
+``_PyDict_ReserveSoacNamespaceKeys(dict, owner, exact_names_tuple)`` is an
+exported native initialization helper. It requires the exact installed live
+namespace owner and an unsealed policy. It validates all names before appending
+any invisible prefix reservations, retains previously assigned indices, and
+does not emit INITIAL operations or manufacture visible placeholder bindings.
+There is no Python-visible reservation or policy-creation interface.
+
+Participating instance types use ``_PyDict_InitSoacInstanceStorage(obj)`` from
+the verified native generic allocator, before GC tracking or publication. The
+native factory returns a fresh empty exact indexed dictionary with the
+instance policy; ordinary subclasses inherit this physical storage requirement
+without acquiring strict dispatch promises. Unsupported custom allocators are
+rejected, not repaired by a late first-attribute allocation. Failure preserves
+the original exception and leaves the unpublished object's dictionary edge
+empty, so allocation cleanup does not invoke a user finalizer.
+
+Dictionary-owned metadata retains the equivalent ordinary shared-key layout,
+allocation capacity, and split-to-combined transition. Every instance advances
+the ordinary capacity counter, even if its dictionary is never requested.
+Explicit ``clear()`` releases values in the ordinary split-key order until
+promotion; after promotion it uses visible insertion order. Detaching an
+instance dictionary and clearing it preserves the ordinary transition too.
+This metadata owns no field values and does not change permanent prefix indices.
+
+``_PyDict_NewFromIndexedSchema(template)`` creates a fresh empty, unprotected
+exact indexed dictionary from an exact indexed template. Only the immutable
+prefix descriptor is shared; no values, policy, or unreserved overflow are
+copied. The native owner's normal GC traversal can hold the template as a
+Python reference instead of hiding raw key-set ownership outside the GC graph.
+This is not ``dict.copy()`` and grants no checked-value or namespace authority.
+
+For an ordinary-equivalent split dictionary, explicit ``clear()`` keeps later
+physical values readable while earlier value finalizers run, although length
+and iteration already exclude pending values. Each slot is cleared before its
+exactly-once release; finalizers may overwrite pending values, insert new
+shared names, reinsert already-cleared names, or recursively clear a live
+inline-equivalent dictionary. Surviving insertions retain valid insertion-order
+bookkeeping. No snapshot or duplicate array owns pending field values.
+
+Some reentrant operations expose corruption in the stock split-clear kernel:
+deleting pending values underflows its used count; promotion can lose pending
+references; filling a future empty slot leaves a phantom used count; and a
+detached split clear can free storage still used by an outer clear or discard
+newly inserted values. Protected dictionaries reject these operations before
+mutation with ``StrictMutationError``: pending-value deletion, promotion with
+live values (including nonempty ``popitem()``), filling an empty shared slot
+that an active clear has not visited, and insertion/recursive clear while a
+detached split clear is active. Ordinary single-key operations outside that
+narrow in-progress-clear boundary retain their normal policy and semantics.
+These errors do not authorize skipped finalizers or silently corrupted state.
+
+``_PyDict_SetItemAndDeleteForModule(dict, primary, value, companion)`` is a
+narrow native helper for compound module annotation setters, with exact,
+distinct string keys and an owned namespace. A NULL value means primary
+deletion. It returns 1 on success, 0 for an absent primary deletion with no
+changes, and -1 on error. During unsealed initialization it preserves ordinary
+sequential primary/companion operations and finalizer order. Once sealed, only
+a genuine primary first insert with an absent companion is supported.
+Replacement/deletion or an existing companion is rejected before either
+write: releasing the old primary value could introduce another companion
+binding, and delaying those finalizers would change Python-visible behavior.
+Ordinary single-key dictionary operations remain available under their policy.
+
+The public ``PyDictObject`` layout is unchanged. Indexed values contain
+capacity, order size, and a prefix-descriptor pointer before the value slots
+(24-byte header on the supported 64-bit ABI). Reload the current values base
+after effects or growth. Free-threaded builds currently reject stable-prefix
+factories and policy registration explicitly.
 
 
 Dictionary View Objects

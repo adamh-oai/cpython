@@ -127,6 +127,7 @@ As a consequence of this, split keys have a maximum size of 16.
 #include "pycore_hashtable.h"     // native-owned SOAC policy sidecars
 #include "pycore_object.h"        // _PyObject_GC_TRACK(), _PyDebugAllocatorStats()
 #include "pycore_pyatomic_ft_wrappers.h" // FT_ATOMIC_LOAD_SSIZE_RELAXED
+#include "pycore_soac_type.h"    // native-owned instance dictionary factories
 #include "pycore_pyerrors.h"      // _PyErr_GetRaisedException()
 #include "pycore_pystate.h"       // _PyThreadState_GET()
 #include "pycore_setobject.h"     // _PySet_NextEntry()
@@ -136,13 +137,40 @@ As a consequence of this, split keys have a maximum size of 16.
 #include "stringlib/eq.h"                // unicode_eq()
 #include <stdbool.h>
 
+typedef struct SoacSplitClearFrame {
+    struct SoacSplitClearFrame *previous;
+    Py_ssize_t nentries;
+    Py_ssize_t next_index;
+} SoacSplitClearFrame;
+
 typedef struct {
     PyObject *owner;
     PyDict_SoacPolicyCallback validate;
+    unsigned int flags;
     unsigned char sealed;
     unsigned char terminal;
     unsigned char mutating;
+    /* Explicit clear must retain stock split-dictionary release order.  This
+       is layout metadata only: values have exactly one authoritative owner. */
+    PyDictKeysObject *baseline_keys;
+    uint8_t baseline_capacity;
+    unsigned char baseline_embedded;
+    unsigned char baseline_promoted;
+    unsigned char instance_bound;
+    SoacSplitClearFrame *split_clear;
+    uint32_t split_clear_pending;
 } SoacDictPolicy;
+
+static int indexed_normalize_namespace(PyDictObject *dict);
+static Py_ssize_t insert_split_key(PyDictKeysObject *, PyObject *, Py_hash_t);
+static int soac_clear_key_pending(SoacDictPolicy *, PyObject *);
+
+static PyObject *
+soac_mutation_error(void)
+{
+    PyObject *error = PySoac_GetStrictMutationError();
+    return error != NULL ? error : PyExc_TypeError;
+}
 
 static SoacDictPolicy *
 soac_policy(PyDictObject *dict)
@@ -170,19 +198,22 @@ int
 PyDict_MatchesSoacPolicy(PyObject *dict, PyObject *owner,
                          PyDict_SoacPolicyCallback validate, unsigned int flags)
 {
-    if (!PyDict_HasSoacPolicy(dict) || owner == NULL || validate == NULL || flags != 0) {
+    if (!PyDict_HasSoacPolicy(dict) || owner == NULL || validate == NULL) {
         return 0;
     }
     SoacDictPolicy *policy = soac_policy((PyDictObject *)dict);
     return !policy->terminal && !policy->mutating &&
-        policy->owner == owner && policy->validate == validate;
+        policy->owner == owner && policy->validate == validate &&
+        policy->flags == flags;
 }
 
 static int
 soac_check_key(PyDictObject *dict, PyObject *key)
 {
-    if (_PyDict_HasSoacPolicy(dict) && !PyUnicode_CheckExact(key)) {
-        PyErr_SetString(PyExc_TypeError,
+    if (_PyDict_HasSoacPolicy(dict) &&
+        !(soac_policy(dict)->flags & PyDict_SOAC_ALLOW_NONSTRING_KEYS) &&
+        !PyUnicode_CheckExact(key)) {
+        PyErr_SetString(soac_mutation_error(),
                         "SOAC dictionary writes require exact string keys");
         return -1;
     }
@@ -193,12 +224,13 @@ static int
 soac_begin_mutation(SoacDictPolicy *policy)
 {
     if (policy->terminal) {
-        PyErr_SetString(PyExc_RuntimeError,
+        PyObject *error = PySoac_GetStrictRuntimeUnavailableError();
+        PyErr_SetString(error != NULL ? error : PyExc_RuntimeError,
                         "SOAC dictionary has entered terminal teardown");
         return -1;
     }
     if (policy->mutating) {
-        PyErr_SetString(PyExc_RuntimeError,
+        PyErr_SetString(soac_mutation_error(),
                         "reentrant mutation of a SOAC dictionary");
         return -1;
     }
@@ -211,6 +243,13 @@ soac_validate(SoacDictPolicy *policy, PyDictObject *dict,
               PyObject *key, PyObject *value, int operation, PyObject *provenance)
 {
     assert(policy->mutating && !policy->terminal && policy->owner != NULL);
+    if (operation == PyDict_SOAC_DELETE && soac_clear_key_pending(policy, key)) {
+        /* Stock split clear has already subtracted these values from used.
+           A reentrant deletion would underflow/corrupt that count. */
+        PyErr_SetString(soac_mutation_error(),
+                        "cannot delete a pending value during split dictionary clear");
+        return -1;
+    }
     int result = policy->validate(
         policy->owner, (PyObject *)dict, key, value, operation, provenance);
     if (result == 0 && !PyErr_Occurred()) {
@@ -239,6 +278,9 @@ soac_destroy_policy(PyDictObject *dict)
         _Py_hashtable_destroy(empty);
     }
     PyObject *owner = policy->owner;
+    if (policy->baseline_keys != NULL) {
+        _PyDictKeys_DecRef(policy->baseline_keys);
+    }
     PyMem_RawFree(policy);
     Py_XDECREF(owner);
 }
@@ -253,14 +295,20 @@ PyDict_SetSoacPolicy(PyObject *op, PyObject *owner,
     return -1;
 #else
     if (op == NULL || !PyDict_CheckExact(op) || owner == NULL ||
-        validate == NULL || flags != 0) {
+        validate == NULL || (flags & ~PyDict_SOAC_ALLOW_NONSTRING_KEYS) != 0) {
         PyErr_SetString(PyExc_TypeError,
-                        "SOAC policy requires an exact dict, owner, callback and flags=0");
+                        "SOAC policy requires an exact dict, owner, callback and supported flags");
         return -1;
     }
     PyDictObject *dict = (PyDictObject *)op;
+    if ((flags & PyDict_SOAC_ALLOW_NONSTRING_KEYS) &&
+        !_PyDict_HasIndexedTable(dict)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "SOAC instance policies require a stable-prefix dictionary");
+        return -1;
+    }
     if (_PyDict_HasSoacPolicy(dict)) {
-        PyErr_SetString(PyExc_TypeError, "SOAC dictionary policy is permanent");
+        PyErr_SetString(soac_mutation_error(), "SOAC dictionary policy is permanent");
         return -1;
     }
     PyInterpreterState *interp = _PyInterpreterState_GET();
@@ -273,7 +321,8 @@ PyDict_SetSoacPolicy(PyObject *op, PyObject *owner,
     Py_ssize_t pos = 0;
     PyObject *key, *value;
     while (PyDict_Next(op, &pos, &key, &value)) {
-        if (!PyUnicode_CheckExact(key)) {
+        if (!(flags & PyDict_SOAC_ALLOW_NONSTRING_KEYS) &&
+            !PyUnicode_CheckExact(key)) {
             PyErr_SetString(PyExc_TypeError,
                             "SOAC dictionaries require exact string keys");
             return -1;
@@ -302,6 +351,7 @@ PyDict_SetSoacPolicy(PyObject *op, PyObject *owner,
     }
     policy->owner = Py_NewRef(owner);
     policy->validate = validate;
+    policy->flags = flags;
     policy->mutating = 1;
     dict->_ma_watcher_tag |= _PyDict_SOAC_POLICY_TAG;
     pos = 0;
@@ -311,6 +361,10 @@ PyDict_SetSoacPolicy(PyObject *op, PyObject *owner,
             soac_destroy_policy(dict);
             return -1;
         }
+    }
+    if (flags == 0 && indexed_normalize_namespace(dict) < 0) {
+        soac_destroy_policy(dict);
+        return -1;
     }
     policy->mutating = 0;
     return 0;
@@ -325,6 +379,10 @@ PyDict_SealSoacNamespace(PyObject *dict)
         return -1;
     }
     SoacDictPolicy *policy = soac_policy((PyDictObject *)dict);
+    if (policy->flags & PyDict_SOAC_ALLOW_NONSTRING_KEYS) {
+        PyErr_SetString(PyExc_TypeError, "an instance dictionary is not a namespace");
+        return -1;
+    }
     if (soac_begin_mutation(policy) < 0) {
         return -1;
     }
@@ -837,6 +895,20 @@ static PyDictKeysObject empty_keys_struct = {
 
 #define Py_EMPTY_KEYS &empty_keys_struct
 
+/* An indexed clear keeps its descriptor/zeroed value allocation but has no
+   visible entries.  This immutable sentinel avoids allocation in clear and
+   lets old key/value ownership be released only after the empty commit. */
+static PyDictKeysObject empty_indexed_keys_struct = {
+    .dk_refcnt = _Py_DICT_IMMORTAL_INITIAL_REFCNT,
+    .dk_log2_size = 0,
+    .dk_log2_index_bytes = 3,
+    .dk_kind = DICT_KEYS_INDEXED_UNICODE,
+    .dk_version = 1,
+    .dk_indices = {DKIX_EMPTY, DKIX_EMPTY, DKIX_EMPTY, DKIX_EMPTY,
+                   DKIX_EMPTY, DKIX_EMPTY, DKIX_EMPTY, DKIX_EMPTY},
+};
+#define Py_EMPTY_INDEXED_KEYS &empty_indexed_keys_struct
+
 /* Uncomment to check the dict content in _PyDict_CheckConsistency() */
 // #define DEBUG_PYDICT
 
@@ -846,14 +918,25 @@ static PyDictKeysObject empty_keys_struct = {
 #  define ASSERT_CONSISTENT(op) assert(_PyDict_CheckConsistency((PyObject *)(op), 0))
 #endif
 
-static inline int
+static inline Py_ssize_t
 get_index_from_order(PyDictObject *mp, Py_ssize_t i)
 {
     if (_PyDict_HasIndexedTable(mp)) {
         PyDictIndexedValues *values = (PyDictIndexedValues *)mp->ma_values;
         assert(i < values->order_size);
         Py_ssize_t *array = (Py_ssize_t *)&values->values[values->capacity];
-        return (int)array[i];
+        SoacDictPolicy *policy = soac_policy(mp);
+        if (policy != NULL && policy->split_clear_pending != 0) {
+            assert(DK_IS_UNICODE(mp->ma_keys));
+            for (Py_ssize_t j = 0; j < values->order_size; j++) {
+                PyObject *key = DK_UNICODE_ENTRIES(mp->ma_keys)[array[j]].me_key;
+                if (!soac_clear_key_pending(policy, key) && i-- == 0) {
+                    return array[j];
+                }
+            }
+            Py_UNREACHABLE();
+        }
+        return array[i];
     }
     assert(mp->ma_used <= SHARED_KEYS_MAX_SIZE);
     assert(i < mp->ma_values->size);
@@ -866,6 +949,63 @@ indexed_values(PyDictObject *mp)
 {
     assert(_PyDict_HasIndexedTable(mp));
     return (PyDictIndexedValues *)mp->ma_values;
+}
+
+static inline PyObject *
+dict_key_at(PyDictKeysObject *keys, Py_ssize_t index)
+{
+    return DK_IS_UNICODE(keys)
+        ? DK_UNICODE_ENTRIES(keys)[index].me_key
+        : DK_ENTRIES(keys)[index].me_key;
+}
+
+static inline Py_hash_t
+dict_hash_at(PyDictKeysObject *keys, Py_ssize_t index)
+{
+    return DK_IS_UNICODE(keys)
+        ? unicode_get_hash(DK_UNICODE_ENTRIES(keys)[index].me_key)
+        : DK_ENTRIES(keys)[index].me_hash;
+}
+
+static inline void
+indexed_store_key(PyDictKeysObject *keys, Py_ssize_t index,
+                  PyObject *key, Py_hash_t hash)
+{
+    if (DK_IS_UNICODE(keys)) {
+        DK_UNICODE_ENTRIES(keys)[index].me_key = key;
+    }
+    else {
+        DK_ENTRIES(keys)[index].me_key = key;
+        DK_ENTRIES(keys)[index].me_hash = hash;
+    }
+}
+
+int
+_PyDict_HasNoLookupAliases(PyObject *dict)
+{
+#ifdef Py_GIL_DISABLED
+    return 0;
+#else
+    return dict != NULL && PyDict_CheckExact(dict) &&
+        _PyDict_HasIndexedTable((PyDictObject *)dict) &&
+        (((PyDictObject *)dict)->_ma_watcher_tag &
+         _PyDict_SOAC_LOOKUP_ALIASES_TAG) == 0;
+#endif
+}
+
+static void
+indexed_record_key_aliases(PyDictObject *dict, PyObject *key)
+{
+    /* These exact immutable builtin types cannot equal a string.  A subclass
+       or any other type is conservatively sticky, even if its current hash
+       or equality never aliases a declared field. */
+    if (!PyUnicode_CheckExact(key) && !PyLong_CheckExact(key) &&
+        !PyFloat_CheckExact(key) && !PyComplex_CheckExact(key) &&
+        !PyBytes_CheckExact(key) && !PyTuple_CheckExact(key) &&
+        !PyFrozenSet_CheckExact(key) && key != Py_None &&
+        !PyBool_Check(key)) {
+        dict->_ma_watcher_tag |= _PyDict_SOAC_LOOKUP_ALIASES_TAG;
+    }
 }
 
 static inline PyObject *
@@ -958,7 +1098,7 @@ _PyDict_CheckConsistency(PyObject *op, int check_content)
     if (!splitted) {
         /* combined table */
         CHECK(keys->dk_kind != DICT_KEYS_SPLIT);
-        CHECK(keys->dk_kind != DICT_KEYS_INDEXED_UNICODE);
+        CHECK(!DK_IS_INDEXED(keys));
         CHECK(keys->dk_refcnt == 1 || keys == Py_EMPTY_KEYS);
     }
     else if (keys->dk_kind == DICT_KEYS_SPLIT) {
@@ -970,10 +1110,21 @@ _PyDict_CheckConsistency(PyObject *op, int check_content)
         }
     }
     else {
-        CHECK(keys->dk_kind == DICT_KEYS_INDEXED_UNICODE);
+        CHECK(DK_IS_INDEXED(keys));
         PyDictIndexedValues *values = indexed_values(mp);
-        CHECK(values->capacity == keys->dk_nentries);
-        CHECK(values->order_size == mp->ma_used);
+        CHECK(values->capacity >= keys->dk_nentries);
+        CHECK(values->prefix_keys != NULL);
+        CHECK(keys == Py_EMPTY_INDEXED_KEYS ||
+              values->prefix_keys->dk_nentries <= keys->dk_nentries);
+        CHECK(keys->dk_refcnt == 1 || keys == Py_EMPTY_INDEXED_KEYS);
+        SoacDictPolicy *policy = soac_policy(mp);
+        uint32_t pending = policy == NULL ? 0 : policy->split_clear_pending;
+        Py_ssize_t pending_count = 0;
+        while (pending != 0) {
+            pending &= pending - 1;
+            pending_count++;
+        }
+        CHECK(values->order_size == mp->ma_used + pending_count);
     }
 
     if (check_content) {
@@ -983,7 +1134,7 @@ _PyDict_CheckConsistency(PyObject *op, int check_content)
             CHECK(DKIX_DUMMY <= ix && ix <= usable);
         }
 
-        if (keys->dk_kind == DICT_KEYS_GENERAL) {
+        if (!DK_IS_UNICODE(keys)) {
             PyDictKeyEntry *entries = DK_ENTRIES(keys);
             for (Py_ssize_t i=0; i < usable; i++) {
                 PyDictKeyEntry *entry = &entries[i];
@@ -992,7 +1143,8 @@ _PyDict_CheckConsistency(PyObject *op, int check_content)
                 if (key != NULL) {
                     /* test_dict fails if PyObject_Hash() is called again */
                     CHECK(entry->me_hash != -1);
-                    CHECK(entry->me_value != NULL);
+                    CHECK(splitted ? indexed_value_at(mp, i) != NULL
+                                   : entry->me_value != NULL);
 
                     if (PyUnicode_CheckExact(key)) {
                         Py_hash_t hash = unicode_get_hash(key);
@@ -1033,7 +1185,7 @@ _PyDict_CheckConsistency(PyObject *op, int check_content)
                 CHECK(mp->ma_values->values[index] != NULL);
             }
         }
-        else if (keys->dk_kind == DICT_KEYS_INDEXED_UNICODE) {
+        else if (DK_IS_INDEXED(keys)) {
             PyDictIndexedValues *values = indexed_values(mp);
             Py_ssize_t *order = indexed_order_array(values);
             for (Py_ssize_t i = 0; i < values->order_size; i++) {
@@ -1042,6 +1194,7 @@ _PyDict_CheckConsistency(PyObject *op, int check_content)
                 PyObject *value = values->values[index];
                 CHECK(value != NULL);
                 CHECK(value != INDEXED_VALUE_TOMBSTONE);
+                CHECK(dict_key_at(keys, index) != NULL);
                 for (Py_ssize_t previous = 0; previous < i; previous++) {
                     CHECK(order[previous] != index);
                 }
@@ -1193,6 +1346,9 @@ new_indexed_values(Py_ssize_t capacity)
 static void
 free_indexed_values(PyDictIndexedValues *values)
 {
+    if (values->prefix_keys != NULL) {
+        dictkeys_decref(values->prefix_keys, false);
+    }
     PyMem_Free(values);
 }
 
@@ -1464,7 +1620,7 @@ dictkeys_generic_lookup(PyDictObject *mp, PyDictKeysObject* dk, PyObject *key, P
 static bool
 check_keys_unicode(PyDictKeysObject *dk, PyObject *key)
 {
-    return PyUnicode_CheckExact(key) && (dk->dk_kind != DICT_KEYS_GENERAL);
+    return PyUnicode_CheckExact(key) && DK_IS_UNICODE(dk);
 }
 
 static Py_ssize_t
@@ -1585,7 +1741,7 @@ start:
     dk = mp->ma_keys;
     kind = dk->dk_kind;
 
-    if (kind != DICT_KEYS_GENERAL) {
+    if (DK_IS_UNICODE(dk)) {
         if (PyUnicode_CheckExact(key)) {
 #ifdef Py_GIL_DISABLED
             if (kind == DICT_KEYS_SPLIT) {
@@ -1634,7 +1790,8 @@ start:
             goto start;
         }
         if (ix >= 0) {
-            *value_addr = DK_ENTRIES(dk)[ix].me_value;
+            *value_addr = _PyDict_HasIndexedTable(mp)
+                ? indexed_value_at(mp, ix) : DK_ENTRIES(dk)[ix].me_value;
         }
         else {
             *value_addr = NULL;
@@ -2080,7 +2237,7 @@ _PyDict_HasOnlyStringKeys(PyObject *dict)
     PyObject *key, *value;
     assert(PyDict_Check(dict));
     /* Shortcut */
-    if (((PyDictObject *)dict)->ma_keys->dk_kind != DICT_KEYS_GENERAL)
+    if (DK_IS_UNICODE(((PyDictObject *)dict)->ma_keys))
         return 1;
     while (PyDict_Next(dict, &pos, &key, &value))
         if (!PyUnicode_Check(key))
@@ -2205,22 +2362,48 @@ error:
 PyObject *
 _PyDict_NewWithIndexedKeySet(PyDictKeysObject *keys)
 {
+#ifdef Py_GIL_DISABLED
+    PyErr_SetString(PyExc_RuntimeError,
+                    "stable-prefix dictionaries require a GIL-enabled build");
+    return NULL;
+#endif
     if (keys == NULL || keys->dk_kind != DICT_KEYS_INDEXED_UNICODE) {
         PyErr_SetString(
             PyExc_TypeError,
             "expected an indexed-unicode dictionary key set");
         return NULL;
     }
-    PyDictIndexedValues *values = new_indexed_values(keys->dk_nentries);
+    PyDictKeysObject *visible = new_keys_object(DK_LOG_SIZE(keys), true);
+    if (visible == NULL) {
+        return NULL;
+    }
+    visible->dk_kind = DICT_KEYS_INDEXED_UNICODE;
+    visible->dk_nentries = keys->dk_nentries;
+    visible->dk_usable -= keys->dk_nentries;
+    PyDictIndexedValues *values = new_indexed_values(
+        USABLE_FRACTION(DK_SIZE(visible)));
     if (values == NULL) {
+        dictkeys_decref(visible, false);
         return NULL;
     }
     dictkeys_incref(keys);
-    PyObject *dict = new_dict(keys, (PyDictValues *)values, 0, 0);
+    values->prefix_keys = keys;
+    PyObject *dict = new_dict(visible, (PyDictValues *)values, 0, 0);
     if (dict == NULL) {
         free_indexed_values(values);
     }
     return dict;
+}
+
+PyObject *
+_PyDict_NewFromIndexedSchema(PyObject *template)
+{
+    if (template == NULL || !PyDict_CheckExact(template) ||
+        !_PyDict_HasIndexedTable((PyDictObject *)template)) {
+        PyErr_SetString(PyExc_TypeError, "expected an exact indexed schema dictionary");
+        return NULL;
+    }
+    return _PyDict_NewWithIndexedKeySet(indexed_values((PyDictObject *)template)->prefix_keys);
 }
 
 Py_ssize_t
@@ -2246,7 +2429,7 @@ _PyDict_IndexedKeyIndex(PyObject *op, PyObject *key)
     PyDictObject *mp = (PyDictObject *)op;
     Py_ssize_t index;
     Py_BEGIN_CRITICAL_SECTION(op);
-    index = unicodekeys_lookup_unicode(mp->ma_keys, key, hash);
+    index = unicodekeys_lookup_unicode(indexed_values(mp)->prefix_keys, key, hash);
     Py_END_CRITICAL_SECTION();
     return index;
 }
@@ -2269,7 +2452,7 @@ _PyDict_GetIndexedItem(PyObject *op, Py_ssize_t index, PyObject **result)
     int found = 0;
     Py_BEGIN_CRITICAL_SECTION(op);
     PyDictIndexedValues *values = indexed_values(mp);
-    if (index < 0 || index >= values->capacity) {
+    if (index < 0 || index >= values->prefix_keys->dk_nentries) {
         PyErr_SetString(PyExc_IndexError, "indexed dictionary index out of range");
         found = -1;
     }
@@ -2299,49 +2482,453 @@ _PyDict_SetIndexedItem(PyObject *op, Py_ssize_t index, PyObject *value)
     }
     PyDictObject *mp = (PyDictObject *)op;
     int result = 0;
-    PyObject *old_value = NULL;
     Py_BEGIN_CRITICAL_SECTION(op);
     PyDictIndexedValues *values = indexed_values(mp);
-    if (index < 0 || index >= values->capacity) {
+    if (index < 0 || index >= values->prefix_keys->dk_nentries) {
         PyErr_SetString(PyExc_IndexError, "indexed dictionary index out of range");
         result = -1;
         goto done;
     }
-    old_value = indexed_value_at(mp, index);
-    if (old_value == INDEXED_VALUE_TOMBSTONE) {
-        PyErr_SetString(
-            PyExc_RuntimeError,
-            "cannot directly reinsert a deleted indexed dictionary key");
-        result = -1;
-        goto done;
-    }
-
-    PyObject *key = DK_UNICODE_ENTRIES(mp->ma_keys)[index].me_key;
-    if (_PyDict_HasSoacPolicy(mp)) {
-        result = _PyDict_SetItem_KnownHash_LockHeld(
-            mp, key, value, unicode_get_hash(key));
-        goto done;
-    }
-    if (old_value == NULL) {
-        _PyDict_NotifyEvent(PyDict_EVENT_ADDED, mp, key, value);
-        store_indexed_value(mp, index, Py_NewRef(value));
-        indexed_values_add_to_order(values, index);
-        STORE_USED(mp, mp->ma_used + 1);
-    }
-    else if (old_value != value) {
-        _PyDict_NotifyEvent(PyDict_EVENT_MODIFIED, mp, key, value);
-        store_indexed_value(mp, index, Py_NewRef(value));
-        Py_DECREF(old_value);
-    }
-    ASSERT_CONSISTENT(mp);
+    /* This API has normal assignment semantics, including a lookup alias.
+       Only a guarded physical load can interpret an index as lookup proof. */
+    PyObject *key = DK_UNICODE_ENTRIES(values->prefix_keys)[index].me_key;
+    result = _PyDict_SetItem_KnownHash_LockHeld(
+        mp, key, value, unicode_get_hash(key));
 
 done:
     Py_END_CRITICAL_SECTION();
     return result;
 }
 
-/* Return 1 when the owned key/value references were consumed, 0 after
- * converting the dict to a normal combined table, and -1 on error. */
+/* Rebuild visible hash buckets in insertion order, preserving every prefix
+   position and compacting only unreserved overflow.  Hashes are cached and
+   no equality, owner, or Python callbacks execute here. */
+static int
+indexed_rebuild(PyDictObject *mp, uint8_t log2_size, int unicode,
+                PyDictKeysObject *prefix)
+{
+    PyDictIndexedValues *oldvalues = indexed_values(mp);
+    PyDictKeysObject *oldkeys = mp->ma_keys;
+    Py_ssize_t prefix_size = prefix->dk_nentries;
+    if (prefix_size > PY_SSIZE_T_MAX - oldvalues->order_size - 1) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    uint8_t minimum = estimate_log2_keysize(prefix_size + oldvalues->order_size + 1);
+    log2_size = Py_MAX(log2_size, minimum);
+    unicode = unicode && DK_IS_UNICODE(oldkeys);
+    PyDictKeysObject *keys = new_keys_object(log2_size, unicode);
+    if (keys == NULL) {
+        return -1;
+    }
+    keys->dk_kind = unicode ? DICT_KEYS_INDEXED_UNICODE : DICT_KEYS_INDEXED_GENERAL;
+    PyDictIndexedValues *values = new_indexed_values(USABLE_FRACTION(DK_SIZE(keys)));
+    if (values == NULL) {
+        dictkeys_decref(keys, false);
+        return -1;
+    }
+    dictkeys_incref(prefix);
+    values->prefix_keys = prefix;
+    Py_ssize_t next = prefix_size;
+    for (Py_ssize_t i = 0; i < oldvalues->order_size; i++) {
+        Py_ssize_t oldindex = indexed_order_array(oldvalues)[i];
+        PyObject *key = dict_key_at(oldkeys, oldindex);
+        Py_hash_t hash = dict_hash_at(oldkeys, oldindex);
+        Py_ssize_t index = DKIX_EMPTY;
+        if (oldindex < oldvalues->prefix_keys->dk_nentries) {
+            index = oldindex;
+        }
+        else if (prefix != oldvalues->prefix_keys && PyUnicode_CheckExact(key)) {
+            index = unicodekeys_lookup_unicode(prefix, key, hash);
+        }
+        if (index < 0) {
+            index = next++;
+        }
+        assert(values->values[index] == NULL);
+        indexed_store_key(keys, index, Py_NewRef(key), hash);
+        values->values[index] = oldvalues->values[oldindex];
+        indexed_values_add_to_order(values, index);
+        dictkeys_set_index(keys, find_empty_slot(keys, hash), index);
+    }
+    keys->dk_nentries = next;
+    keys->dk_usable = values->capacity - next;
+    set_keys(mp, keys);
+    set_values(mp, (PyDictValues *)values);
+    /* Values were transferred, not duplicated.  Each visible key has its new
+       owner already, so releasing the old lookup table cannot run Python. */
+    dictkeys_decref(oldkeys, false);
+    free_indexed_values(oldvalues);
+    ASSERT_CONSISTENT(mp);
+    return 0;
+}
+
+static void
+indexed_prefix_append(PyDictKeysObject *prefix, PyObject *key)
+{
+    Py_hash_t hash = unicode_get_hash(key);
+    Py_ssize_t index = prefix->dk_nentries;
+    assert(prefix->dk_usable > 0 && hash != -1);
+    dictkeys_set_index(prefix, find_empty_slot(prefix, hash), index);
+    DK_UNICODE_ENTRIES(prefix)[index].me_key = Py_NewRef(key);
+    prefix->dk_nentries++;
+    prefix->dk_usable--;
+}
+
+/* Namespace policies reserve all current and future names.  The original
+   type/layout descriptor is never mutated: extension is per dictionary. */
+static PyDictKeysObject *
+indexed_namespace_prefix(PyDictObject *mp, PyObject *extra)
+{
+    PyDictIndexedValues *values = indexed_values(mp);
+    PyDictKeysObject *old = values->prefix_keys;
+    if (old->dk_nentries > PY_SSIZE_T_MAX - values->order_size - 1) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    PyDictKeysObject *prefix = new_keys_object(
+        estimate_log2_keysize(old->dk_nentries + values->order_size + 1), true);
+    if (prefix == NULL) {
+        return NULL;
+    }
+    prefix->dk_kind = DICT_KEYS_INDEXED_UNICODE;
+    for (Py_ssize_t i = 0; i < old->dk_nentries; i++) {
+        indexed_prefix_append(prefix, DK_UNICODE_ENTRIES(old)[i].me_key);
+    }
+    for (Py_ssize_t i = 0; i < values->order_size; i++) {
+        Py_ssize_t index = indexed_order_array(values)[i];
+        if (index >= old->dk_nentries) {
+            PyObject *key = dict_key_at(mp->ma_keys, index);
+            assert(PyUnicode_CheckExact(key));
+            indexed_prefix_append(prefix, key);
+        }
+    }
+    if (extra != NULL) {
+        indexed_prefix_append(prefix, extra);
+    }
+    return prefix;
+}
+
+static int
+indexed_normalize_namespace(PyDictObject *dict)
+{
+    if (!_PyDict_HasIndexedTable(dict)) {
+        PyObject *names = PyDict_Keys((PyObject *)dict);
+        if (names == NULL) {
+            return -1;
+        }
+        PyDictKeysObject *prefix = _PyDict_NewIndexedKeySet(names);
+        Py_DECREF(names);
+        if (prefix == NULL) {
+            return -1;
+        }
+        PyDictKeysObject *oldkeys = dict->ma_keys;
+        PyDictValues *oldvalues = dict->ma_values;
+        PyDictKeysObject *keys = new_keys_object(
+            Py_MAX(DK_LOG_SIZE(oldkeys), DK_LOG_SIZE(prefix)), true);
+        if (keys == NULL) {
+            dictkeys_decref(prefix, false);
+            return -1;
+        }
+        keys->dk_kind = DICT_KEYS_INDEXED_UNICODE;
+        PyDictIndexedValues *values = new_indexed_values(USABLE_FRACTION(DK_SIZE(keys)));
+        if (values == NULL) {
+            dictkeys_decref(prefix, false);
+            dictkeys_decref(keys, false);
+            return -1;
+        }
+        values->prefix_keys = prefix;
+        Py_ssize_t pos = 0, index = 0;
+        PyObject *key, *value;
+        Py_hash_t hash;
+        while (_PyDict_Next((PyObject *)dict, &pos, &key, &value, &hash)) {
+            indexed_store_key(keys, index, Py_NewRef(key), hash);
+            values->values[index] = value;  /* transfer on commit */
+            indexed_values_add_to_order(values, index);
+            dictkeys_set_index(keys, find_empty_slot(keys, hash), index);
+            index++;
+        }
+        keys->dk_nentries = index;
+        keys->dk_usable -= index;
+        if (oldvalues != NULL) {
+            SoacDictPolicy *policy = soac_policy(dict);
+            assert(policy != NULL && policy->baseline_keys == NULL);
+            assert(oldkeys->dk_kind == DICT_KEYS_SPLIT);
+            dictkeys_incref(oldkeys);
+            policy->baseline_keys = oldkeys;
+            policy->baseline_capacity = oldvalues->capacity;
+            policy->baseline_embedded = oldvalues->embedded;
+        }
+        set_keys(dict, keys);
+        set_values(dict, (PyDictValues *)values);
+        /* Remove old ownership without releasing a value or exposing an
+           inline-values fast path after the authoritative dictionary moves. */
+        if (oldvalues != NULL) {
+            for (Py_ssize_t i = 0; i < oldvalues->capacity; i++) {
+                oldvalues->values[i] = NULL;
+            }
+            if (oldvalues->embedded) {
+                oldvalues->size = 0;
+                oldvalues->valid = 0;
+            }
+            else {
+                free_values(oldvalues, false);
+            }
+        }
+        else {
+            for (Py_ssize_t i = 0; i < oldkeys->dk_nentries; i++) {
+                if (DK_IS_UNICODE(oldkeys)) {
+                    DK_UNICODE_ENTRIES(oldkeys)[i].me_value = NULL;
+                }
+                else {
+                    DK_ENTRIES(oldkeys)[i].me_value = NULL;
+                }
+            }
+        }
+        dictkeys_decref(oldkeys, false);
+        ASSERT_CONSISTENT(dict);
+        return 0;
+    }
+    PyDictKeysObject *prefix = indexed_namespace_prefix(dict, NULL);
+    if (prefix == NULL) {
+        return -1;
+    }
+    int result = indexed_rebuild(dict, DK_LOG_SIZE(dict->ma_keys), 1, prefix);
+    dictkeys_decref(prefix, false);
+    return result;
+}
+
+/* All visible entries of a namespace are already reserved, so adding only
+   logical names need not rebuild its live hash buckets when capacity fits. */
+static int
+indexed_extend_namespace(PyDictObject *dict, PyDictKeysObject *prefix)
+{
+    PyDictIndexedValues *values = indexed_values(dict);
+    Py_ssize_t old_size = values->prefix_keys->dk_nentries;
+    Py_ssize_t added = prefix->dk_nentries - old_size;
+    assert(added >= 0);
+    if (dict->ma_keys != Py_EMPTY_INDEXED_KEYS &&
+        dict->ma_keys->dk_nentries == old_size && dict->ma_keys->dk_usable >= added) {
+        PyDictKeysObject *old = values->prefix_keys;
+        dictkeys_incref(prefix);
+        values->prefix_keys = prefix;
+        dict->ma_keys->dk_nentries += added;
+        dict->ma_keys->dk_usable -= added;
+        dict->ma_keys->dk_version = 0;
+        dictkeys_decref(old, false);
+        return 0;
+    }
+    return indexed_rebuild(dict, DK_LOG_SIZE(dict->ma_keys), 1, prefix);
+}
+
+int
+_PyDict_ReserveSoacNamespaceKeys(PyObject *op, PyObject *owner, PyObject *names)
+{
+    if (!PyDict_HasSoacPolicy(op) || names == NULL || !PyTuple_CheckExact(names)) {
+        PyErr_SetString(PyExc_TypeError, "SOAC namespace reservation requires an owned dict and exact tuple");
+        return -1;
+    }
+    PyDictObject *dict = (PyDictObject *)op;
+    SoacDictPolicy *policy = soac_policy(dict);
+    if (policy->flags != 0 || policy->owner != owner || policy->sealed) {
+        PyErr_SetString(soac_mutation_error(), "SOAC namespace reservation requires its unsealed native owner");
+        return -1;
+    }
+    if (soac_begin_mutation(policy) < 0) {
+        return -1;
+    }
+    PyDictKeysObject *prefix = NULL;
+    int result = -1;
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(names); i++) {
+        if (!PyUnicode_CheckExact(PyTuple_GET_ITEM(names, i))) {
+            PyErr_SetString(PyExc_TypeError, "SOAC reserved names must be exact strings");
+            goto done;
+        }
+    }
+    PyDictKeysObject *old = indexed_values(dict)->prefix_keys;
+    if (old->dk_nentries > PY_SSIZE_T_MAX - PyTuple_GET_SIZE(names)) {
+        PyErr_NoMemory();
+        goto done;
+    }
+    prefix = new_keys_object(estimate_log2_keysize(
+        old->dk_nentries + PyTuple_GET_SIZE(names)), true);
+    if (prefix == NULL) {
+        goto done;
+    }
+    prefix->dk_kind = DICT_KEYS_INDEXED_UNICODE;
+    for (Py_ssize_t i = 0; i < old->dk_nentries; i++) {
+        indexed_prefix_append(prefix, DK_UNICODE_ENTRIES(old)[i].me_key);
+    }
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(names); i++) {
+        PyObject *key = PyTuple_GET_ITEM(names, i);
+        Py_hash_t hash = _PyObject_HashFast(key);
+        assert(hash != -1);  /* exact unicode hashing cannot execute Python */
+        if (unicodekeys_lookup_unicode(prefix, key, hash) == DKIX_EMPTY) {
+            indexed_prefix_append(prefix, key);
+        }
+    }
+    result = indexed_extend_namespace(dict, prefix);
+done:
+    policy->mutating = 0;
+    if (prefix != NULL) {
+        dictkeys_decref(prefix, false);
+    }
+    return result;
+}
+
+static int
+soac_clear_key_pending(SoacDictPolicy *policy, PyObject *key)
+{
+    if (policy->split_clear_pending == 0 || !PyUnicode_CheckExact(key)) {
+        return 0;
+    }
+    Py_ssize_t index = unicodekeys_lookup_unicode(
+        policy->baseline_keys, key, unicode_get_hash(key));
+    return index >= 0 &&
+        (policy->split_clear_pending & (UINT32_C(1) << index)) != 0;
+}
+
+/* A split clear addresses shared physical string slots, never arbitrary key
+   equality.  Find that canonical string even if a finalizer has subsequently
+   promoted the actual lookup table to support general overflow. */
+static Py_ssize_t
+indexed_canonical_string_index(PyDictObject *dict, PyObject *key)
+{
+    PyDictKeysObject *keys = dict->ma_keys;
+    Py_hash_t hash = unicode_get_hash(key);
+    if (DK_IS_UNICODE(keys)) {
+        return unicodekeys_lookup_unicode(keys, key, hash);
+    }
+    size_t mask = DK_MASK(keys);
+    size_t perturb = hash;
+    size_t i = (size_t)hash & mask;
+    for (;;) {
+        Py_ssize_t index = dictkeys_get_index(keys, i);
+        if (index == DKIX_EMPTY) {
+            return DKIX_EMPTY;
+        }
+        if (index >= 0) {
+            PyDictKeyEntry *entry = &DK_ENTRIES(keys)[index];
+            if (entry->me_hash == hash && PyUnicode_CheckExact(entry->me_key) &&
+                (entry->me_key == key || unicode_eq(entry->me_key, key))) {
+                return index;
+            }
+        }
+        perturb >>= PERTURB_SHIFT;
+        i = mask & (i * 5 + perturb + 1);
+    }
+}
+
+static int
+soac_preflight_split_clear_insert(PyDictObject *dict, SoacDictPolicy *policy,
+                                  PyObject *key, Py_hash_t hash)
+{
+    if (policy == NULL || policy->split_clear == NULL || policy->baseline_promoted) {
+        return 0;
+    }
+    if (!policy->baseline_embedded) {
+        PyErr_SetString(soac_mutation_error(),
+                        "cannot insert during a detached split dictionary clear");
+        return -1;
+    }
+    Py_ssize_t index = PyUnicode_CheckExact(key)
+        ? unicodekeys_lookup_unicode(policy->baseline_keys, key, hash) : DKIX_EMPTY;
+    if (index >= 0) {
+        for (SoacSplitClearFrame *frame = policy->split_clear;
+             frame != NULL; frame = frame->previous) {
+            if (index >= frame->next_index && index < frame->nentries) {
+                PyErr_SetString(soac_mutation_error(),
+                                "cannot fill a future empty slot during split dictionary clear");
+                return -1;
+            }
+        }
+    }
+    else if (PyUnicode_CheckExact(key) && policy->baseline_keys->dk_usable > 0) {
+        index = policy->baseline_keys->dk_nentries;
+    }
+    int promotes = index < 0 || index >= policy->baseline_capacity;
+    if (promotes && (policy->split_clear_pending != 0 || dict->ma_used != 0)) {
+        PyErr_SetString(soac_mutation_error(),
+                        "cannot promote a split dictionary clear with live values");
+        return -1;
+    }
+    return 0;
+}
+
+/* Commit a single resolved lookup.  The caller owns key/value references;
+   consume them only on success.  A protected owner validates this very
+   canonical slot, so there must not be another user equality call here. */
+static int
+indexed_commit(PyDictObject *mp, PyObject *key, Py_hash_t hash,
+               PyObject *value, Py_ssize_t index, PyObject *old_value)
+{
+    if (old_value != NULL) {
+        assert(index >= 0);
+        if (old_value != value) {
+            _PyDict_NotifyEvent(PyDict_EVENT_MODIFIED, mp, key, value);
+            store_indexed_value(mp, index, value);
+            Py_DECREF(old_value);
+        }
+        else {
+            Py_DECREF(value);
+        }
+        Py_DECREF(key);
+        return 0;
+    }
+    PyDictIndexedValues *values = indexed_values(mp);
+    index = PyUnicode_CheckExact(key)
+        ? unicodekeys_lookup_unicode(values->prefix_keys, key, hash) : DKIX_EMPTY;
+    SoacDictPolicy *policy = soac_policy(mp);
+    if (soac_preflight_split_clear_insert(mp, policy, key, hash) < 0) {
+        return -1;
+    }
+    if (index < 0 && policy != NULL && policy->flags == 0) {
+        assert(PyUnicode_CheckExact(key));
+        PyDictKeysObject *prefix = indexed_namespace_prefix(mp, key);
+        if (prefix == NULL) {
+            return -1;
+        }
+        index = prefix->dk_nentries - 1;
+        int result = indexed_extend_namespace(mp, prefix);
+        dictkeys_decref(prefix, false);
+        if (result < 0) {
+            return -1;
+        }
+    }
+    if (mp->ma_keys == Py_EMPTY_INDEXED_KEYS ||
+        (!PyUnicode_CheckExact(key) && DK_IS_UNICODE(mp->ma_keys)) ||
+        (index < 0 && mp->ma_keys->dk_usable == 0)) {
+        if (indexed_rebuild(mp, DK_LOG_SIZE(mp->ma_keys),
+                            PyUnicode_CheckExact(key), indexed_values(mp)->prefix_keys) < 0) {
+            return -1;
+        }
+    }
+    values = indexed_values(mp);
+    if (index < 0) {
+        index = mp->ma_keys->dk_nentries++;
+        mp->ma_keys->dk_usable--;
+    }
+    assert(dict_key_at(mp->ma_keys, index) == NULL && values->values[index] == NULL);
+    if (policy != NULL && policy->baseline_keys != NULL &&
+        !policy->baseline_promoted) {
+        Py_ssize_t baseline_index = PyUnicode_CheckExact(key)
+            ? insert_split_key(policy->baseline_keys, key, hash) : DKIX_EMPTY;
+        if (baseline_index < 0 || baseline_index >= policy->baseline_capacity) {
+            policy->baseline_promoted = 1;
+        }
+    }
+    _PyDict_NotifyEvent(PyDict_EVENT_ADDED, mp, key, value);
+    mp->ma_keys->dk_version = 0;
+    dictkeys_set_index(mp->ma_keys, find_empty_slot(mp->ma_keys, hash), index);
+    indexed_record_key_aliases(mp, key);
+    indexed_store_key(mp->ma_keys, index, key, hash);
+    values->values[index] = value;
+    indexed_values_add_to_order(values, index);
+    STORE_USED(mp, mp->ma_used + 1);
+    ASSERT_CONSISTENT(mp);
+    return 0;
+}
+
+/* Return 1 after consuming owned key/value references, or -1 on failure. */
 static int
 insert_indexed_dict(PyDictObject *mp,
                     PyObject *key, Py_hash_t hash, PyObject *value)
@@ -2349,37 +2936,13 @@ insert_indexed_dict(PyDictObject *mp,
     ASSERT_DICT_LOCKED(mp);
     assert(_PyDict_HasIndexedTable(mp));
 
-    Py_ssize_t index = DKIX_EMPTY;
-    if (PyUnicode_CheckExact(key)) {
-        index = unicodekeys_lookup_unicode(mp->ma_keys, key, hash);
-    }
-    if (index >= 0) {
-        PyObject *old_value = indexed_value_at(mp, index);
-        if (old_value != INDEXED_VALUE_TOMBSTONE) {
-            if (old_value == NULL) {
-                _PyDict_NotifyEvent(PyDict_EVENT_ADDED, mp, key, value);
-                store_indexed_value(mp, index, value);
-                indexed_values_add_to_order(indexed_values(mp), index);
-                STORE_USED(mp, mp->ma_used + 1);
-            }
-            else if (old_value != value) {
-                _PyDict_NotifyEvent(PyDict_EVENT_MODIFIED, mp, key, value);
-                store_indexed_value(mp, index, value);
-                Py_DECREF(old_value);
-            }
-            else {
-                Py_DECREF(value);
-            }
-            Py_DECREF(key);
-            ASSERT_CONSISTENT(mp);
-            return 1;
-        }
-    }
-
-    if (insertion_resize(mp, PyUnicode_CheckExact(key)) < 0) {
+    PyObject *old_value;
+    Py_ssize_t index = _Py_dict_lookup(mp, key, hash, &old_value);
+    if (index == DKIX_ERROR ||
+        indexed_commit(mp, key, hash, value, index, old_value) < 0) {
         return -1;
     }
-    return 0;
+    return 1;
 }
 
 static inline int
@@ -2825,6 +3388,11 @@ dictresize(PyDictObject *mp,
 
     ASSERT_DICT_LOCKED(mp);
 
+    if (_PyDict_HasIndexedTable(mp)) {
+        return indexed_rebuild(mp, log2_newsize, unicode,
+                               indexed_values(mp)->prefix_keys);
+    }
+
     if (log2_newsize >= SIZEOF_SIZE_T*8) {
         PyErr_NoMemory();
         return -1;
@@ -2854,42 +3422,7 @@ dictresize(PyDictObject *mp,
 
     Py_ssize_t numentries = mp->ma_used;
 
-    if (oldvalues != NULL &&
-        oldkeys->dk_kind == DICT_KEYS_INDEXED_UNICODE)
-    {
-        PyDictIndexedValues *indexed = (PyDictIndexedValues *)oldvalues;
-        PyDictUnicodeEntry *oldentries = DK_UNICODE_ENTRIES(oldkeys);
-        assert(indexed->order_size == numentries);
-        if (newkeys->dk_kind == DICT_KEYS_GENERAL) {
-            PyDictKeyEntry *newentries = DK_ENTRIES(newkeys);
-            for (Py_ssize_t i = 0; i < numentries; i++) {
-                Py_ssize_t index = indexed_order_array(indexed)[i];
-                PyObject *value = indexed->values[index];
-                assert(value != NULL && value != INDEXED_VALUE_TOMBSTONE);
-                PyObject *key = oldentries[index].me_key;
-                newentries[i].me_key = Py_NewRef(key);
-                newentries[i].me_hash = unicode_get_hash(key);
-                newentries[i].me_value = value;
-            }
-            build_indices_generic(newkeys, newentries, numentries);
-        }
-        else {
-            PyDictUnicodeEntry *newentries = DK_UNICODE_ENTRIES(newkeys);
-            for (Py_ssize_t i = 0; i < numentries; i++) {
-                Py_ssize_t index = indexed_order_array(indexed)[i];
-                PyObject *value = indexed->values[index];
-                assert(value != NULL && value != INDEXED_VALUE_TOMBSTONE);
-                newentries[i].me_key = Py_NewRef(oldentries[index].me_key);
-                newentries[i].me_value = value;
-            }
-            build_indices_unicode(newkeys, newentries, numentries);
-        }
-        set_keys(mp, newkeys);
-        dictkeys_decref(oldkeys, IS_DICT_SHARED(mp));
-        set_values(mp, NULL);
-        free_indexed_values(indexed);
-    }
-    else if (oldvalues != NULL) {
+    if (oldvalues != NULL) {
         LOCK_KEYS(oldkeys);
         PyDictUnicodeEntry *oldentries = DK_UNICODE_ENTRIES(oldkeys);
         /* Convert split table into new combined table.
@@ -3458,10 +3991,11 @@ _PyDict_LoadBuiltinsFromGlobals(PyObject *globals)
 /* Protected writes retain the replaced value until the table is consistent
    and the guard has been released.  The ordinary insertion kernels can then
    keep their refcount/resize behavior without running finalizers under the
-   guard.  No key hash/equality can execute Python for these dictionaries. */
+   guard.  Instance dictionaries can execute key hash/equality while guarded;
+   validation and commit use the same resolved canonical entry. */
 static int
-soac_setitem_lock_held(PyDictObject *dict, PyObject *key, PyObject *value,
-                       PyObject *provenance)
+soac_setitem_resolved(PyDictObject *dict, PyObject *key, PyObject *value,
+                      PyObject *provenance, int override, Py_hash_t hash)
 {
     SoacDictPolicy *policy = soac_policy(dict);
     if (soac_check_key(dict, key) < 0 || soac_begin_mutation(policy) < 0) {
@@ -3469,28 +4003,62 @@ soac_setitem_lock_held(PyDictObject *dict, PyObject *key, PyObject *value,
     }
     int result = -1;
     PyObject *old_value = NULL;
-    Py_hash_t hash = _PyObject_HashFast(key);
-    if (hash == -1 ||
-        _Py_dict_lookup(dict, key, hash, &old_value) == DKIX_ERROR) {
+    PyObject *canonical = NULL;
+    if (hash == -1) {
+        hash = _PyObject_HashFast(key);
+    }
+    if (hash == -1) {
+        goto done;
+    }
+    Py_ssize_t index = _Py_dict_lookup(dict, key, hash, &old_value);
+    if (index == DKIX_ERROR) {
         old_value = NULL;
         goto done;
     }
+    canonical = Py_NewRef(old_value == NULL ? key : dict_key_at(dict->ma_keys, index));
     Py_XINCREF(old_value);
+    if (old_value != NULL && override != 1) {
+        if (override == 0) {
+            result = 0;
+        }
+        else {
+            _PyErr_SetKeyError(key);
+        }
+        goto done;
+    }
     int operation = old_value == NULL ? PyDict_SOAC_SET : PyDict_SOAC_SET_EXISTING;
     if (provenance != NULL) {
         operation = old_value == NULL
             ? PyDict_SOAC_CACHE_INSERT : PyDict_SOAC_CACHE_REPLACE;
     }
-    if (soac_validate(policy, dict, key, value, operation, provenance) < 0) {
+    if (soac_validate(policy, dict, canonical, value, operation, provenance) < 0) {
         goto done;
     }
-    result = dict->ma_keys == Py_EMPTY_KEYS
-        ? insert_to_emptydict(dict, Py_NewRef(key), hash, Py_NewRef(value))
-        : insertdict(dict, Py_NewRef(key), hash, Py_NewRef(value));
+    if (_PyDict_HasIndexedTable(dict)) {
+        PyObject *owned_key = Py_NewRef(key), *owned_value = Py_NewRef(value);
+        result = indexed_commit(dict, owned_key, hash, owned_value, index, old_value);
+        if (result < 0) {
+            Py_DECREF(owned_key);
+            Py_DECREF(owned_value);
+        }
+    }
+    else {
+        result = dict->ma_keys == Py_EMPTY_KEYS
+            ? insert_to_emptydict(dict, Py_NewRef(key), hash, Py_NewRef(value))
+            : insertdict(dict, Py_NewRef(key), hash, Py_NewRef(value));
+    }
 done:
     policy->mutating = 0;
+    Py_XDECREF(canonical);
     Py_XDECREF(old_value);
     return result;
+}
+
+static int
+soac_setitem_lock_held(PyDictObject *dict, PyObject *key, PyObject *value,
+                       PyObject *provenance)
+{
+    return soac_setitem_resolved(dict, key, value, provenance, 1, -1);
 }
 
 /* Consumes references to key and value */
@@ -3567,7 +4135,7 @@ _PyDict_SetItem_KnownHash_LockHeld(PyDictObject *mp, PyObject *key, PyObject *va
                                    Py_hash_t hash)
 {
     if (_PyDict_HasSoacPolicy(mp)) {
-        return soac_setitem_lock_held(mp, key, value, NULL);
+        return soac_setitem_resolved(mp, key, value, NULL, 1, hash);
     }
     if (mp->ma_keys == Py_EMPTY_KEYS) {
         return insert_to_emptydict(mp, Py_NewRef(key), hash, Py_NewRef(value));
@@ -3664,9 +4232,14 @@ delitem_common(PyDictObject *mp, Py_hash_t hash, Py_ssize_t ix,
     STORE_USED(mp, mp->ma_used - 1);
     if (_PyDict_HasIndexedTable(mp)) {
         assert(old_value == indexed_value_at(mp, ix));
-        store_indexed_value(mp, ix, INDEXED_VALUE_TOMBSTONE);
+        mp->ma_keys->dk_version = 0;
+        dictkeys_set_index(mp->ma_keys, hashpos, DKIX_DUMMY);
+        old_key = dict_key_at(mp->ma_keys, ix);
+        indexed_store_key(mp->ma_keys, ix, NULL, 0);
+        store_indexed_value(mp, ix, NULL);
         indexed_values_delete_from_order(indexed_values(mp), ix);
         ASSERT_CONSISTENT(mp);
+        Py_DECREF(old_key);
     }
     else if (_PyDict_HasSplitTable(mp)) {
         assert(old_value == mp->ma_values->values[ix]);
@@ -3702,7 +4275,8 @@ delitem_common(PyDictObject *mp, Py_hash_t hash, Py_ssize_t ix,
 /* The returned reference keeps the removed value alive until after the
    commit/guard boundary, even for PyDict_Pop(..., NULL). */
 static int
-soac_pop_lock_held(PyDictObject *dict, PyObject *key, PyObject **result)
+soac_remove_lock_held(PyDictObject *dict, PyObject *key, Py_hash_t hash,
+                      int pop_empty, PyObject **result)
 {
     if (result != NULL) {
         *result = NULL;
@@ -3713,7 +4287,16 @@ soac_pop_lock_held(PyDictObject *dict, PyObject *key, PyObject **result)
     }
     int status = -1;
     PyObject *value = NULL;
-    Py_hash_t hash = _PyObject_HashFast(key);
+    PyObject *canonical = NULL;
+    if (pop_empty && dict->ma_used == 0) {
+        /* Like stock pop, an empty logical dictionary does not hash or pop a
+           slot still pending in an explicit split clear. */
+        status = 0;
+        goto done;
+    }
+    if (hash == -1) {
+        hash = _PyObject_HashFast(key);
+    }
     if (hash == -1) {
         goto done;
     }
@@ -3728,7 +4311,8 @@ soac_pop_lock_held(PyDictObject *dict, PyObject *key, PyObject **result)
         goto done;
     }
     Py_INCREF(value);
-    if (soac_validate(policy, dict, key, NULL, PyDict_SOAC_DELETE, NULL) < 0) {
+    canonical = Py_NewRef(dict_key_at(dict->ma_keys, ix));
+    if (soac_validate(policy, dict, canonical, NULL, PyDict_SOAC_DELETE, NULL) < 0) {
         goto done;
     }
     _PyDict_NotifyEvent(PyDict_EVENT_DELETED, dict, key, NULL);
@@ -3736,6 +4320,7 @@ soac_pop_lock_held(PyDictObject *dict, PyObject *key, PyObject **result)
     status = 1;
 done:
     policy->mutating = 0;
+    Py_XDECREF(canonical);
     if (status == 1 && result != NULL) {
         *result = value;
     }
@@ -3746,11 +4331,60 @@ done:
 }
 
 int
+_PyDict_SetItemAndDeleteForModule(PyObject *op, PyObject *key,
+                                 PyObject *value, PyObject *companion)
+{
+    if (!PyDict_HasSoacPolicy(op) || key == NULL || companion == NULL ||
+        !PyUnicode_CheckExact(key) || !PyUnicode_CheckExact(companion)) {
+        PyErr_SetString(PyExc_TypeError, "SOAC module composite requires an owned namespace and exact names");
+        return -1;
+    }
+    PyDictObject *dict = (PyDictObject *)op;
+    SoacDictPolicy *policy = soac_policy(dict);
+    if (policy->flags != 0 || PyObject_RichCompareBool(key, companion, Py_EQ) != 0) {
+        PyErr_SetString(PyExc_TypeError, "SOAC module composite requires distinct namespace names");
+        return -1;
+    }
+    if (soac_begin_mutation(policy) < 0) {
+        return -1;
+    }
+    PyObject *primary_value, *companion_value;
+    Py_hash_t hash = _PyObject_HashFast(key);
+    Py_hash_t companion_hash = _PyObject_HashFast(companion);
+    assert(hash != -1 && companion_hash != -1);
+    (void)_Py_dict_lookup(dict, key, hash, &primary_value);
+    (void)_Py_dict_lookup(dict, companion, companion_hash, &companion_value);
+    int sealed = policy->sealed;
+    policy->mutating = 0;
+    if (value == NULL && primary_value == NULL) {
+        return 0;
+    }
+    if (sealed && (companion_value != NULL || primary_value != NULL)) {
+        PyErr_SetString(soac_mutation_error(),
+                        "a sealed SOAC compound module setter requires a first insert and absent companion");
+        return -1;
+    }
+    int result = value == NULL
+        ? soac_remove_lock_held(dict, key, hash, 0, NULL)
+        : (soac_setitem_lock_held(dict, key, value, NULL) < 0 ? -1 : 1);
+    if (result <= 0) {
+        return result;
+    }
+    if (sealed) {
+        /* A genuine first insert releases no displaced key/value, so no
+           finalizer can create a second binding between these operations. */
+        return 1;
+    }
+    /* Do not defer primary finalizers until after companion deletion. */
+    return soac_remove_lock_held(dict, companion, companion_hash, 0, NULL) < 0 ? -1 : 1;
+}
+
+int
 PyDict_DelItem(PyObject *op, PyObject *key)
 {
     assert(key);
     if (PyDict_HasSoacPolicy(op)) {
-        int status = soac_pop_lock_held((PyDictObject *)op, key, NULL);
+        int status = soac_remove_lock_held((PyDictObject *)op, key, -1, 0, NULL);
         if (status == 0) {
             _PyErr_SetKeyError(key);
         }
@@ -3783,7 +4417,7 @@ _PyDict_DelItem_KnownHash_LockHeld(PyObject *op, PyObject *key, Py_hash_t hash)
     assert(hash != -1);
     mp = (PyDictObject *)op;
     if (_PyDict_HasSoacPolicy(mp)) {
-        int status = soac_pop_lock_held(mp, key, NULL);
+        int status = soac_remove_lock_held(mp, key, hash, 0, NULL);
         if (status == 0) {
             _PyErr_SetKeyError(key);
         }
@@ -3833,6 +4467,7 @@ delitemif_lock_held(PyObject *op, PyObject *key,
             return -1;
         }
         PyObject *held = NULL;
+        PyObject *canonical = NULL;
         res = -1;
         hash = _PyObject_HashFast(key);
         if (hash == -1) {
@@ -3847,9 +4482,10 @@ delitemif_lock_held(PyObject *op, PyObject *key,
             goto protected_done;
         }
         held = Py_NewRef(old_value);
+        canonical = Py_NewRef(dict_key_at(mp->ma_keys, ix));
         res = predicate(old_value, arg);
         if (res > 0) {
-            if (soac_validate(policy, mp, key, NULL, PyDict_SOAC_DELETE, NULL) < 0) {
+            if (soac_validate(policy, mp, canonical, NULL, PyDict_SOAC_DELETE, NULL) < 0) {
                 res = -1;
                 goto protected_done;
             }
@@ -3859,6 +4495,7 @@ delitemif_lock_held(PyObject *op, PyObject *key,
         }
 protected_done:
         policy->mutating = 0;
+        Py_XDECREF(canonical);
         Py_XDECREF(held);
         return res;
     }
@@ -3904,6 +4541,166 @@ _PyDict_DelItemIf(PyObject *op, PyObject *key,
     return res;
 }
 
+/* Detach every active reference without allocating.  The detached hash
+   indices become an insertion-order list, and its otherwise-unused entry
+   values temporarily own the transferred values.  There is never a second
+   authoritative/shadow value array. */
+static PyDictKeysObject *
+indexed_clear_storage(PyDictObject *dict, Py_ssize_t *count)
+{
+    PyDictKeysObject *keys = dict->ma_keys;
+    PyDictIndexedValues *values = indexed_values(dict);
+    SoacDictPolicy *policy = soac_policy(dict);
+    Py_ssize_t split_order[SHARED_KEYS_MAX_SIZE];
+    int split = policy != NULL && policy->baseline_keys != NULL &&
+        !policy->baseline_promoted;
+    *count = values->order_size;
+    if (keys == Py_EMPTY_INDEXED_KEYS) {
+        if (split && !policy->baseline_embedded) {
+            policy->baseline_promoted = 1;
+        }
+        return NULL;
+    }
+    if (split) {
+        /* Resolve the whole bounded order before reusing hash indices below.
+           Exact strings cannot invoke user equality, and an unpromoted stock
+           split dictionary has no non-string keys. */
+        assert(DK_IS_UNICODE(keys) && *count <= SHARED_KEYS_MAX_SIZE);
+        Py_ssize_t found = 0;
+        for (Py_ssize_t i = 0; i < policy->baseline_keys->dk_nentries; i++) {
+            PyObject *key = DK_UNICODE_ENTRIES(policy->baseline_keys)[i].me_key;
+            Py_ssize_t index = unicodekeys_lookup_unicode(keys, key, unicode_get_hash(key));
+            if (index >= 0) {
+                assert(values->values[index] != NULL);
+                split_order[found++] = index;
+            }
+        }
+        assert(found == *count);
+        if (!policy->baseline_embedded) {
+            /* A detached ordinary split dictionary becomes combined on
+               clear; a live inline-backed dictionary retains shared keys. */
+            policy->baseline_promoted = 1;
+        }
+    }
+    keys->dk_version = 0;
+    for (Py_ssize_t i = 0; i < *count; i++) {
+        Py_ssize_t index = split ? split_order[i] : indexed_order_array(values)[i];
+        dictkeys_set_index(keys, i, index);
+        if (DK_IS_UNICODE(keys)) {
+            DK_UNICODE_ENTRIES(keys)[index].me_value = values->values[index];
+        }
+        else {
+            DK_ENTRIES(keys)[index].me_value = values->values[index];
+        }
+        values->values[index] = NULL;
+    }
+    values->order_size = 0;
+    set_keys(dict, Py_EMPTY_INDEXED_KEYS);
+    STORE_USED(dict, 0);
+    ASSERT_CONSISTENT(dict);
+    return keys;
+}
+
+static void
+indexed_release_cleared_keys(PyDictKeysObject *keys, Py_ssize_t count)
+{
+    if (keys == NULL) {
+        return;
+    }
+    for (Py_ssize_t i = 0; i < count; i++) {
+        Py_ssize_t index = dictkeys_get_index(keys, i);
+        PyObject *key = dict_key_at(keys, index);
+        PyObject *value;
+        if (DK_IS_UNICODE(keys)) {
+            value = DK_UNICODE_ENTRIES(keys)[index].me_value;
+            DK_UNICODE_ENTRIES(keys)[index].me_key = NULL;
+            DK_UNICODE_ENTRIES(keys)[index].me_value = NULL;
+        }
+        else {
+            value = DK_ENTRIES(keys)[index].me_value;
+            DK_ENTRIES(keys)[index].me_key = NULL;
+            DK_ENTRIES(keys)[index].me_value = NULL;
+        }
+        Py_DECREF(key);
+        Py_DECREF(value);
+    }
+    dictkeys_decref(keys, false);
+}
+
+/* Keep the defined stock split-clear observation: len/iteration become empty
+   first, but later physical fields remain readable until their own release.
+   Frames and a bounded pending mask contain bookkeeping only, never values.
+   Every callback sees one authoritative, internally accounted value array. */
+static int
+indexed_clear_split(PyDictObject *dict, SoacDictPolicy *policy)
+{
+    assert(policy->mutating && policy->baseline_keys != NULL);
+    if (policy->split_clear != NULL && !policy->baseline_embedded) {
+        PyErr_SetString(soac_mutation_error(),
+                        "cannot recursively clear a detached split dictionary");
+        return -1;
+    }
+    SoacSplitClearFrame frame = {
+        .previous = policy->split_clear,
+        .nentries = policy->baseline_keys->dk_nentries,
+    };
+    _PyDict_NotifyEvent(PyDict_EVENT_CLEARED, dict, NULL, NULL);
+    policy->split_clear = &frame;
+    policy->split_clear_pending = 0;
+    for (Py_ssize_t i = 0; i < frame.nentries; i++) {
+        PyObject *key = DK_UNICODE_ENTRIES(policy->baseline_keys)[i].me_key;
+        if (indexed_canonical_string_index(dict, key) >= 0) {
+            policy->split_clear_pending |= UINT32_C(1) << i;
+        }
+    }
+    STORE_USED(dict, 0);
+    ASSERT_CONSISTENT(dict);
+    for (Py_ssize_t i = 0; i < frame.nentries; i++) {
+        /* Reinserting this just-cleared slot is valid; filling a future
+           empty slot would be cleared later without stock fixing its count. */
+        frame.next_index = i + 1;
+        PyObject *name = DK_UNICODE_ENTRIES(policy->baseline_keys)[i].me_key;
+        Py_ssize_t index = indexed_canonical_string_index(dict, name);
+        if (index < 0) {
+            continue;
+        }
+        uint32_t pending = UINT32_C(1) << i;
+        assert((policy->split_clear_pending & pending) != 0);
+        policy->split_clear_pending &= ~pending;
+        PyDictIndexedValues *values = indexed_values(dict);
+        PyObject *key = dict_key_at(dict->ma_keys, index);
+        PyObject *value = values->values[index];
+        Py_ssize_t hashpos = lookdict_index(dict->ma_keys, unicode_get_hash(name), index);
+        assert(hashpos >= 0 && value != NULL);
+        dictkeys_set_index(dict->ma_keys, hashpos, DKIX_DUMMY);
+        indexed_store_key(dict->ma_keys, index, NULL, 0);
+        values->values[index] = NULL;
+        indexed_values_delete_from_order(values, index);
+        dict->ma_keys->dk_version = 0;
+        ASSERT_CONSISTENT(dict);
+        policy->mutating = 0;
+        Py_DECREF(key);
+        Py_DECREF(value);
+        if (soac_begin_mutation(policy) < 0) {
+            policy->split_clear = frame.previous;
+            return -1;
+        }
+    }
+    policy->split_clear = frame.previous;
+    assert(policy->split_clear_pending == 0);
+    if (!policy->baseline_embedded) {
+        policy->baseline_promoted = 1;
+    }
+    if (indexed_values(dict)->order_size == 0) {
+        Py_ssize_t count;
+        PyDictKeysObject *keys = indexed_clear_storage(dict, &count);
+        assert(count == 0);
+        indexed_release_cleared_keys(keys, count);
+    }
+    ASSERT_CONSISTENT(dict);
+    return 0;
+}
+
 static void
 clear_lock_held(PyObject *op)
 {
@@ -3925,17 +4722,9 @@ clear_lock_held(PyObject *op)
     /* Empty the dict... */
     _PyDict_NotifyEvent(PyDict_EVENT_CLEARED, mp, NULL, NULL);
     if (_PyDict_HasIndexedTable(mp)) {
-        PyDictIndexedValues *values = indexed_values(mp);
-        for (i = 0; i < values->capacity; i++) {
-            PyObject *value = values->values[i];
-            values->values[i] = NULL;
-            if (value != NULL && value != INDEXED_VALUE_TOMBSTONE) {
-                Py_DECREF(value);
-            }
-        }
-        values->order_size = 0;
-        STORE_USED(mp, 0);
-        ASSERT_CONSISTENT(mp);
+        Py_ssize_t count;
+        PyDictKeysObject *detached = indexed_clear_storage(mp, &count);
+        indexed_release_cleared_keys(detached, count);
         return;
     }
     // We don't inc ref empty keys because they're immortal
@@ -3974,11 +4763,24 @@ soac_clear_lock_held(PyDictObject *dict)
     PyObject *held = NULL;
     int result = -1;
     if (policy->sealed) {
-        PyErr_SetString(PyExc_TypeError, "cannot clear a sealed SOAC namespace");
+        PyErr_SetString(soac_mutation_error(), "cannot clear a sealed SOAC namespace");
         goto done;
     }
     if (soac_validate(policy, dict, NULL, NULL, PyDict_SOAC_CLEAR, NULL) < 0) {
         goto done;
+    }
+    if (_PyDict_HasIndexedTable(dict) && policy->baseline_keys != NULL &&
+        !policy->baseline_promoted) {
+        result = indexed_clear_split(dict, policy);
+        goto done;
+    }
+    if (_PyDict_HasIndexedTable(dict)) {
+        _PyDict_NotifyEvent(PyDict_EVENT_CLEARED, dict, NULL, NULL);
+        Py_ssize_t count;
+        PyDictKeysObject *detached = indexed_clear_storage(dict, &count);
+        policy->mutating = 0;
+        indexed_release_cleared_keys(detached, count);
+        return 0;
     }
     /* Preserve indexed/split schema.  Retaining all active values prevents
        the ordinary clear kernel from exposing half-cleared storage to a
@@ -4044,7 +4846,7 @@ _PyDict_ClearForTeardown(PyObject *op)
     PyDictValues *values = dict->ma_values;
     _PyDict_NotifyEvent(PyDict_EVENT_CLEARED, dict, NULL, NULL);
     STORE_USED(dict, 0);
-    if (values != NULL && keys->dk_kind != DICT_KEYS_INDEXED_UNICODE &&
+    if (values != NULL && !DK_IS_INDEXED(keys) &&
         values->embedded) {
         /* The dying dictionary can share storage with an instance.  Commit
            all slots/order first, then allow ordinary destructor execution. */
@@ -4066,7 +4868,7 @@ _PyDict_ClearForTeardown(PyObject *op)
         set_keys(dict, Py_EMPTY_KEYS);
         set_values(dict, NULL);
         if (values != NULL) {
-            if (keys->dk_kind == DICT_KEYS_INDEXED_UNICODE) {
+            if (DK_IS_INDEXED(keys)) {
                 PyDictIndexedValues *indexed = (PyDictIndexedValues *)values;
                 for (Py_ssize_t i = 0; i < indexed->capacity; i++) {
                     PyObject *value = indexed->values[i];
@@ -4133,14 +4935,12 @@ _PyDict_Next(PyObject *op, Py_ssize_t *ppos, PyObject **pkey,
     mp = (PyDictObject *)op;
     i = *ppos;
     if (_PyDict_HasIndexedTable(mp)) {
-        PyDictIndexedValues *values = indexed_values(mp);
-        if (i < 0 || i >= values->order_size)
+        if (i < 0 || i >= mp->ma_used)
             return 0;
         Py_ssize_t index = get_index_from_order(mp, i);
         value = indexed_value_at(mp, index);
-        key = LOAD_SHARED_KEY(
-            DK_UNICODE_ENTRIES(mp->ma_keys)[index].me_key);
-        hash = unicode_get_hash(key);
+        key = dict_key_at(mp->ma_keys, index);
+        hash = dict_hash_at(mp->ma_keys, index);
         assert(value != NULL && value != INDEXED_VALUE_TOMBSTONE);
     }
     else if (_PyDict_HasSplitTable(mp)) {
@@ -4227,7 +5027,7 @@ _PyDict_Pop_KnownHash(PyDictObject *mp, PyObject *key, Py_hash_t hash,
     ASSERT_DICT_LOCKED(mp);
 
     if (_PyDict_HasSoacPolicy(mp)) {
-        return soac_pop_lock_held(mp, key, result);
+        return soac_remove_lock_held(mp, key, hash, 1, result);
     }
 
     if (mp->ma_used == 0) {
@@ -4282,7 +5082,7 @@ pop_lock_held(PyObject *op, PyObject *key, PyObject **result)
     PyDictObject *dict = (PyDictObject *)op;
 
     if (_PyDict_HasSoacPolicy(dict)) {
-        return soac_pop_lock_held(dict, key, result);
+        return soac_remove_lock_held(dict, key, -1, 1, result);
     }
 
     if (dict->ma_used == 0) {
@@ -4415,7 +5215,7 @@ _PyDict_FromKeys(PyObject *cls, PyObject *iterable, PyObject *value)
         return NULL;
 
     if (PyDict_HasSoacPolicy(d)) {
-        PyErr_SetString(PyExc_TypeError,
+        PyErr_SetString(soac_mutation_error(),
                         "fromkeys cannot reuse a SOAC-owned dictionary");
         Py_DECREF(d);
         return NULL;
@@ -4498,7 +5298,7 @@ dict_dealloc(PyObject *self)
     PyObject_GC_UnTrack(mp);
     soac_destroy_policy(mp);
     if (values != NULL) {
-        if (keys->dk_kind == DICT_KEYS_INDEXED_UNICODE) {
+        if (DK_IS_INDEXED(keys)) {
             PyDictIndexedValues *indexed = (PyDictIndexedValues *)values;
             for (i = 0, n = indexed->capacity; i < n; i++) {
                 PyObject *value = indexed->values[i];
@@ -4862,19 +5662,29 @@ dict_fromkeys_impl(PyTypeObject *type, PyObject *iterable, PyObject *value)
 
 /* Single-arg dict update; used by dict_update_common and operators. */
 static int
-soac_stage_bulk(PyObject *source, int sequence, PyObject **staged)
+soac_stage_bulk(PyObject *source, int sequence, int allow_nonstrings,
+                PyObject **staged, Py_hash_t **staged_hashes)
 {
     *staged = NULL;
+    *staged_hashes = NULL;
     if ((!sequence && !PyDict_CheckExact(source)) ||
         (sequence && !PyTuple_CheckExact(source) && !PyList_CheckExact(source))) {
-        PyErr_SetString(PyExc_TypeError,
+        PyErr_SetString(soac_mutation_error(),
                         "SOAC bulk writes require an exact dict or an exact list/tuple of pairs");
         return -1;
     }
     Py_ssize_t count = sequence ? Py_SIZE(source) : PyDict_GET_SIZE(source);
-    if (count > PY_SSIZE_T_MAX / 2) {
+    if (count > PY_SSIZE_T_MAX / 2 ||
+        count > PY_SSIZE_T_MAX / (Py_ssize_t)sizeof(Py_hash_t)) {
         PyErr_NoMemory();
         return -1;
+    }
+    if (count != 0) {
+        *staged_hashes = PyMem_New(Py_hash_t, count);
+        if (*staged_hashes == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
     }
     PyObject *items = PyTuple_New(2 * count);
     *staged = items;
@@ -4890,11 +5700,12 @@ soac_stage_bulk(PyObject *source, int sequence, PyObject **staged)
     Py_ssize_t pos = 0;
     for (Py_ssize_t i = 0; i < count; i++) {
         PyObject *key, *value;
+        Py_hash_t hash = -1;
         if (sequence) {
             PyObject *pair = PyTuple_CheckExact(source)
                 ? PyTuple_GET_ITEM(source, i) : PyList_GET_ITEM(source, i);
             if (!PyTuple_CheckExact(pair) && !PyList_CheckExact(pair)) {
-                PyErr_SetString(PyExc_TypeError,
+                PyErr_SetString(soac_mutation_error(),
                                 "SOAC bulk write pairs must be exact lists or tuples");
                 return -1;
             }
@@ -4910,16 +5721,17 @@ soac_stage_bulk(PyObject *source, int sequence, PyObject **staged)
                 ? PyTuple_GET_ITEM(pair, 1) : PyList_GET_ITEM(pair, 1);
         }
         else {
-            int found = PyDict_Next(source, &pos, &key, &value);
+            int found = _PyDict_Next(source, &pos, &key, &value, &hash);
             assert(found);
         }
-        if (!PyUnicode_CheckExact(key)) {
-            PyErr_SetString(PyExc_TypeError,
+        if (!allow_nonstrings && !PyUnicode_CheckExact(key)) {
+            PyErr_SetString(soac_mutation_error(),
                             "SOAC dictionary writes require exact string keys");
             return -1;
         }
         PyTuple_SET_ITEM(items, 2 * i, Py_NewRef(key));
         PyTuple_SET_ITEM(items, 2 * i + 1, Py_NewRef(value));
+        (*staged_hashes)[i] = hash;
     }
     return 0;
 }
@@ -4932,13 +5744,22 @@ soac_merge(PyDictObject *dict, PyObject *source, int override, int sequence)
         return -1;
     }
     PyObject *items = NULL, *seen = NULL;
+    Py_hash_t *hashes = NULL;
     int result = -1;
     if (!sequence && source == (PyObject *)dict) {
         result = 0;
         goto validated;
     }
-    if (soac_stage_bulk(source, sequence, &items) < 0) {
+    int allow_nonstrings = (policy->flags & PyDict_SOAC_ALLOW_NONSTRING_KEYS) != 0;
+    if (soac_stage_bulk(source, sequence, allow_nonstrings, &items, &hashes) < 0) {
         goto validation_error;
+    }
+    if (allow_nonstrings) {
+        /* Arbitrary equality cannot safely predict future projected keys.
+           Preserve ordinary partial-update behavior: each real lookup is
+           checked and committed exactly once, never an unchecked snapshot. */
+        result = 0;
+        goto validated;
     }
     seen = PyDict_New();
     if (seen == NULL) {
@@ -4976,32 +5797,19 @@ validated:
         for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(items); i += 2) {
             PyObject *key = PyTuple_GET_ITEM(items, i);
             PyObject *value = PyTuple_GET_ITEM(items, i + 1);
-            if (override != 1) {
-                int present = PyDict_Contains((PyObject *)dict, key);
-                if (present < 0) {
-                    result = -1;
-                    break;
-                }
-                if (present) {
-                    if (override == 0) {
-                        continue;
-                    }
-                    _PyErr_SetKeyError(key);
-                    result = -1;
-                    break;
-                }
-            }
-            if (soac_setitem_lock_held(dict, key, value, NULL) < 0) {
+            if (soac_setitem_resolved(dict, key, value, NULL, override, hashes[i / 2]) < 0) {
                 result = -1;
                 break;
             }
         }
     }
+    PyMem_Free(hashes);
     Py_XDECREF(seen);
     Py_XDECREF(items);
     return result;
 validation_error:
     policy->mutating = 0;
+    PyMem_Free(hashes);
     Py_XDECREF(seen);
     Py_XDECREF(items);
     return -1;
@@ -5423,26 +6231,51 @@ copy_values(PyDictValues *values)
     return newvalues;
 }
 
-static PyDictIndexedValues *
-copy_indexed_values(PyDictIndexedValues *values)
+static PyObject *
+copy_indexed_dict(PyDictObject *dict)
 {
-    PyDictIndexedValues *copy = new_indexed_values(values->capacity);
-    if (copy == NULL) {
+    if (dict->ma_used == 0) {
+        return PyDict_New();
+    }
+    PyDictKeysObject *old = dict->ma_keys;
+    PyDictKeysObject *keys = new_keys_object(DK_LOG_SIZE(old), DK_IS_UNICODE(old));
+    if (keys == NULL) {
         return NULL;
     }
-    copy->order_size = values->order_size;
-    memcpy(
-        indexed_order_array(copy),
-        indexed_order_array(values),
-        (size_t)values->order_size * sizeof(Py_ssize_t));
-    for (Py_ssize_t i = 0; i < values->capacity; i++) {
-        PyObject *value = values->values[i];
-        copy->values[i] = value;
-        if (value != NULL && value != INDEXED_VALUE_TOMBSTONE) {
-            Py_INCREF(value);
+    Py_ssize_t *indices = PyMem_New(Py_ssize_t, old->dk_nentries);
+    if (indices == NULL) {
+        dictkeys_decref(keys, false);
+        return PyErr_NoMemory();
+    }
+    for (Py_ssize_t i = 0; i < old->dk_nentries; i++) {
+        indices[i] = DKIX_DUMMY;
+    }
+    /* Preserve exact probe topology, including tombstone buckets, without
+       calling user hash/equality or coalescing keys whose equality changed.
+       Ordinary entry order is the source's visible insertion order. */
+    for (Py_ssize_t i = 0; i < dict->ma_used; i++) {
+        Py_ssize_t index = get_index_from_order(dict, i);
+        indices[index] = i;
+        PyObject *key = dict_key_at(old, index);
+        PyObject *value = indexed_value_at(dict, index);
+        if (DK_IS_UNICODE(keys)) {
+            DK_UNICODE_ENTRIES(keys)[i].me_key = Py_NewRef(key);
+            DK_UNICODE_ENTRIES(keys)[i].me_value = Py_NewRef(value);
+        }
+        else {
+            DK_ENTRIES(keys)[i].me_key = Py_NewRef(key);
+            DK_ENTRIES(keys)[i].me_hash = dict_hash_at(old, index);
+            DK_ENTRIES(keys)[i].me_value = Py_NewRef(value);
         }
     }
-    return copy;
+    keys->dk_nentries = dict->ma_used;
+    keys->dk_usable = old->dk_usable;
+    for (Py_ssize_t i = 0; i < DK_SIZE(old); i++) {
+        Py_ssize_t index = dictkeys_get_index(old, i);
+        dictkeys_set_index(keys, i, index >= 0 ? indices[index] : index);
+    }
+    PyMem_Free(indices);
+    return new_dict(keys, NULL, dict->ma_used, 0);
 }
 
 static PyObject *
@@ -5455,18 +6288,7 @@ copy_lock_held(PyObject *o)
 
     mp = (PyDictObject *)o;
     if (_PyDict_HasIndexedTable(mp)) {
-        PyDictIndexedValues *newvalues =
-            copy_indexed_values(indexed_values(mp));
-        if (newvalues == NULL) {
-            return NULL;
-        }
-        dictkeys_incref(mp->ma_keys);
-        PyObject *copy = new_dict(
-            mp->ma_keys, (PyDictValues *)newvalues, mp->ma_used, 0);
-        if (copy == NULL) {
-            free_indexed_values(newvalues);
-        }
-        return copy;
+        return copy_indexed_dict(mp);
     }
 
     if (mp->ma_used == 0) {
@@ -5583,7 +6405,10 @@ dict_equal_lock_held(PyDictObject *a, PyDictObject *b)
         /* can't be equal if # of entries differ */
         return 0;
     /* Same # of entries -- check all of 'em.  Exit early on any diff. */
-    for (i = 0; i < LOAD_KEYS_NENTRIES(a->ma_keys); i++) {
+    for (Py_ssize_t pos = 0;
+         pos < (_PyDict_HasIndexedTable(a) ? a->ma_used : LOAD_KEYS_NENTRIES(a->ma_keys));
+         pos++) {
+        i = _PyDict_HasIndexedTable(a) ? get_index_from_order(a, pos) : pos;
         PyObject *key, *aval;
         Py_hash_t hash;
         if (DK_IS_UNICODE(a->ma_keys)) {
@@ -5607,7 +6432,7 @@ dict_equal_lock_held(PyDictObject *a, PyDictObject *b)
         else {
             PyDictKeyEntry *ep = &DK_ENTRIES(a->ma_keys)[i];
             key = ep->me_key;
-            aval = ep->me_value;
+            aval = _PyDict_HasIndexedTable(a) ? indexed_value_at(a, i) : ep->me_value;
             hash = ep->me_hash;
         }
         if (aval != NULL) {
@@ -5756,8 +6581,11 @@ dict_setdefault_ref_lock_held(PyObject *d, PyObject *key, PyObject *default_valu
         }
         int status = -1;
         hash = _PyObject_HashFast(key);
-        if (hash == -1 ||
-            _Py_dict_lookup(mp, key, hash, &value) == DKIX_ERROR) {
+        if (hash == -1) {
+            goto protected_done;
+        }
+        ix = _Py_dict_lookup(mp, key, hash, &value);
+        if (ix == DKIX_ERROR) {
             goto protected_done;
         }
         if (value != NULL) {
@@ -5767,9 +6595,20 @@ dict_setdefault_ref_lock_held(PyObject *d, PyObject *key, PyObject *default_valu
             if (soac_validate(policy, mp, key, default_value, PyDict_SOAC_SET, NULL) < 0) {
                 goto protected_done;
             }
-            int inserted = mp->ma_keys == Py_EMPTY_KEYS
-                ? insert_to_emptydict(mp, Py_NewRef(key), hash, Py_NewRef(default_value))
-                : insertdict(mp, Py_NewRef(key), hash, Py_NewRef(default_value));
+            int inserted;
+            if (_PyDict_HasIndexedTable(mp)) {
+                PyObject *owned_key = Py_NewRef(key), *owned_value = Py_NewRef(default_value);
+                inserted = indexed_commit(mp, owned_key, hash, owned_value, ix, NULL);
+                if (inserted < 0) {
+                    Py_DECREF(owned_key);
+                    Py_DECREF(owned_value);
+                }
+            }
+            else {
+                inserted = mp->ma_keys == Py_EMPTY_KEYS
+                    ? insert_to_emptydict(mp, Py_NewRef(key), hash, Py_NewRef(default_value))
+                    : insertdict(mp, Py_NewRef(key), hash, Py_NewRef(default_value));
+            }
             if (inserted < 0) {
                 goto protected_done;
             }
@@ -5808,35 +6647,6 @@ protected_done:
     }
 
     if (_PyDict_HasIndexedTable(mp)) {
-        ix = DKIX_EMPTY;
-        if (PyUnicode_CheckExact(key)) {
-            ix = unicodekeys_lookup_unicode(mp->ma_keys, key, hash);
-        }
-        if (ix >= 0) {
-            value = indexed_value_at(mp, ix);
-            if (value != INDEXED_VALUE_TOMBSTONE) {
-                int already_present = value != NULL;
-                if (!already_present) {
-                    _PyDict_NotifyEvent(
-                        PyDict_EVENT_ADDED, mp, key, default_value);
-                    store_indexed_value(mp, ix, Py_NewRef(default_value));
-                    indexed_values_add_to_order(indexed_values(mp), ix);
-                    STORE_USED(mp, mp->ma_used + 1);
-                    value = default_value;
-                }
-                if (result) {
-                    *result = incref_result ? Py_NewRef(value) : value;
-                }
-                ASSERT_CONSISTENT(mp);
-                return already_present;
-            }
-        }
-        if (insertion_resize(mp, PyUnicode_CheckExact(key)) < 0) {
-            if (result) {
-                *result = NULL;
-            }
-            return -1;
-        }
         ix = _Py_dict_lookup(mp, key, hash, &value);
         if (ix == DKIX_ERROR) {
             if (result) {
@@ -5844,6 +6654,23 @@ protected_done:
             }
             return -1;
         }
+        int present = value != NULL;
+        if (!present) {
+            PyObject *owned_key = Py_NewRef(key), *owned_value = Py_NewRef(default_value);
+            if (indexed_commit(mp, owned_key, hash, owned_value, ix, NULL) < 0) {
+                Py_DECREF(owned_key);
+                Py_DECREF(owned_value);
+                if (result) {
+                    *result = NULL;
+                }
+                return -1;
+            }
+            value = default_value;
+        }
+        if (result) {
+            *result = incref_result ? Py_NewRef(value) : value;
+        }
+        return present;
     }
     else if (_PyDict_HasSplitTable(mp) && PyUnicode_CheckExact(key)) {
         ix = insert_split_key(mp->ma_keys, key, hash);
@@ -6018,6 +6845,48 @@ dict_popitem_impl(PyDictObject *self)
     res = PyTuple_New(2);
     if (res == NULL)
         return NULL;
+    if (_PyDict_HasIndexedTable(self)) {
+        SoacDictPolicy *policy = soac_policy(self);
+        if (policy != NULL && soac_begin_mutation(policy) < 0) {
+            Py_DECREF(res);
+            return NULL;
+        }
+        if (self->ma_used == 0) {
+            PyErr_SetString(PyExc_KeyError, "popitem(): dictionary is empty");
+            goto indexed_error;
+        }
+        Py_ssize_t index = get_index_from_order(self, self->ma_used - 1);
+        PyObject *key = dict_key_at(self->ma_keys, index);
+        PyObject *value = indexed_value_at(self, index);
+        Py_hash_t hash = dict_hash_at(self->ma_keys, index);
+        PyTuple_SET_ITEM(res, 0, Py_NewRef(key));
+        PyTuple_SET_ITEM(res, 1, Py_NewRef(value));
+        if (policy != NULL &&
+            soac_validate(policy, self, key, NULL, PyDict_SOAC_DELETE, NULL) < 0) {
+            goto indexed_error;
+        }
+        if (policy != NULL) {
+            /* Stock popitem converts a split table to a combined table. */
+            if (policy->split_clear != NULL && !policy->baseline_promoted) {
+                PyErr_SetString(soac_mutation_error(),
+                                "cannot promote a split dictionary clear with live values");
+                goto indexed_error;
+            }
+            policy->baseline_promoted = 1;
+        }
+        _PyDict_NotifyEvent(PyDict_EVENT_DELETED, self, key, NULL);
+        delitem_common(self, hash, index, value);
+        if (policy != NULL) {
+            policy->mutating = 0;
+        }
+        return res;
+indexed_error:
+        if (policy != NULL) {
+            policy->mutating = 0;
+        }
+        Py_DECREF(res);
+        return NULL;
+    }
     if (_PyDict_HasSoacPolicy(self)) {
         SoacDictPolicy *policy = soac_policy(self);
         if (soac_begin_mutation(policy) < 0) {
@@ -6126,17 +6995,16 @@ dict_traverse(PyObject *op, visitproc visit, void *arg)
     PyDictKeysObject *keys = mp->ma_keys;
     Py_ssize_t i, n = keys->dk_nentries;
 
-    if (DK_IS_UNICODE(keys)) {
-        if (_PyDict_HasIndexedTable(mp)) {
-            PyDictIndexedValues *values = indexed_values(mp);
-            for (i = 0; i < values->capacity; i++) {
-                PyObject *value = values->values[i];
-                if (value != INDEXED_VALUE_TOMBSTONE) {
-                    Py_VISIT(value);
-                }
-            }
+    if (_PyDict_HasIndexedTable(mp)) {
+        PyDictIndexedValues *values = indexed_values(mp);
+        for (i = 0; i < values->order_size; i++) {
+            Py_ssize_t index = indexed_order_array(values)[i];
+            Py_VISIT(values->values[index]);
+            Py_VISIT(dict_key_at(keys, index));
         }
-        else if (_PyDict_HasSplitTable(mp)) {
+    }
+    else if (DK_IS_UNICODE(keys)) {
+        if (_PyDict_HasSplitTable(mp)) {
             if (!mp->ma_values->embedded) {
                 for (i = 0; i < n; i++) {
                     Py_VISIT(mp->ma_values->values[i]);
@@ -6209,7 +7077,7 @@ _PyDict_SizeOf(PyDictObject *mp)
 size_t
 _PyDict_KeysSize(PyDictKeysObject *keys)
 {
-    size_t es = (keys->dk_kind == DICT_KEYS_GENERAL
+    size_t es = (!DK_IS_UNICODE(keys)
                  ? sizeof(PyDictKeyEntry) : sizeof(PyDictUnicodeEntry));
     size_t size = sizeof(PyDictKeysObject);
     size += (size_t)1 << keys->dk_log2_index_bytes;
@@ -6677,7 +7545,7 @@ dictiter_iternextkey_lock_held(PyDictObject *d, PyObject *self)
         if (i >= d->ma_used)
             goto fail;
         int index = get_index_from_order(d, i);
-        key = LOAD_SHARED_KEY(DK_UNICODE_ENTRIES(k)[index].me_key);
+        key = dict_key_at(k, index);
         if (_PyDict_HasIndexedTable(d)) {
             assert(indexed_value_at(d, index) != NULL &&
                    indexed_value_at(d, index) != INDEXED_VALUE_TOMBSTONE);
@@ -6931,7 +7799,7 @@ dictiter_iternextitem_lock_held(PyDictObject *d, PyObject *self,
         if (i >= d->ma_used)
             goto fail;
         int index = get_index_from_order(d, i);
-        key = LOAD_SHARED_KEY(DK_UNICODE_ENTRIES(d->ma_keys)[index].me_key);
+        key = dict_key_at(d->ma_keys, index);
         value = _PyDict_HasIndexedTable(d)
             ? indexed_value_at(d, index)
             : d->ma_values->values[index];
@@ -7238,7 +8106,7 @@ dictreviter_iter_lock_held(PyDictObject *d, PyObject *self)
     }
     if (_PyDict_HasSplitTable(d)) {
         int index = get_index_from_order(d, i);
-        key = LOAD_SHARED_KEY(DK_UNICODE_ENTRIES(k)[index].me_key);
+        key = dict_key_at(k, index);
         value = _PyDict_HasIndexedTable(d)
             ? indexed_value_at(d, index)
             : d->ma_values->values[index];
@@ -8819,7 +9687,7 @@ _PyObject_SetManagedDict(PyObject *obj, PyObject *new_dict)
     assert(Py_TYPE(obj)->tp_flags & Py_TPFLAGS_MANAGED_DICT);
     PyDictObject *protected_dict = _PyObject_GetManagedDict(obj);
     if (protected_dict != NULL && _PyDict_HasSoacPolicy(protected_dict)) {
-        PyErr_SetString(PyExc_TypeError,
+        PyErr_SetString(soac_mutation_error(),
                         "cannot replace a SOAC instance dictionary");
         return -1;
     }
@@ -8939,6 +9807,10 @@ PyObject_ClearManagedDict(PyObject *obj)
 {
     // This is called when the object is being freed or cleared
     // by the GC and therefore known to have no references.
+    PyDictObject *managed = _PyObject_GetManagedDict(obj);
+    if (managed != NULL && _PyDict_HasSoacPolicy(managed)) {
+        soac_policy(managed)->baseline_embedded = 0;
+    }
     if (Py_TYPE(obj)->tp_flags & Py_TPFLAGS_INLINE_VALUES) {
         PyDictObject *dict = _PyObject_GetManagedDict(obj);
         if (dict == NULL) {
@@ -8984,7 +9856,89 @@ _PyDict_DetachFromObject(PyDictObject *mp, PyObject *obj)
 {
     ASSERT_WORLD_STOPPED_OR_OBJ_LOCKED(obj);
 
+    if (_PyDict_HasSoacPolicy(mp)) {
+        soac_policy(mp)->baseline_embedded = 0;
+    }
     return detach_dict_from_object(mp, obj);
+}
+
+int
+_PyDict_InitSoacInstanceStorage(PyObject *obj)
+{
+    PyTypeObject *tp = Py_TYPE(obj);
+    if (!_PySOAC_UsesInstanceDictionaryPolicy(tp)) {
+        return 0;
+    }
+    int managed = _PyType_HasFeature(tp, Py_TPFLAGS_MANAGED_DICT);
+    PyObject **dictptr = managed ? NULL : _PyObject_ComputedDictPointer(obj);
+    if (!managed && dictptr == NULL) {
+        return 0;
+    }
+    if ((managed ? (PyObject *)_PyObject_GetManagedDict(obj) : *dictptr) != NULL ||
+        _PyType_HasFeature(tp, Py_TPFLAGS_INLINE_VALUES)) {
+        PyErr_SetString(soac_mutation_error(),
+                        "strict dictionary initialization requires a fresh non-inline instance");
+        return -1;
+    }
+
+    /* GenericAlloc invokes this before publishing/tracking the object.  The
+       counter must advance for every instance, including those whose dict is
+       never requested, exactly where stock initializes its inline capacity. */
+    PyDictKeysObject *baseline = _PyType_HasFeature(tp, Py_TPFLAGS_HEAPTYPE)
+        ? CACHED_KEYS(tp) : NULL;
+    int embedded = managed && tp->tp_itemsize == 0;
+    uint8_t capacity = 0;
+    if (baseline != NULL) {
+        assert(baseline->dk_kind == DICT_KEYS_SPLIT);
+        if (embedded && baseline->dk_usable > 1) {
+            baseline->dk_usable--;
+        }
+        size_t size = shared_keys_usable_size(baseline);
+        assert(size <= SHARED_KEYS_MAX_SIZE);
+        capacity = (uint8_t)size;
+        dictkeys_incref(baseline);
+    }
+    PyObject *dict = _PySOAC_NewInstanceDictionary(obj);
+    if (dict == NULL) {
+        goto error;
+    }
+    if (!PyDict_CheckExact(dict) || Py_REFCNT(dict) != 1 ||
+        !_PyDict_HasIndexedTable((PyDictObject *)dict) ||
+        PyDict_GET_SIZE(dict) != 0 || !PyDict_HasSoacPolicy(dict)) {
+        PyErr_SetString(soac_mutation_error(),
+                        "strict instance factory must return a fresh empty protected indexed dictionary");
+        goto error;
+    }
+    SoacDictPolicy *policy = soac_policy((PyDictObject *)dict);
+    if (policy->flags != PyDict_SOAC_ALLOW_NONSTRING_KEYS ||
+        policy->terminal || policy->mutating || policy->sealed ||
+        policy->instance_bound || policy->baseline_keys != NULL) {
+        PyErr_SetString(soac_mutation_error(),
+                        "strict instance factory returned an incompatible dictionary policy");
+        goto error;
+    }
+    policy->baseline_keys = baseline;  /* transfer the metadata reference */
+    policy->baseline_capacity = capacity;
+    policy->baseline_embedded = embedded;
+    policy->instance_bound = 1;
+    if (managed) {
+        _PyObject_ManagedDictPointer(obj)->dict = (PyDictObject *)dict;
+    }
+    else {
+        *dictptr = dict;
+    }
+    return 0;
+
+error:
+    {
+        PyObject *error = PyErr_GetRaisedException();
+        Py_XDECREF(dict);
+        if (baseline != NULL) {
+            dictkeys_decref(baseline, false);
+        }
+        PyErr_SetRaisedException(error);
+    }
+    return -1;
 }
 
 static inline PyObject *
@@ -8993,6 +9947,11 @@ ensure_managed_dict(PyObject *obj)
     PyDictObject *dict = _PyObject_GetManagedDict(obj);
     if (dict == NULL) {
         PyTypeObject *tp = Py_TYPE(obj);
+        if (_PySOAC_UsesInstanceDictionaryPolicy(tp)) {
+            PyErr_SetString(soac_mutation_error(),
+                            "strict instance was not initialized by its verified allocator");
+            return NULL;
+        }
         if ((tp->tp_flags & Py_TPFLAGS_INLINE_VALUES) &&
             FT_ATOMIC_LOAD_UINT8(_PyObject_InlineValues(obj)->valid)) {
             dict = _PyObject_MaterializeManagedDict(obj);
@@ -9034,7 +9993,12 @@ ensure_nonmanaged_dict(PyObject *obj, PyObject **dictptr)
         }
 #endif
         PyTypeObject *tp = Py_TYPE(obj);
-        if (_PyType_HasFeature(tp, Py_TPFLAGS_HEAPTYPE) && (cached = CACHED_KEYS(tp))) {
+        if (_PySOAC_UsesInstanceDictionaryPolicy(tp)) {
+            PyErr_SetString(soac_mutation_error(),
+                            "strict instance was not initialized by its verified allocator");
+            goto done;
+        }
+        else if (_PyType_HasFeature(tp, Py_TPFLAGS_HEAPTYPE) && (cached = CACHED_KEYS(tp))) {
             assert(!_PyType_HasFeature(tp, Py_TPFLAGS_INLINE_VALUES));
             dict = new_dict_with_shared_keys(cached);
         }
@@ -9042,8 +10006,8 @@ ensure_nonmanaged_dict(PyObject *obj, PyObject **dictptr)
             dict = PyDict_New();
         }
         FT_ATOMIC_STORE_PTR_RELEASE(*dictptr, dict);
-#ifdef Py_GIL_DISABLED
 done:
+#ifdef Py_GIL_DISABLED
         Py_END_CRITICAL_SECTION();
 #endif
     }

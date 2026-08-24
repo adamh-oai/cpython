@@ -10,6 +10,7 @@ typedef struct {
     PyObject *finals;
     PyObject *callback;
     PyObject *keepalive;
+    unsigned int flags;
     int terminal;
 } SoacTestOwner;
 
@@ -105,7 +106,7 @@ soac_test_validate(PyObject *op, PyObject *dict, PyObject *key,
     }
     assert(provenance == NULL);
     if (operation == PyDict_SOAC_VALIDATE_INITIAL) {
-        assert(!PyDict_MatchesSoacPolicy(dict, op, soac_test_validate, 0));
+        assert(!PyDict_MatchesSoacPolicy(dict, op, soac_test_validate, owner->flags));
     }
     if (operation == PyDict_SOAC_TERMINAL_TEARDOWN) {
         owner->terminal = 1;
@@ -116,6 +117,9 @@ soac_test_validate(PyObject *op, PyObject *dict, PyObject *key,
         Py_ssize_t pos = 0;
         PyObject *stored_key;
         while (PyDict_Next(dict, &pos, &stored_key, NULL)) {
+            if (!PyUnicode_CheckExact(stored_key)) {
+                continue;
+            }
             int final = PySet_Contains(owner->finals, stored_key);
             if (final < 0) {
                 return -1;
@@ -128,7 +132,12 @@ soac_test_validate(PyObject *op, PyObject *dict, PyObject *key,
     }
     if (operation == PyDict_SOAC_SET || operation == PyDict_SOAC_SET_EXISTING ||
         operation == PyDict_SOAC_VALIDATE_INITIAL) {
-        PyObject *expected = PyDict_GetItemWithError(owner->schema, key);
+        PyObject *expected = PyUnicode_CheckExact(key)
+            ? PyDict_GetItemWithError(owner->schema, key) : NULL;
+        if (expected == NULL && !PyErr_Occurred() &&
+            (owner->flags & PyDict_SOAC_ALLOW_NONSTRING_KEYS)) {
+            expected = Py_None;
+        }
         if (expected == NULL) {
             if (!PyErr_Occurred()) {
                 PyErr_SetString(PyExc_TypeError, "undeclared SOAC test field");
@@ -140,7 +149,7 @@ soac_test_validate(PyObject *op, PyObject *dict, PyObject *key,
             return -1;
         }
     }
-    if (key != NULL && operation != PyDict_SOAC_VALIDATE_INITIAL) {
+    if (key != NULL && PyUnicode_CheckExact(key) && operation != PyDict_SOAC_VALIDATE_INITIAL) {
         int final = PySet_Contains(owner->finals, key);
         if (final < 0) {
             return -1;
@@ -168,8 +177,9 @@ dict_set_soac_policy(PyObject *self, PyObject *args)
 {
     PyObject *dict, *schema, *finals = NULL;
     PyObject *callback = Py_None, *keepalive = Py_None;
-    if (!PyArg_ParseTuple(args, "OO|OOO", &dict, &schema, &finals,
-                          &callback, &keepalive)) {
+    unsigned int flags = 0;
+    if (!PyArg_ParseTuple(args, "OO|OOOI", &dict, &schema, &finals,
+                          &callback, &keepalive, &flags)) {
         return NULL;
     }
     if (!PyDict_CheckExact(schema)) {
@@ -200,8 +210,9 @@ dict_set_soac_policy(PyObject *self, PyObject *args)
     owner->finals = PyFrozenSet_New(finals);
     owner->callback = Py_NewRef(callback);
     owner->keepalive = Py_NewRef(keepalive);
+    owner->flags = flags;
     if (owner->schema == NULL || owner->finals == NULL ||
-        PyDict_SetSoacPolicy(dict, (PyObject *)owner, soac_test_validate, 0) < 0) {
+        PyDict_SetSoacPolicy(dict, (PyObject *)owner, soac_test_validate, flags) < 0) {
         Py_DECREF(owner);
         return NULL;
     }
@@ -224,10 +235,11 @@ static PyObject *
 dict_matches_soac_policy(PyObject *self, PyObject *args)
 {
     PyObject *dict, *owner;
-    if (!PyArg_ParseTuple(args, "OO", &dict, &owner)) {
+    unsigned int flags = 0;
+    if (!PyArg_ParseTuple(args, "OO|I", &dict, &owner, &flags)) {
         return NULL;
     }
-    return PyBool_FromLong(PyDict_MatchesSoacPolicy(dict, owner, soac_test_validate, 0));
+    return PyBool_FromLong(PyDict_MatchesSoacPolicy(dict, owner, soac_test_validate, flags));
 }
 
 static PyObject *

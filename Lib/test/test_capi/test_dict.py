@@ -37,9 +37,327 @@ class SoacDictPolicyTests(unittest.TestCase):
     def tearDown(self):
         gc.collect()
 
-    def protect(self, dictionary, schema, finals=(), callback=None, keepalive=None):
+    def protect(self, dictionary, schema, finals=(), callback=None, keepalive=None, flags=0):
         return _testcapi.dict_set_soac_policy(
-            dictionary, schema, finals, callback, keepalive)
+            dictionary, schema, finals, callback, keepalive, flags)
+
+    def test_schema_clone_shares_only_the_immutable_prefix(self):
+        template = _testinternalcapi.dict_new_indexed(("x", "unset"))
+        self.protect(template, {"x": int}, flags=1)
+        template["x"] = 1
+        template["overflow"] = 2
+        template[object()] = 3
+        self.assertFalse(_testinternalcapi.dict_has_no_lookup_aliases(template))
+        clone = _testinternalcapi.dict_new_from_indexed_schema(template)
+        del template
+        gc.collect()
+        self.assertEqual(clone, {})
+        self.assertTrue(_testinternalcapi.dict_has_no_lookup_aliases(clone))
+        self.assertFalse(_testcapi.dict_has_soac_policy(clone))
+        self.assertEqual(_testinternalcapi.dict_indexed_key_index(clone, "x"), 0)
+        self.assertEqual(_testinternalcapi.dict_indexed_key_index(clone, "unset"), 1)
+        self.assertEqual(_testinternalcapi.dict_indexed_key_index(clone, "overflow"), -1)
+        clone["x"] = "no copied checked-value policy"
+        self.assertEqual(_testinternalcapi.dict_get_indexed_item(clone, 0),
+                         "no copied checked-value policy")
+        with self.assertRaises(TypeError):
+            _testinternalcapi.dict_new_from_indexed_schema({})
+
+    def test_known_hash_and_exact_dictionary_bulk_do_not_rehash_keys(self):
+        class Key:
+            calls = 0
+            enabled = True
+
+            def __hash__(self):
+                self.calls += 1
+                if not self.enabled:
+                    raise AssertionError("cached hash was not used")
+                return 43
+
+        key = Key()
+        source = {key: 7}
+        key.enabled = False
+        for operation in ("set_known", "update", "merge", "ior"):
+            with self.subTest(operation=operation):
+                d = _testinternalcapi.dict_new_indexed(("field",))
+                self.protect(d, {}, flags=1)
+                if operation == "set_known":
+                    _testinternalcapi.dict_setitem_knownhash(d, key, 7, 43)
+                elif operation == "update":
+                    d.update(source)
+                elif operation == "merge":
+                    _testlimitedcapi.dict_merge(d, source, 1)
+                else:
+                    d |= source
+                self.assertEqual(_testinternalcapi.dict_getitem_knownhash(d, key, 43), 7)
+                _testinternalcapi.dict_delitem_knownhash(d, key, 43)
+                self.assertEqual(d, {})
+                self.assertEqual(d.pop(key, "empty"), "empty")
+                self.assertEqual(d.pop([], "empty"), "empty")
+        self.assertEqual(key.calls, 1)
+
+    def test_namespace_late_names_keep_permanent_indices(self):
+        d = _testinternalcapi.dict_new_indexed(("initial",))
+        d["preexisting"] = 1
+        names = ["initial", "preexisting", *(f"late{i}" for i in range(150))]
+        self.protect(d, dict.fromkeys(names, int))
+        _testcapi.dict_seal_soac_namespace(d)
+        for index, name in enumerate(names):
+            d[name] = index
+            self.assertEqual(_testinternalcapi.dict_indexed_key_index(d, name), index)
+        for name in names[::3]:
+            del d[name]
+        for index, name in enumerate(names):
+            self.assertEqual(_testinternalcapi.dict_indexed_key_index(d, name), index)
+            d[name] = index + 1
+            self.assertEqual(_testinternalcapi.dict_get_indexed_item(d, index), index + 1)
+        self.assertEqual(len(d), len(names))
+        self.assertTrue(_testinternalcapi.dict_has_no_lookup_aliases(d))
+
+    def test_actual_dictionary_upgrade_and_invisible_owner_reservations(self):
+        value = []
+        d = {"visible": value}
+        original = id(d)
+        references = sys.getrefcount(value)
+        owner = self.protect(d, {"visible": None, "unborn": int, "later": int})
+        self.assertEqual(id(d), original)
+        self.assertEqual(sys.getrefcount(value), references)
+        self.assertTrue(_testinternalcapi.dict_has_indexed_keys(d))
+        reserve = _testinternalcapi.dict_reserve_soac_namespace_keys
+        with self.assertRaises(TypeError):
+            reserve(d, owner, ("unborn", 42))
+        self.assertEqual(_testinternalcapi.dict_indexed_key_index(d, "unborn"), -1)
+        with self.assertRaises(TypeError):
+            reserve(d, object(), ("unborn",))
+        reserve(d, owner, ("unborn", "later", "unborn"))
+        self.assertEqual(list(d), ["visible"])
+        self.assertEqual(len(d), 1)
+        self.assertEqual(_testinternalcapi.dict_indexed_key_index(d, "unborn"), 1)
+        self.assertEqual(_testinternalcapi.dict_indexed_key_index(d, "later"), 2)
+        _testcapi.dict_seal_soac_namespace(d)
+        with self.assertRaises(TypeError):
+            reserve(d, owner, ("forbidden",))
+        d["later"] = 2
+        d["unborn"] = 1
+        self.assertEqual(list(d), ["visible", "later", "unborn"])
+
+    def test_compound_module_setters_preserve_initialization_finalizers(self):
+        events = []
+        d = {}
+        self.protect(d, {"primary": None, "companion": None})
+
+        class Previous:
+            def __del__(self):
+                events.append(d.get("companion"))
+
+        d["primary"] = Previous()
+        d["companion"] = "still present during primary finalizer"
+        setter = _testinternalcapi.dict_setitem_and_delete_for_module
+        self.assertEqual(setter(d, "primary", "new", "companion"), 1)
+        self.assertEqual(events, ["still present during primary finalizer"])
+        self.assertEqual(d, {"primary": "new"})
+        self.assertEqual(setter(d, "missing", None, "primary"), 0)
+        self.assertEqual(d, {"primary": "new"})
+
+    def test_sealed_compound_module_setters_reject_before_any_write(self):
+        setter = _testinternalcapi.dict_setitem_and_delete_for_module
+        for contents in ({"companion": 1}, {"primary": 1}, {"primary": 1, "companion": 2}):
+            d = contents.copy()
+            self.protect(d, {"primary": int, "companion": int})
+            _testcapi.dict_seal_soac_namespace(d)
+            with self.assertRaises(TypeError):
+                setter(d, "primary", 3, "companion")
+            self.assertEqual(d, contents)
+            if "primary" in d:
+                with self.assertRaises(TypeError):
+                    setter(d, "primary", None, "companion")
+                self.assertEqual(d, contents)
+        d = {}
+        self.protect(d, {"primary": int, "companion": int})
+        _testcapi.dict_seal_soac_namespace(d)
+        self.assertEqual(setter(d, "primary", None, "companion"), 0)
+        self.assertEqual(setter(d, "primary", 1, "companion"), 1)
+        self.assertEqual(d, {"primary": 1})
+
+    def test_native_type_factory_precedes_callbacks_and_survives_ordinary_subclasses(self):
+        seen = []
+        case = self
+
+        class Descriptor:
+            def __set_name__(self, owner, name):
+                obj = owner()
+                d = obj.__dict__
+                seen.append(_testinternalcapi.dict_has_indexed_keys(d))
+                case.assertEqual(d, {})
+                with case.assertRaises(TypeError):
+                    obj.x = "bad during set_name"
+                obj.x = 1
+                case.assertEqual(_testinternalcapi.dict_get_indexed_item(d, 0), 1)
+
+        namespace_function = lambda namespace, cell: None
+        base = _testinternalcapi.dict_new_soac_type(
+            "StorageBase", (), {"descriptor": Descriptor()}, ("x",), namespace_function)
+        self.assertEqual(seen, [True])
+
+        class Ordinary(base):
+            __slots__ = ("normal_slot",)
+
+            def method(self):
+                return "ordinary dispatch"
+
+        obj = Ordinary()
+        with self.assertRaises(TypeError):
+            obj.__dict__ = {}
+        obj.normal_slot = "unrestricted ordinary slot"
+        obj.method = lambda: "shadowed ordinary method"
+        obj.x = 4
+        d = obj.__dict__
+        self.assertEqual(obj.method(), "shadowed ordinary method")
+        self.assertEqual(obj.normal_slot, "unrestricted ordinary slot")
+        self.assertTrue(_testinternalcapi.dict_has_indexed_keys(d))
+        self.assertEqual(_testinternalcapi.dict_indexed_key_index(d, "x"), 0)
+        with self.assertRaises(TypeError):
+            d["x"] = "bad through dictionary alias"
+        d[42] = "ordinary overflow"
+        self.assertEqual(d[42], "ordinary overflow")
+        d.clear()
+        obj.x = 5
+        self.assertIs(obj.__dict__, d)
+        self.assertEqual(_testinternalcapi.dict_get_indexed_item(d, 0), 5)
+
+    def test_factory_allocation_failure_does_not_publish_or_finalize_instance(self):
+        events = []
+
+        def finalize(obj):
+            events.append("unpublished instance finalized")
+
+        for failure, expected, message in (
+            (1, MemoryError, "test instance factory allocation failed"),
+            (2, TypeError, "fresh empty protected indexed dictionary"),
+        ):
+            with self.subTest(failure=failure):
+                typ = _testinternalcapi.dict_new_soac_type(
+                    "FailingStorage", (), {"__del__": finalize}, (),
+                    lambda namespace, cell: None, failure)
+                before = sys.getrefcount(typ)
+                for _ in range(3):
+                    with self.assertRaisesRegex(expected, message):
+                        typ()
+                gc.collect()
+                self.assertEqual(sys.getrefcount(typ), before)
+                self.assertEqual(events, [])
+
+    def test_instance_alias_write_checks_one_resolved_canonical_key(self):
+        d = _testinternalcapi.dict_new_indexed(("field",))
+        calls = []
+        self.protect(d, {"field": int}, callback=lambda d, k, v, op: calls.append((k, op)), flags=1)
+        d["field"] = 1
+
+        class Alias:
+            comparisons = 0
+
+            def __hash__(self):
+                with self_test.assertRaises(TypeError):
+                    d["during_hash"] = "blocked"
+                return hash("field")
+
+            def __eq__(self, other):
+                self.comparisons += 1
+                with self_test.assertRaises(TypeError):
+                    d["during_eq"] = "blocked"
+                return self.comparisons == 1 and other == "field"
+
+        self_test = self
+        alias = Alias()
+        _testlimitedcapi.dict_setitem(d, alias, 2)
+        self.assertEqual(alias.comparisons, 1)
+        self.assertEqual(calls[-1], ("field", 5))
+        self.assertEqual(d, {"field": 2})
+        alias.comparisons = 0
+        with self.assertRaises(TypeError):
+            d[alias] = "bad"
+        self.assertEqual(alias.comparisons, 1)
+        self.assertEqual(d, {"field": 2})
+        # The alias was never stored, so it cannot change a future lookup.
+        self.assertTrue(_testinternalcapi.dict_has_no_lookup_aliases(d))
+
+    def test_instance_alias_deletion_and_bulk_use_canonical_field_policy(self):
+        d = _testinternalcapi.dict_new_indexed(("field", "fixed"))
+        self.protect(d, {"field": int, "fixed": int}, finals=("fixed",), flags=1)
+        d.update({"field": 1, "fixed": 2, 3: "overflow"})
+
+        class Alias:
+            def __init__(self, name):
+                self.name = name
+
+            def __hash__(self):
+                return hash(self.name)
+
+            def __eq__(self, other):
+                return other == self.name
+
+        fixed = Alias("fixed")
+        for delete in (dict.__delitem__, dict.pop, _testlimitedcapi.dict_delitem):
+            with self.subTest(delete=delete), self.assertRaises(TypeError):
+                delete(d, fixed)
+        with self.assertRaises(TypeError):
+            d.update([(4, "committed prefix"), (Alias("field"), "bad")])
+        self.assertEqual(d[4], "committed prefix")
+        self.assertEqual(d["field"], 1)
+        _testlimitedcapi.dict_merge(d, {Alias("field"): "unused", 5: "new"}, 0)
+        self.assertEqual(d["field"], 1)
+        self.assertEqual(d[5], "new")
+        d |= [(Alias("field"), 6), (7, "extra")]
+        self.assertEqual(d["field"], 6)
+        self.assertEqual(d[7], "extra")
+
+    def test_instance_clear_releases_keys_and_values_after_commit(self):
+        events = []
+        d = _testinternalcapi.dict_new_indexed(("field",))
+        self.protect(d, {"field": int}, flags=1)
+
+        class Key:
+            def __init__(self, name):
+                self.name = name
+
+            def __hash__(self):
+                return hash(self.name)
+
+            def __del__(self):
+                events.append(("key", self.name))
+                d["field"] = len(events)
+
+        class Value:
+            def __init__(self, name):
+                self.name = name
+
+            def __del__(self):
+                events.append(("value", self.name))
+                d["field"] = len(events)
+
+        d[Key("first")] = Value("first")
+        d[Key("second")] = Value("second")
+        d.clear()
+        self.assertEqual(events, [(kind, name) for name in ("first", "second")
+                                  for kind in ("key", "value")])
+        self.assertEqual(d, {"field": 4})
+        self.assertEqual(_testinternalcapi.dict_get_indexed_item(d, 0), 4)
+        with self.assertRaises(TypeError):
+            d["field"] = "still checked"
+
+    def test_instance_policy_and_custom_key_cycles_are_collectible(self):
+        class Key:
+            pass
+
+        d = _testinternalcapi.dict_new_indexed(("field",))
+        key = Key()
+        key.dictionary = d
+        reference = weakref.ref(key)
+        self.protect(d, {"field": None}, flags=1)
+        d[key] = d
+        del d, key
+        gc.collect()
+        self.assertIsNone(reference())
 
     def test_single_item_python_and_c_mutators(self):
         d = {"x": 1}
@@ -215,7 +533,7 @@ class SoacDictPolicyTests(unittest.TestCase):
         observed = []
 
         def validate(d, key, value, operation):
-            with self.assertRaisesRegex(RuntimeError, "reentrant"):
+            with self.assertRaisesRegex(TypeError, "reentrant"):
                 d["y"] = 9
             observed.append(dict(d))
 
@@ -235,7 +553,7 @@ class SoacDictPolicyTests(unittest.TestCase):
             def __str__(self):
                 # The test watcher formats values, deliberately violating the
                 # native no-Python watcher rule to probe the commit guard.
-                with test.assertRaisesRegex(RuntimeError, "reentrant"):
+                with test.assertRaisesRegex(TypeError, "reentrant"):
                     d["y"] = 3
                 states.append(dict(d))
                 return "value"
@@ -329,6 +647,142 @@ class SoacDictPolicyTests(unittest.TestCase):
             with self.subTest(split=split):
                 self.assertEqual(run(True, split), run(False, split))
 
+    def test_factory_clear_tracks_shared_keys_allocation_and_promotion(self):
+        def run(protected, mode):
+            if protected:
+                typ = _testinternalcapi.dict_new_soac_type(
+                    "ClearStorage", (), {}, (), lambda namespace, cell: None)
+            else:
+                typ = type("ClearStorage", (), {})
+            # Even instances whose dictionaries are never requested consume
+            # ordinary inline capacity.  Shared keys come from actual writes,
+            # not from either instance's visible insertion order.
+            unused = [typ() for _ in range(40 if mode == "capacity" else 1)]
+            seed = typ()
+            seed.z = None
+            seed.x = None
+            seed.y = None
+            obj = typ()
+            d = obj.__dict__
+            events = []
+
+            class Value:
+                def __init__(self, name):
+                    self.name = name
+
+                def __del__(self):
+                    events.append(self.name)
+
+            if mode == "detached":
+                del obj
+            for iteration in range(2):
+                for name in ("y", "x", "z"):
+                    d[name] = Value(name)
+                del d["x"]
+                d["x"] = Value("x_reinserted")
+                if mode == "nonstring":
+                    d[42] = None
+                    del d[42]
+                elif mode == "popitem":
+                    d["temporary"] = None
+                    d.popitem()
+                events.clear()
+                d.clear()
+                yield tuple(events)
+                self.assertEqual(d, {})
+            self.assertEqual(len(unused), 40 if mode == "capacity" else 1)
+
+        for mode in ("split", "capacity", "nonstring", "popitem", "detached"):
+            with self.subTest(mode=mode):
+                self.assertEqual(list(run(True, mode)), list(run(False, mode)))
+
+    def test_split_clear_preserves_pending_reads_and_reentrant_effects(self):
+        def run(protected, action):
+            if protected:
+                typ = _testinternalcapi.dict_new_soac_type(
+                    "ClearReads", (), {}, (), lambda namespace, cell: None)
+            else:
+                typ = type("ClearReads", (), {})
+            obj = typ()
+            d = obj.__dict__
+            events = []
+
+            class Value:
+                def __init__(self, name):
+                    self.name = name
+
+                def __del__(self):
+                    events.append((self.name, "y" in d, len(d)))
+                    if self.name != "x":
+                        return
+                    events.append(("pending", d.get("y") is not None,
+                                   list(d), d.copy()))
+                    if action == "overwrite":
+                        d["y"] = 4
+                    elif action == "insert":
+                        d["z"] = 3
+                    elif action == "pop":
+                        events.append(("pop", d.pop("y", "missing")))
+                    elif action == "reclear":
+                        d.clear()
+
+            d["x"] = Value("x")
+            d["y"] = Value("y")
+            d.clear()
+            return events, len(d), d.get("y"), d.get("z")
+
+        for action in ("read", "overwrite", "insert", "pop", "reclear"):
+            with self.subTest(action=action):
+                self.assertEqual(run(True, action), run(False, action))
+
+    def test_split_clear_rejects_stock_corrupting_mutations_before_commit(self):
+        for action in ("delete", "promotion", "future", "detached_insert",
+                       "detached_reclear", "popitem"):
+            with self.subTest(action=action):
+                typ = _testinternalcapi.dict_new_soac_type(
+                    "ClearBoundary", (), {"__static_attributes__": ("x", "future", "y")},
+                    (), lambda namespace, cell: None)
+                obj = typ()
+                d = obj.__dict__
+                events = []
+                failures = []
+
+                class Value:
+                    def __init__(self, name):
+                        self.name = name
+
+                    def __del__(self):
+                        events.append(self.name)
+                        if self.name != "x":
+                            return
+                        try:
+                            if action == "delete":
+                                del d["y"]
+                            elif action == "promotion":
+                                d[42] = 1
+                            elif action == "future":
+                                d["future"] = 1
+                            elif action == "detached_insert":
+                                d["z"] = 1
+                            elif action == "detached_reclear":
+                                d.clear()
+                            elif action == "popitem":
+                                d["z"] = 1
+                                d.popitem()
+                        except Exception as error:
+                            failures.append(isinstance(error, TypeError))
+                        else:
+                            failures.append(False)
+
+                d["x"] = Value("x")
+                d["y"] = Value("y")
+                if action.startswith("detached"):
+                    del obj
+                d.clear()
+                self.assertEqual(events, ["x", "y"])
+                self.assertEqual(failures, [True])
+                self.assertEqual(d, {"z": 1} if action == "popitem" else {})
+
     def test_indexed_writes_and_clear_preserve_policy_and_schema(self):
         d = _testinternalcapi.dict_new_indexed(("x", "y"))
         self.protect(d, {"x": int, "y": int})
@@ -360,7 +814,10 @@ class SoacDictPolicyTests(unittest.TestCase):
                 d = obj.__dict__
                 for index in range(1000):
                     write(obj, index)
+                if not combined:
+                    self.assertTrue(_testinternalcapi.has_inline_values(obj))
                 self.protect(d, dict.fromkeys(d, int))
+                self.assertFalse(_testinternalcapi.has_inline_values(obj))
                 write(obj, 3)
                 with self.assertRaises(TypeError):
                     write(obj, "bad")
@@ -481,7 +938,7 @@ class IndexedDictTests(unittest.TestCase):
         self.assertEqual(list(left), ["second", "first"])
         self.assertEqual(right, {})
 
-    def test_indexed_dict_deletion_and_reinsertion_convert(self):
+    def test_indexed_dict_deletion_and_reinsertion_preserve_prefix(self):
         dct = self.new_dict(("first", "second", "third"))
         dct["first"] = 1
         dct["second"] = 2
@@ -492,20 +949,18 @@ class IndexedDictTests(unittest.TestCase):
         self.assertEqual(list(dct), ["first", "third"])
         with self.assertRaises(KeyError):
             _testinternalcapi.dict_get_indexed_item(dct, 1)
-        with self.assertRaises(RuntimeError):
-            _testinternalcapi.dict_set_indexed_item(dct, 1, 20)
-
-        dct["second"] = 20
-        self.assertFalse(_testinternalcapi.dict_has_indexed_keys(dct))
+        _testinternalcapi.dict_set_indexed_item(dct, 1, 20)
+        self.assertTrue(_testinternalcapi.dict_has_indexed_keys(dct))
+        self.assertEqual(_testinternalcapi.dict_indexed_key_index(dct, "second"), 1)
         self.assertEqual(list(dct), ["first", "third", "second"])
         self.assertEqual(dct, {"first": 1, "third": 3, "second": 20})
 
-    def test_indexed_dict_unknown_key_converts(self):
+    def test_indexed_dict_unknown_key_preserves_prefix(self):
         dct = self.new_dict(("first", "second"))
         dct["second"] = 2
         dct["other"] = 3
 
-        self.assertFalse(_testinternalcapi.dict_has_indexed_keys(dct))
+        self.assertTrue(_testinternalcapi.dict_has_indexed_keys(dct))
         self.assertEqual(list(dct), ["second", "other"])
         self.assertEqual(dct, {"second": 2, "other": 3})
 
@@ -515,18 +970,96 @@ class IndexedDictTests(unittest.TestCase):
         dct["first"] = 1
 
         copied = dct.copy()
-        self.assertTrue(_testinternalcapi.dict_has_indexed_keys(copied))
+        self.assertFalse(_testinternalcapi.dict_has_indexed_keys(copied))
         self.assertEqual(list(copied), ["third", "first"])
         self.assertEqual(list(reversed(copied)), ["first", "third"])
         self.assertEqual(list(copied.values()), [3, 1])
         self.assertEqual(list(copied.items()), [("third", 3), ("first", 1)])
         self.assertEqual(repr(copied), "{'third': 3, 'first': 1}")
 
-        copied.clear()
-        self.assertTrue(_testinternalcapi.dict_has_indexed_keys(copied))
-        self.assertEqual(copied, {})
-        _testinternalcapi.dict_set_indexed_item(copied, 0, 10)
-        self.assertEqual(copied, {"first": 10})
+        dct.clear()
+        self.assertTrue(_testinternalcapi.dict_has_indexed_keys(dct))
+        self.assertEqual(dct, {})
+        _testinternalcapi.dict_set_indexed_item(dct, 0, 10)
+        self.assertEqual(dct, {"first": 10})
+
+    def test_prefix_survives_arbitrary_overflow_growth_and_deletion(self):
+        dct = self.new_dict(("x", "y", "z"))
+        ordinary = {}
+        original = id(dct)
+        for key in ["y", *range(120), "x", *(f"extra{i}" for i in range(80))]:
+            dct[key] = ordinary[key] = key
+        for key in ["y", *range(100), "x"]:
+            self.assertEqual(dct.pop(key), ordinary.pop(key))
+        for key in ["z", "y", *range(100), "x"]:
+            dct[key] = ordinary[key] = key
+        self.assertEqual(id(dct), original)
+        self.assertTrue(_testinternalcapi.dict_has_indexed_keys(dct))
+        self.assertEqual(list(dct.items()), list(ordinary.items()))
+        self.assertEqual(list(reversed(dct.items())), list(reversed(ordinary.items())))
+        self.assertEqual(dct, ordinary)
+        for index, key in enumerate(("x", "y", "z")):
+            self.assertEqual(_testinternalcapi.dict_indexed_key_index(dct, key), index)
+            self.assertEqual(_testinternalcapi.dict_get_indexed_item(dct, index), key)
+        while ordinary:
+            self.assertEqual(dct.popitem(), ordinary.popitem())
+        self.assertTrue(_testinternalcapi.dict_has_indexed_keys(dct))
+
+    def test_unset_prefix_is_invisible_to_equality(self):
+        comparisons = []
+
+        class Key:
+            def __hash__(self):
+                return hash("field")
+
+            def __eq__(self, other):
+                comparisons.append(other)
+                return other == "field"
+
+        dct = self.new_dict(("field",))
+        key = Key()
+        dct[key] = "overflow"
+        self.assertEqual(comparisons, [])
+        self.assertIs(next(iter(dct)), key)
+        self.assertEqual(dct["field"], "overflow")
+        with self.assertRaises(KeyError):
+            _testinternalcapi.dict_get_indexed_item(dct, 0)
+
+    def test_mutable_equality_preserves_full_lookup_and_copy(self):
+        class Key:
+            matches = False
+
+            def __hash__(self):
+                return hash("field")
+
+            def __eq__(self, other):
+                return self.matches and other == "field"
+
+        key = Key()
+        dct = self.new_dict(("field",))
+        self.assertTrue(_testinternalcapi.dict_has_no_lookup_aliases(dct))
+        dct[key] = "alias"
+        self.assertFalse(_testinternalcapi.dict_has_no_lookup_aliases(dct))
+        dct["field"] = "canonical"
+        key.matches = True
+        self.assertEqual(dct["field"], "alias")
+        copied = dct.copy()
+        self.assertFalse(_testinternalcapi.dict_has_indexed_keys(copied))
+        self.assertEqual(len(copied), 2)
+        self.assertEqual(list(copied.items()), [(key, "alias"), ("field", "canonical")])
+        self.assertEqual(copied["field"], "alias")
+        del dct[key]
+        self.assertFalse(_testinternalcapi.dict_has_no_lookup_aliases(dct))
+        dct.clear()
+        self.assertFalse(_testinternalcapi.dict_has_no_lookup_aliases(dct))
+        self.assertFalse(_testinternalcapi.dict_has_no_lookup_aliases(copied))
+
+    def test_non_aliasing_builtin_overflow_retains_positive_guard(self):
+        dct = self.new_dict(("field",))
+        for key in (1, 2.5, complex(3, 4), b"bytes", ("field",), frozenset({"field"}), None):
+            dct[key] = "value"
+        self.assertTrue(_testinternalcapi.dict_has_no_lookup_aliases(dct))
+        self.assertEqual(len(dct), 7)
 
     def test_indexed_dict_large_unicode_keyset(self):
         keys = tuple(f"key_{index}" for index in range(300))

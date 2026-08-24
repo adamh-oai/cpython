@@ -57,6 +57,7 @@ enum {
     PyDict_SOAC_CACHE_INSERT = 6,
     PyDict_SOAC_CACHE_REPLACE = 7
 };
+#define PyDict_SOAC_ALLOW_NONSTRING_KEYS 1u
 typedef int (*PyDict_SoacPolicyCallback)(
     PyObject *owner, PyObject *dict, PyObject *key, PyObject *value,
     int operation, PyObject *provenance);

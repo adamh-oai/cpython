@@ -5,6 +5,7 @@ extern "C" {
 #endif
 
 #define _PyDict_SOAC_POLICY_TAG (UINT64_C(1) << 12)
+#define _PyDict_SOAC_LOOKUP_ALIASES_TAG (UINT64_C(1) << 13)
 #ifdef Py_GIL_DISABLED
 #define _PyDict_HasSoacPolicy(mp) (0)
 #else
@@ -15,6 +16,9 @@ extern "C" {
 /* Only unreachable GC and terminal module cleanup may use these.  Neither
    helper makes normal/public writes legal again. */
 extern void _PyDict_SoacBeginTeardown(PyObject *dict);
+/* GenericAlloc only: initialize an unpublished, untracked, zeroed instance.
+   Failure leaves its dictionary pointer NULL and preserves the exception. */
+extern int _PyDict_InitSoacInstanceStorage(PyObject *obj);
 extern void _PyDict_ClearForTeardown(PyObject *dict);
 extern int _PyDict_SetItemForTeardown(
     PyObject *dict, PyObject *key, PyObject *value);
@@ -66,8 +70,11 @@ PyAPI_FUNC(Py_ssize_t) _PyDict_SizeOf(PyDictObject *);
 extern Py_ssize_t _PyDict_SizeOf_LockHeld(PyDictObject *);
 
 #define _PyDict_HasSplitTable(d) ((d)->ma_values != NULL)
+#define DK_IS_INDEXED(dk) \
+    ((dk)->dk_kind == DICT_KEYS_INDEXED_UNICODE || \
+     (dk)->dk_kind == DICT_KEYS_INDEXED_GENERAL)
 #define _PyDict_HasIndexedTable(d) \
-    ((d)->ma_values != NULL && (d)->ma_keys->dk_kind == DICT_KEYS_INDEXED_UNICODE)
+    ((d)->ma_values != NULL && DK_IS_INDEXED((d)->ma_keys))
 
 /* Like PyDict_Merge, but override can be 0, 1 or 2.  If override is 0,
    the first occurrence of a key wins, if override is 1, the last occurrence
@@ -107,7 +114,24 @@ extern PyDictKeysObject *_PyDict_NewKeysForClass(PyHeapTypeObject *);
 extern PyObject *_PyDict_FromKeys(PyObject *, PyObject *, PyObject *);
 PyAPI_FUNC(PyDictKeysObject *) _PyDict_NewIndexedKeySet(PyObject *keys);
 PyAPI_FUNC(PyObject *) _PyDict_NewWithIndexedKeySet(PyDictKeysObject *keys);
+/* Fresh empty storage with the same immutable prefix, no copied policy,
+   values, or overflow.  The template is an ordinary GC-owned Python edge. */
+PyAPI_FUNC(PyObject *) _PyDict_NewFromIndexedSchema(PyObject *template);
 PyAPI_FUNC(Py_ssize_t) _PyDict_IndexedKeyIndex(PyObject *dict, PyObject *key);
+/* Recheck this positive guard after effects before interpreting a physical
+   prefix slot as a Python lookup.  Stored keys may change equality without a
+   dictionary mutation.  Once aliases are possible, the flag stays set. */
+PyAPI_FUNC(int) _PyDict_HasNoLookupAliases(PyObject *dict);
+/* Native owner initialization only: reserve invisible stable names before
+   sealing, never replace/revoke a policy or expose a Python-visible setter. */
+PyAPI_FUNC(int) _PyDict_ReserveSoacNamespaceKeys(
+    PyObject *dict, PyObject *owner, PyObject *names);
+/* Module annotation setters only: 1 success, 0 missing primary delete,
+   -1 error.  Once sealed, only a primary first insert with absent companion
+   is supported: replacement/deletion could run finalizers that introduce a
+   second binding. Unsealed initialization keeps ordinary sequential behavior. */
+PyAPI_FUNC(int) _PyDict_SetItemAndDeleteForModule(
+    PyObject *dict, PyObject *primary_key, PyObject *value, PyObject *companion_key);
 PyAPI_FUNC(int) _PyDict_GetIndexedItem(
         PyObject *dict, Py_ssize_t index, PyObject **result);
 PyAPI_FUNC(int) _PyDict_SetIndexedItem(
@@ -198,7 +222,8 @@ typedef enum {
     DICT_KEYS_GENERAL = 0,
     DICT_KEYS_UNICODE = 1,
     DICT_KEYS_SPLIT = 2,
-    DICT_KEYS_INDEXED_UNICODE = 3
+    DICT_KEYS_INDEXED_UNICODE = 3,
+    DICT_KEYS_INDEXED_GENERAL = 4
 } DictKeysKind;
 
 /* See dictobject.c for actual layout of DictKeysObject */
@@ -266,15 +291,19 @@ struct _dictvalues {
     PyObject *values[1];
 };
 
-/* Values for an immutable indexed-unicode key set.
+/* One authoritative values array for a stable-prefix dictionary.
  *
- * The value slots are followed by ``capacity`` Py_ssize_t insertion-order
- * indices.  Deleted values retain a tombstone in their stable slot while
- * their index is removed from the insertion-order array.
+ * prefix_keys owns an immutable exact-string name/index descriptor.  Actual
+ * ma_keys contains only visible bindings, with reserved prefix positions and
+ * ordinary overflow after them.  UNSET slots have no key in the lookup table
+ * and no value.  The values are followed by ``capacity`` Py_ssize_t insertion
+ * order indices.  Growth may move this allocation, never a published prefix
+ * index: consumers must reload the base after effects.
  */
 typedef struct {
     Py_ssize_t capacity;
     Py_ssize_t order_size;
+    PyDictKeysObject *prefix_keys;
     PyObject *values[1];
 } PyDictIndexedValues;
 
@@ -292,15 +321,16 @@ static inline void* _DK_ENTRIES(PyDictKeysObject *dk) {
 }
 
 static inline PyDictKeyEntry* DK_ENTRIES(PyDictKeysObject *dk) {
-    assert(dk->dk_kind == DICT_KEYS_GENERAL);
+    assert(dk->dk_kind == DICT_KEYS_GENERAL || dk->dk_kind == DICT_KEYS_INDEXED_GENERAL);
     return (PyDictKeyEntry*)_DK_ENTRIES(dk);
 }
 static inline PyDictUnicodeEntry* DK_UNICODE_ENTRIES(PyDictKeysObject *dk) {
-    assert(dk->dk_kind != DICT_KEYS_GENERAL);
+    assert(dk->dk_kind != DICT_KEYS_GENERAL && dk->dk_kind != DICT_KEYS_INDEXED_GENERAL);
     return (PyDictUnicodeEntry*)_DK_ENTRIES(dk);
 }
 
-#define DK_IS_UNICODE(dk) ((dk)->dk_kind != DICT_KEYS_GENERAL)
+#define DK_IS_UNICODE(dk) \
+    ((dk)->dk_kind != DICT_KEYS_GENERAL && (dk)->dk_kind != DICT_KEYS_INDEXED_GENERAL)
 
 #define DICT_VERSION_INCREMENT (1 << (DICT_MAX_WATCHERS + DICT_WATCHED_MUTATION_BITS))
 #define DICT_WATCHER_MASK ((1 << DICT_MAX_WATCHERS) - 1)
