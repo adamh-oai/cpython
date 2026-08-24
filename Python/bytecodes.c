@@ -2723,6 +2723,13 @@ dummy_func(
             DISPATCH_INLINED(new_frame, tstate->interp->eval_frame);
         }
 
+        op(_GUARD_NO_ORDINARY_INSTANCE_WRITES, (owner -- owner)) {
+            /* Separate from optimizer-foldable type-version guards. Actual
+             * ordinary subclasses inherit checked writes, not an own flag. */
+            PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
+            EXIT_IF(_PySOAC_HasOrdinaryInstanceWrites(tp));
+        }
+
         op(_GUARD_DORV_NO_DICT, (owner -- owner)) {
             PyObject *owner_o = PyStackRef_AsPyObjectBorrow(owner);
 
@@ -2756,6 +2763,7 @@ dummy_func(
 
         macro(STORE_ATTR_INSTANCE_VALUE) =
             unused/1 +
+            _GUARD_NO_ORDINARY_INSTANCE_WRITES +
             _GUARD_TYPE_VERSION_AND_LOCK +
             _GUARD_DORV_NO_DICT +
             _STORE_ATTR_INSTANCE_VALUE +
@@ -2801,6 +2809,7 @@ dummy_func(
 
         macro(STORE_ATTR_WITH_HINT) =
             unused/1 +
+            _GUARD_NO_ORDINARY_INSTANCE_WRITES +
             _RECORD_TOS_TYPE +
             _GUARD_TYPE_VERSION +
             _STORE_ATTR_WITH_HINT +

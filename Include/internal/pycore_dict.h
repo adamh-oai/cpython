@@ -298,6 +298,11 @@ struct _dictkeysobject {
  * the insertion order and size.
  * [-1] = prefix size. [-2] = used size. size[-2-n...] = insertion order.
  */
+/* A transient native transaction on LIVE embedded values, not another
+ * storage layout. Readers/traversal keep treating nonzero as live; mutation,
+ * materialization and replacement must refuse PREPARING before effects. */
+#define _PyDictValues_SOAC_PREPARING 2
+
 struct _dictvalues {
     uint8_t capacity;
     uint8_t size;
@@ -433,6 +438,10 @@ _PyDict_DetachFromObject(PyDictObject *dict, PyObject *obj);
 extern void _PyDict_EnablePerThreadRefcounting(PyObject *op);
 
 PyDictObject *_PyObject_MaterializeManagedDict_LockHeld(PyObject *);
+
+/* Shared actual incoming-dictionary attachment after caller type/deletion
+ * validation. No dictionary is synthesized or permanently pinned here. */
+int _PyObject_SetInstanceDictionary(PyObject *instance, PyObject *dictionary);
 
 // See `_Py_INCREF_TYPE()` in pycore_object.h
 #ifndef Py_GIL_DISABLED

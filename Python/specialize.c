@@ -999,7 +999,8 @@ _Py_Specialize_StoreAttr(_PyStackRef owner_st, _Py_CODEUNIT *instr, PyObject *na
     PyObject *descr = NULL;
     _PyAttrCache *cache = (_PyAttrCache *)(instr + 1);
     PyTypeObject *type = Py_TYPE(owner);
-    if (type->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
+    if ((type->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) ||
+        _PySOAC_HasOrdinaryInstanceWrites(type)) {
         SPECIALIZATION_FAIL(STORE_ATTR, SPEC_FAIL_OVERRIDDEN);
         goto fail;
     }

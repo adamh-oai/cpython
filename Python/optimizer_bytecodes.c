@@ -181,6 +181,11 @@ dummy_func(void) {
         }
     }
 
+    op(_GUARD_NO_ORDINARY_INSTANCE_WRITES, (owner -- owner)) {
+        // Keep the actual-MRO policy guard even with an inferred exact type.
+        // A type-version proof is not authority to omit mandatory field checks.
+    }
+
     op(_GUARD_TYPE_VERSION, (type_version/2, owner -- owner)) {
         assert(type_version);
         assert(this_instr[-1].opcode == _RECORD_TOS_TYPE);
