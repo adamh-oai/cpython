@@ -2826,8 +2826,8 @@ dummy_func(
 
         macro(STORE_ATTR_WITH_HINT) =
             unused/1 +
-            _GUARD_NO_ORDINARY_INSTANCE_WRITES +
             _RECORD_TOS_TYPE +
+            _GUARD_NO_ORDINARY_INSTANCE_WRITES +
             _GUARD_TYPE_VERSION +
             _STORE_ATTR_WITH_HINT +
             POP_TOP;
