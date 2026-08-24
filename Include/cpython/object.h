@@ -335,7 +335,10 @@ typedef struct {
     int (*check_instance_write)(PyObject *, PyObject *, PyObject *, PyObject *);
     PyObject *(*new_instance_dict)(PyObject *, PyObject *);
     /* ORDINARY returns one metadata owner, not a new dictionary or receiver
-     * pin. Native owns provisional policy validation/commit/abort. The view
+     * pin. actual_dict is a callback-scoped read-only borrow: do not retain or
+     * expose it. A materialization candidate can be a private untracked header;
+     * its actual instance still supports/traverses all values until commit.
+     * Native owns provisional policy validation/commit/abort. The view
      * definition follows PyDict_SoacPolicyCallback in cpython/dictobject.h. */
     int (*prepare_instance_dictionary_policy)(
         PyObject *, PyObject *, PyObject *,
