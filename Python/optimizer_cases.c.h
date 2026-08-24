@@ -2855,6 +2855,10 @@
             break;
         }
 
+        case _CHECK_NO_SOAC_GENERATED_ACTIVATION: {
+            break;
+        }
+
         case _MAYBE_EXPAND_METHOD: {
             JitOptRef *args;
             JitOptRef self_or_null;
