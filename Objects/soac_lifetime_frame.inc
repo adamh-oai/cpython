@@ -291,7 +291,8 @@ soac_lifetime_finish_owner_rows(
                         "source-lifetime owners do not match the original code layout");
         return -1;
     }
-    if (captured_globals == NULL || captured_builtins == NULL) {
+    if (rows->kind == SOAC_LIFETIME_OBJECT_ROWS &&
+        (captured_globals == NULL || captured_builtins == NULL)) {
         PyErr_SetString(PyExc_ValueError,
                         "source-lifetime finish requires the captured function environment");
         return -1;
@@ -324,6 +325,16 @@ soac_lifetime_finish_owner_rows(
      * ordinary fatal-on-OOM C allocation. Decide before adding any parked
      * references, including a self-local. Primary native tokens are unchanged. */
     int retained = !_PyObject_IsUniquelyReferenced((PyObject *)object);
+    if (rows->kind == SOAC_LIFETIME_REFERENCE_ROWS) {
+        /* The native interval's actual function token, not a cached map
+         * pointer, supported these borrowed views. GC may already have run
+         * func_clear, even while that function remains allocated. Unpublish
+         * before every commit path, including unique and never-entered frames;
+         * never read or acquire a captured map after its support may retire.
+         * Lifetime map introspection (Python and C) already fails explicitly. */
+        frame->f_globals = NULL;
+        frame->f_builtins = NULL;
+    }
     uint16_t code_role = frame->soac_lifetime_owned_environment &
                          SOAC_LIFETIME_BORROWED_CODE;
     if (retained && code_role) {
@@ -339,24 +350,26 @@ soac_lifetime_finish_owner_rows(
         return 0;
     }
     frame->f_funcobj = PyStackRef_FromPyObjectNew(source_function);
-    frame->f_globals = captured_globals;
-    frame->f_builtins = captured_builtins;
-    /* Cyclic GC may already have cleared this still-allocated function, or it
-     * may still be queued for tp_clear after this owner. delete_garbage does not
-     * recheck reachability after Finish adds the function reference. Retain the
-     * explicit environment in either case. This is the function's own pending
-     * collection state, not an ambient "GC is running" test: reachable ordinary
-     * functions still add no map edges or refcount changes. */
-    assert(frame->soac_lifetime_owned_environment == 0);
-    int function_collecting =
-        (_Py_AS_GC(source_function)->_gc_prev & _PyGC_PREV_MASK_COLLECTING) != 0;
-    if (function_collecting || function->func_globals != captured_globals) {
-        Py_INCREF(captured_globals);
-        frame->soac_lifetime_owned_environment |= SOAC_LIFETIME_OWNS_GLOBALS;
-    }
-    if (function_collecting || function->func_builtins != captured_builtins) {
-        Py_INCREF(captured_builtins);
-        frame->soac_lifetime_owned_environment |= SOAC_LIFETIME_OWNS_BUILTINS;
+    if (rows->kind == SOAC_LIFETIME_OBJECT_ROWS) {
+        frame->f_globals = captured_globals;
+        frame->f_builtins = captured_builtins;
+        /* Cyclic GC may already have cleared this still-allocated function, or it
+         * may still be queued for tp_clear after this owner. delete_garbage does not
+         * recheck reachability after Finish adds the function reference. Retain the
+         * explicit environment in either case. This is the function's own pending
+         * collection state, not an ambient "GC is running" test: reachable ordinary
+         * functions still add no map edges or refcount changes. */
+        assert(frame->soac_lifetime_owned_environment == 0);
+        int function_collecting =
+            (_Py_AS_GC(source_function)->_gc_prev & _PyGC_PREV_MASK_COLLECTING) != 0;
+        if (function_collecting || function->func_globals != captured_globals) {
+            Py_INCREF(captured_globals);
+            frame->soac_lifetime_owned_environment |= SOAC_LIFETIME_OWNS_GLOBALS;
+        }
+        if (function_collecting || function->func_builtins != captured_builtins) {
+            Py_INCREF(captured_builtins);
+            frame->soac_lifetime_owned_environment |= SOAC_LIFETIME_OWNS_BUILTINS;
+        }
     }
     frame->f_locals = Py_XNewRef(source_namespace);
     for (Py_ssize_t i = 0; i < count; i++) {
@@ -402,12 +415,15 @@ PyFrame_FinishSoacLifetimeWithReferencesV1(
                     "source-lifetime references require the selected 64-bit GIL build");
     return -1;
 #else
+    /* These legacy-shaped operands are intentionally not map-liveness proof.
+     * Canonical native-reference callers pass NULL; no retired pointer is read. */
+    (void)captured_globals;
+    (void)captured_builtins;
     const SoacLifetimeOwnerRows rows = {
         .kind = SOAC_LIFETIME_REFERENCE_ROWS, .references = source_owner_slots,
     };
     return soac_lifetime_finish_owner_rows(
-        object, source_function, captured_globals, captured_builtins,
-        source_namespace, &rows, count);
+        object, source_function, NULL, NULL, source_namespace, &rows, count);
 #endif
 }
 
