@@ -1,8 +1,7 @@
-/* REVIEW DRAFT ONLY: native22 primitive implementation, not linked or enabled.
- * Intended for a CPython core translation unit after the joint epoch review.
- * The draft header also describes later call transactions; none is implemented
- * here. A probe must link these symbols from the matching native library, never
- * compile a substitute copy into its extension.
+/* Native opaque-reference primitives, included by the CPython core.
+ * Call transactions use the native binding and dispatch producers.
+ * A C probe must link these symbols from the matching native library,
+ * never compile a substitute implementation into its extension.
  */
 #include "Python.h"
 #include "pycore_cell.h"

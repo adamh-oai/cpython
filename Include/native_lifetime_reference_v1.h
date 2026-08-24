@@ -1,9 +1,9 @@
-/* ADDITIVE REVIEW DRAFT ONLY. ROOT approved this constructor signature;
- * native_reference_v1.draft.h remains byte-identical and declares FinishV1.
- * Not installed, linked, or an execution grant.
+/* Native-reference code-primary transfer for SOAC lifetime frames.
+ * Native reference operations and lifetime finish are declared in
+ * native_reference_v1.h. Construction does not authorize execution.
  */
-#ifndef PY_SOAC_LIFETIME_REFERENCE_V1_DRAFT_H
-#define PY_SOAC_LIFETIME_REFERENCE_V1_DRAFT_H
+#ifndef PY_SOAC_LIFETIME_REFERENCE_V1_H
+#define PY_SOAC_LIFETIME_REFERENCE_V1_H
 
 #include "native_reference_v1.h"
 

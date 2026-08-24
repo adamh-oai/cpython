@@ -1,7 +1,7 @@
-/* IGNORED native22 ABI draft, approved for C implementation/review only.
- * Not installed or enabled. This header adds no source-body admission. */
-#ifndef PY_SOAC_OUTGOING_REFERENCE_V1_DRAFT_H
-#define PY_SOAC_OUTGOING_REFERENCE_V1_DRAFT_H
+/* Native-reference outgoing calls with explicit source context.
+ * These declarations do not establish source-body or call-site admission. */
+#ifndef PY_SOAC_OUTGOING_REFERENCE_V1_H
+#define PY_SOAC_OUTGOING_REFERENCE_V1_H
 
 #include "native_reference_v1.h"
 #include <frameobject.h>

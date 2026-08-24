@@ -1,5 +1,5 @@
-/* IGNORED REVIEW DRAFT. Include from Objects/funcobject.c after the strict
- * owner/error helpers. This C-only record owns NO Python references. Trusted
+/* Function-owned source-entry registration and invalidation.
+ * This C-only record owns NO Python references. Trusted
  * registrar precondition: the actual catalogue original, CallableSourceRole,
  * all native parameters and executable token-body/read plan have already been
  * checked together. C does not infer that proof from names, flags or metadata.

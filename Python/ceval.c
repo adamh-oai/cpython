@@ -1965,9 +1965,9 @@ clear_thread_frame(PyThreadState *tstate, _PyInterpreterFrame * frame)
     _PyThreadState_PopFrame(tstate, frame);
 }
 
-/* REVIEW DRAFT ONLY. Insert in Python/ceval.c after clear_thread_frame.
- * The public opaque-reference declarations/primitive layer are a separate
- * frozen dependency. This fragment enables no entry registration or opcode.
+/* Native source-call binding/view transaction.
+ * Opaque reference operations use the matching native primitive layer;
+ * registration and call-site dispatch remain separate requirements.
  */
 
 _Static_assert(sizeof(PySoacRefV1) == sizeof(_PyStackRef),
@@ -2368,9 +2368,9 @@ _PyEval_FrameClearAndPop(PyThreadState *tstate, _PyInterpreterFrame * frame)
     }
 }
 
-/* IGNORED REVIEW DRAFT. Place in Python/ceval.c after the frozen binder/view
- * implementation. Explicit public C call only: no VM opcode, normal function
- * vectorcall, Rust body, dataclass or outgoing-call site is redirected here.
+/* Borrowed public C source-entry adapter.
+ * VM producers retain their separate consuming-operand transactions.
+ * This adapter does not establish source-body or dataclass authority.
  */
 
 static PyObject *
@@ -2551,9 +2551,9 @@ PySoac_CallBorrowedVectorcallV1(PyObject *object, PyObject *const *args,
 }
 
 
-/* IGNORED REVIEW DRAFT. Place in ceval.c after the registration adapter.
- * Native CALL/KW/EX producers are explicit; no VM argument passes through
- * PyObject** vectorcall and no original strict bytecode is evaluated. */
+/* Native consuming CALL/KW/EX producers.
+ * Native Python-function entry receives the exact VM references;
+ * no original strict bytecode is evaluated. */
 
 int
 _PySoacVMCall_IsRegisteredV1(PyObject *object)

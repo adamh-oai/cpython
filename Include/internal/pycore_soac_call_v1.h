@@ -1,7 +1,6 @@
-/* REVIEW DRAFT ONLY. Private native producer storage, not a Rust layout or an
- * execution capability. Requires the unchanged native_reference_v1 public
- * declarations and primitive implementation. No producer is enabled by this
- * header. A C probe must link the matching library, never supply its own binder.
+/* Private native producer storage, not a Rust layout or execution capability.
+ * Requires native_reference_v1.h and its native primitive implementation.
+ * A C probe must link the matching library, never supply its own binder.
  */
 #ifndef Py_INTERNAL_SOAC_CALL_V1_H
 #define Py_INTERNAL_SOAC_CALL_V1_H

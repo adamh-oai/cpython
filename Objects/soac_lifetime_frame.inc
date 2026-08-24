@@ -47,9 +47,9 @@ _PyFrame_GetSoacLifetimeObject(_PyInterpreterFrame *frame)
     return object;
 }
 
-/* Replace the existing lifetime constructor in the frozen scope21 unit.
- * The legacy borrowed-code API remains unchanged; the new path takes a token.
- * Include native_lifetime_reference_v1.draft.h at the unit's ABI boundary.
+/* Shared allocation for legacy and native-reference lifetime constructors.
+ * The native-reference path moves the actual code-primary token.
+ * Its public declarations are in native_lifetime_reference_v1.h.
  */
 _Static_assert(sizeof(PySoacRefV1) == sizeof(_PyStackRef),
                "lifetime code handoff must move the exact native token");
@@ -412,7 +412,7 @@ PyFrame_FinishSoacLifetimeWithReferencesV1(
 }
 
 
-/* REVIEW DRAFT ONLY: appended inside Objects/soac_lifetime_frame.inc. */
+/* Caller-owned native source-parent scope storage. */
 typedef struct {
     uintptr_t version;
     uintptr_t state;

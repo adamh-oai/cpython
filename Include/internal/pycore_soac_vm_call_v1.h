@@ -1,4 +1,4 @@
-/* IGNORED REVIEW DRAFT. Native-only storage, never a Rust layout. */
+/* Private native CALL/KW/EX producer storage, never a Rust layout. */
 #ifndef Py_INTERNAL_SOAC_VM_CALL_V1_H
 #define Py_INTERNAL_SOAC_VM_CALL_V1_H
 #ifndef Py_BUILD_CORE

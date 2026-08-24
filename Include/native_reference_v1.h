@@ -1,9 +1,9 @@
-/* DESIGN DRAFT ONLY. Not installed, built, or registered in native20.
- * Proposed public additions; the implementation stays in CPython C.
- * See TRANSACTION-V1.md for producer ordering and required joint consumers.
+/* Versioned opaque native-reference and source-call interfaces.
+ * Native operations remain in CPython C; token layout is transport-only.
+ * Registration, binding and ownership requirements are specified below.
  */
-#ifndef PY_SOAC_NATIVE_REFERENCE_V1_DRAFT_H
-#define PY_SOAC_NATIVE_REFERENCE_V1_DRAFT_H
+#ifndef PY_SOAC_NATIVE_REFERENCE_V1_H
+#define PY_SOAC_NATIVE_REFERENCE_V1_H
 
 #include <Python.h>
 #include <stddef.h>

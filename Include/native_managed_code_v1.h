@@ -1,9 +1,9 @@
-/* ADDITIVE REVIEW DRAFT ONLY. No source body is registered or enabled.
- * Includes the immutable lifetime22/native-reference headers; does not edit
- * their ABI or the existing PySoacGeneratorSpec/legacy constructors.
+/* Managed-generator code-primary ownership interfaces.
+ * These extend the native lifetime/reference APIs without changing the
+ * legacy PySoacGeneratorSpec constructors or registering a source body.
  */
-#ifndef PY_SOAC_MANAGED_CODE_V1_DRAFT_H
-#define PY_SOAC_MANAGED_CODE_V1_DRAFT_H
+#ifndef PY_SOAC_MANAGED_CODE_V1_H
+#define PY_SOAC_MANAGED_CODE_V1_H
 
 #include "native_lifetime_reference_v1.h"
 

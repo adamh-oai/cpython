@@ -1,4 +1,4 @@
-/* IGNORED REVIEW DRAFT. No registration is installed automatically. */
+/* Function-owned source-entry registration; none is installed automatically. */
 #ifndef Py_INTERNAL_SOAC_SOURCE_ENTRY_V1_H
 #define Py_INTERNAL_SOAC_SOURCE_ENTRY_V1_H
 #ifndef Py_BUILD_CORE
