@@ -1249,12 +1249,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int 
         if (_Py_EnterRecursivePy(tstate)) {
             goto early_exit;
         }
-        if (_PyFrame_GetCode(frame)->co_flags & CO_FUTURE_STRICT) {
-            PyObject *exception = PySoac_GetStrictRuntimeUnavailableError();
-            if (exception != NULL) {
-                _PyErr_SetString(tstate, exception,
-                                "strict code execution requires an authenticated runtime entry");
-            }
+        if (_PyFrame_CheckSoacExecution(frame) < 0) {
             goto early_exit;
         }
 #ifdef Py_GIL_DISABLED

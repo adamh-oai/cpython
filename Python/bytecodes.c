@@ -4018,6 +4018,10 @@ dummy_func(
             tstate->py_recursion_remaining--;
             LOAD_SP();
             LOAD_IP(0);
+            if (_PyFrame_GetCode(frame)->co_flags & CO_FUTURE_STRICT) {
+                int allowed = _PyFrame_CheckSoacExecution(frame);
+                ERROR_IF(allowed < 0);
+            }
             LLTRACE_RESUME_FRAME();
         }
 
@@ -5839,15 +5843,9 @@ dummy_func(
             if (too_deep) {
                 goto exit_unwind;
             }
-            /* Includes inlined CALL/SEND entries that do not re-enter the C
-             * evaluator. A future bit or original authenticated code is not
-             * a native execution permit. SOAC executes through its own entry. */
-            if (_PyFrame_GetCode(frame)->co_flags & CO_FUTURE_STRICT) {
-                PyObject *exception = PySoac_GetStrictRuntimeUnavailableError();
-                if (exception != NULL) {
-                    _PyErr_SetString(tstate, exception,
-                                    "strict code execution requires an authenticated runtime entry");
-                }
+            /* Generic DISPATCH_INLINED entries use this label. Specialized
+             * entries perform the same check in _PUSH_FRAME. */
+            if (_PyFrame_CheckSoacExecution(frame) < 0) {
                 goto exit_unwind;
             }
             next_instr = frame->instr_ptr;

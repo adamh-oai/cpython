@@ -24,6 +24,24 @@ static inline PyCodeObject *_PyFrame_GetCode(_PyInterpreterFrame *f) {
     return (PyCodeObject *)executable;
 }
 
+/* All native entry paths, including specialized/tier-two frame pushes and
+   generator throw, must check the actual frame before its first instruction.
+   Neither a future flag nor an authenticated source ID is an execution grant.
+   The SOAC runtime currently executes strict functions through its own entry. */
+static inline int
+_PyFrame_CheckSoacExecution(_PyInterpreterFrame *frame)
+{
+    if (!(_PyFrame_GetCode(frame)->co_flags & CO_FUTURE_STRICT)) {
+        return 0;
+    }
+    PyObject *exception = PySoac_GetStrictRuntimeUnavailableError();
+    if (exception != NULL) {
+        PyErr_SetString(exception,
+                        "strict code execution requires an authenticated runtime entry");
+    }
+    return -1;
+}
+
 // Similar to _PyFrame_GetCode(), but return NULL if the frame is invalid or
 // freed. Used by dump_frame() in Python/traceback.c. The function uses
 // heuristics to detect freed memory, it's not 100% reliable.
