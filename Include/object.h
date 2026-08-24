@@ -610,6 +610,10 @@ given type object has a specified feature.
 /* Type is abstract and cannot be instantiated */
 #define Py_TPFLAGS_IS_ABSTRACT (1UL << 20)
 
+/* Native SOAC construction state is installed before type callbacks.  This
+ * bit is not an optimizer capability: sealed state must be checked separately. */
+#define Py_TPFLAGS_SOAC_CONTRACT (1UL << 21)
+
 // This undocumented flag gives certain built-ins their unique pattern-matching
 // behavior, which allows a single positional subpattern to match against the
 // subject itself (rather than a mapped attribute on it):

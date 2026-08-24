@@ -2,6 +2,7 @@
 /* Generic object operations; and implementation of None */
 
 #include "Python.h"
+#include "pycore_soac_type.h"
 #include "pycore_brc.h"           // _Py_brc_queue_object()
 #include "pycore_call.h"          // _PyObject_CallNoArgs()
 #include "pycore_ceval.h"         // _Py_EnterRecursiveCallTstate()
@@ -1681,6 +1682,14 @@ _PyObject_GetMethod(PyObject *obj, PyObject *name, PyObject **method)
             }
         }
     }
+    int soac_protected = _PySOAC_ProtectedName(tp, name);
+    if (soac_protected < 0) {
+        Py_XDECREF(descr);
+        return 0;
+    }
+    if (soac_protected) {
+        goto soac_class_member;
+    }
     PyObject *dict, *attr;
     if ((tp->tp_flags & Py_TPFLAGS_INLINE_VALUES) &&
          _PyObject_TryGetInstanceAttribute(obj, name, &attr)) {
@@ -1715,6 +1724,7 @@ _PyObject_GetMethod(PyObject *obj, PyObject *name, PyObject **method)
         Py_DECREF(dict);
     }
 
+  soac_class_member:
     if (meth_found) {
         *method = descr;
         return 1;
@@ -1781,6 +1791,14 @@ _PyObject_GetMethodStackRef(PyThreadState *ts, PyObject *obj,
             }
         }
     }
+    int soac_protected = _PySOAC_ProtectedName(tp, name);
+    if (soac_protected < 0) {
+        PyStackRef_CLEAR(*method);
+        return -1;
+    }
+    if (soac_protected) {
+        goto soac_class_member;
+    }
     PyObject *dict, *attr;
     if ((tp->tp_flags & Py_TPFLAGS_INLINE_VALUES) &&
          _PyObject_TryGetInstanceAttribute(obj, name, &attr)) {
@@ -1815,6 +1833,7 @@ _PyObject_GetMethodStackRef(PyThreadState *ts, PyObject *obj,
         }
     }
 
+  soac_class_member:
     if (meth_found) {
         assert(!PyStackRef_IsNull(*method));
         return 1;
@@ -1894,6 +1913,13 @@ _PyObject_GenericGetAttrWithDict(PyObject *obj, PyObject *name,
             goto done;
         }
     }
+    int soac_protected = _PySOAC_ProtectedName(tp, name);
+    if (soac_protected < 0) {
+        goto done;
+    }
+    if (soac_protected) {
+        goto soac_class_member;
+    }
     if (dict == NULL) {
         if ((tp->tp_flags & Py_TPFLAGS_INLINE_VALUES)) {
             if (PyUnicode_CheckExact(name) &&
@@ -1941,6 +1967,7 @@ _PyObject_GenericGetAttrWithDict(PyObject *obj, PyObject *name,
         }
     }
 
+  soac_class_member:
     if (f != NULL) {
         res = f(descr, obj, (PyObject *)Py_TYPE(obj));
         if (res == NULL && suppress &&
@@ -2014,6 +2041,9 @@ _PyObject_GenericSetAttrWithDict(PyObject *obj, PyObject *name,
         }
     }
 
+    if (_PySOAC_CheckInstanceWrite(obj, name, value) < 0) {
+        goto done;
+    }
     if (dict == NULL) {
         PyObject **dictptr;
 

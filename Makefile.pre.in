@@ -2276,6 +2276,7 @@ Python/pydtrace.o: $(srcdir)/Include/pydtrace.d $(DTRACE_DEPS)
 	CC="$(CC)" CFLAGS="$(CFLAGS)" $(DTRACE) $(DFLAGS) -o $@ -G -s $(srcdir)/Include/pydtrace.d $(DTRACE_DEPS)
 
 Objects/typeobject.o: Objects/typeslots.inc
+Objects/typeobject.o: $(srcdir)/Objects/soac_type.inc $(srcdir)/Include/internal/pycore_soac_type.h
 
 .PHONY: regen-typeslots
 regen-typeslots:

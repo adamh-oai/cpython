@@ -288,6 +288,7 @@ typedef struct _heaptypeobject {
 #ifdef Py_GIL_DISABLED
     Py_ssize_t unique_id;  // ID used for per-thread refcounting
 #endif
+    PyObject *ht_soac_contract; /* GC-visible permanent native contract state. */
     /* here are optional user slots, followed by the members. */
 } PyHeapTypeObject;
 
@@ -303,6 +304,32 @@ PyAPI_FUNC(int) PyType_SetSoacMetadata(
 );
 PyAPI_FUNC(void *) PyType_GetSoacMetadata(PyObject *);
 PyAPI_FUNC(uint64_t) PyType_GetSoacFunctionId(PyObject *);
+
+/* The C-only caller must authenticate the source plan. Ordinary Python cannot
+ * construct these interpreter-owned handles or install type capabilities. */
+#define Py_SOAC_TYPE_CONTRACT_ABI 1
+#define Py_SOAC_TYPE_FINAL 1u
+typedef struct {
+    uint32_t abi_version;
+    uint32_t flags;
+    PyObject *owner;
+    PyObject *namespace_function;
+    PyObject *name;
+    PyObject *bases;
+    PyObject *namespace;
+    PyObject *keywords;
+    PyObject *fields;
+    PyObject *protected_names;
+    PyObject *final_methods;
+    int (*check_instance_write)(PyObject *, PyObject *, PyObject *, PyObject *);
+    PyObject *(*new_instance_dict)(PyObject *, PyObject *);
+} PySoacTypeConstructionSpec;
+
+PyAPI_FUNC(PyObject *) PyType_NewSoacConstructionHandle(const PySoacTypeConstructionSpec *);
+PyAPI_FUNC(PyObject *) PyType_FromSoacConstructionHandle(PyObject *, PyObject *);
+PyAPI_FUNC(int) PyType_SealSoacContract(PyObject *, PyObject *);
+PyAPI_FUNC(int) PyType_HasSoacContract(PyObject *);
+PyAPI_FUNC(int) PyType_IsSoacSealed(PyObject *);
 
 PyAPI_FUNC(int) PyObject_Print(PyObject *, FILE *, int);
 PyAPI_FUNC(void) _Py_BreakPoint(void);

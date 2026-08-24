@@ -956,7 +956,11 @@ _Py_Specialize_LoadAttr(_PyStackRef owner_st, _Py_CODEUNIT *instr, PyObject *nam
     assert(_PyOpcode_Caches[LOAD_ATTR] == INLINE_CACHE_ENTRIES_LOAD_ATTR);
     PyTypeObject *type = Py_TYPE(owner);
     bool fail;
-    if (!_PyType_IsReady(type)) {
+    if (type->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
+        SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_OVERRIDDEN);
+        fail = true;
+    }
+    else if (!_PyType_IsReady(type)) {
         // We *might* not really need this check, but we inherited it from
         // PyObject_GenericGetAttr and friends... and this way we still do the
         // right thing if someone forgets to call PyType_Ready(type):
@@ -988,6 +992,10 @@ _Py_Specialize_StoreAttr(_PyStackRef owner_st, _Py_CODEUNIT *instr, PyObject *na
     PyObject *descr = NULL;
     _PyAttrCache *cache = (_PyAttrCache *)(instr + 1);
     PyTypeObject *type = Py_TYPE(owner);
+    if (type->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
+        SPECIALIZATION_FAIL(STORE_ATTR, SPEC_FAIL_OVERRIDDEN);
+        goto fail;
+    }
     if (!_PyType_IsReady(type)) {
         // We *might* not really need this check, but we inherited it from
         // PyObject_GenericSetAttr and friends... and this way we still do the

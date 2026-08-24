@@ -18,6 +18,8 @@
 #include "pycore_pyatomic_ft_wrappers.h"
 #include "pycore_pyerrors.h"      // _PyErr_Occurred()
 #include "pycore_pystate.h"       // _PyThreadState_GET()
+#include "pycore_setobject.h"    // _PySet_Update()
+#include "pycore_soac_type.h"    // permanent native type policies
 #include "pycore_symtable.h"      // _Py_Mangle()
 #include "pycore_typeobject.h"    // struct type_cache
 #include "pycore_unicodeobject.h" // _PyUnicode_Copy
@@ -1468,6 +1470,17 @@ static PyMemberDef type_members[] = {
 static int
 check_set_special_type_attr(PyTypeObject *type, PyObject *value, const char *name)
 {
+    if (type->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
+        PyObject *attribute = PyUnicode_FromString(name);
+        if (attribute == NULL) {
+            return 0;
+        }
+        int result = _PySOAC_CheckClassWrite(type, attribute, value);
+        Py_DECREF(attribute);
+        if (result < 0) {
+            return 0;
+        }
+    }
     if (!value) {
         PyErr_Format(PyExc_TypeError,
                      "cannot delete '%s' attribute of type '%s'",
@@ -1696,6 +1709,9 @@ type_abstractmethods(PyObject *tp, void *Py_UNUSED(closure))
 static int
 type_set_abstractmethods(PyObject *tp, PyObject *value, void *Py_UNUSED(closure))
 {
+    if (_PySOAC_CheckClassWrite((PyTypeObject *)tp, &_Py_ID(__abstractmethods__), value) < 0) {
+        return -1;
+    }
     PyTypeObject *type = PyTypeObject_CAST(tp);
     /* __abstractmethods__ should only be set once on a type, in
        abc.ABCMeta.__new__, so this function doesn't do anything
@@ -2012,6 +2028,9 @@ static int
 type_set_bases(PyObject *tp, PyObject *new_bases, void *Py_UNUSED(closure))
 {
     PyTypeObject *type = PyTypeObject_CAST(tp);
+    if (_PySOAC_CheckTypeBases(type, new_bases) < 0) {
+        return -1;
+    }
     PyTypeObject *best_base;
     int res;
     BEGIN_TYPE_LOCK();
@@ -2065,6 +2084,9 @@ type_get_text_signature(PyObject *tp, void *Py_UNUSED(closure))
 static int
 type_set_doc(PyObject *tp, PyObject *value, void *Py_UNUSED(closure))
 {
+    if (_PySOAC_CheckClassWrite((PyTypeObject *)tp, &_Py_ID(__doc__), value) < 0) {
+        return -1;
+    }
     PyTypeObject *type = PyTypeObject_CAST(tp);
     if (!check_set_special_type_attr(type, value, "__doc__"))
         return -1;
@@ -2103,7 +2125,7 @@ type_get_annotate(PyObject *tp, void *Py_UNUSED(closure))
     }
     else {
         annotate = Py_None;
-        int result = PyDict_SetItem(dict, &_Py_ID(__annotate_func__), annotate);
+        int result = _PySOAC_PublishAnnotationCache(type, &_Py_ID(__annotate_func__), annotate);
         if (result < 0) {
             Py_DECREF(dict);
             return NULL;
@@ -2116,6 +2138,9 @@ type_get_annotate(PyObject *tp, void *Py_UNUSED(closure))
 static int
 type_set_annotate(PyObject *tp, PyObject *value, void *Py_UNUSED(closure))
 {
+    if (_PySOAC_CheckClassWrite((PyTypeObject *)tp, &_Py_ID(__annotate__), value) < 0) {
+        return -1;
+    }
     PyTypeObject *type = PyTypeObject_CAST(tp);
     if (value == NULL) {
         PyErr_SetString(PyExc_TypeError, "cannot delete __annotate__ attribute");
@@ -2210,8 +2235,8 @@ type_get_annotations(PyObject *tp, void *Py_UNUSED(closure))
         }
         Py_DECREF(annotate);
         if (annotations) {
-            int result = PyDict_SetItem(
-                    dict, &_Py_ID(__annotations_cache__), annotations);
+            int result = _PySOAC_PublishAnnotationCache(
+                    type, &_Py_ID(__annotations_cache__), annotations);
             if (result) {
                 Py_CLEAR(annotations);
             } else {
@@ -2226,6 +2251,9 @@ type_get_annotations(PyObject *tp, void *Py_UNUSED(closure))
 static int
 type_set_annotations(PyObject *tp, PyObject *value, void *Py_UNUSED(closure))
 {
+    if (_PySOAC_CheckClassWrite((PyTypeObject *)tp, &_Py_ID(__annotations__), value) < 0) {
+        return -1;
+    }
     PyTypeObject *type = PyTypeObject_CAST(tp);
     if (_PyType_HasFeature(type, Py_TPFLAGS_IMMUTABLETYPE)) {
         PyErr_Format(PyExc_TypeError,
@@ -3999,6 +4027,9 @@ subtype_dict(PyObject *obj, void *context)
 int
 _PyObject_SetDict(PyObject *obj, PyObject *value)
 {
+    if (_PySOAC_CheckDictionaryReplacement(obj) < 0) {
+        return -1;
+    }
     if (value != NULL && !PyDict_Check(value)) {
         PyErr_Format(PyExc_TypeError,
                      "__dict__ must be set to a dictionary, "
@@ -4012,6 +4043,10 @@ _PyObject_SetDict(PyObject *obj, PyObject *value)
     if (dictptr == NULL) {
         PyErr_SetString(PyExc_AttributeError,
                         "This object has no __dict__");
+        return -1;
+    }
+    if (*dictptr != NULL && PyDict_HasSoacPolicy(*dictptr)) {
+        PyErr_SetString(PyExc_TypeError, "cannot replace an authoritative protected dictionary");
         return -1;
     }
     Py_BEGIN_CRITICAL_SECTION(obj);
@@ -4191,7 +4226,10 @@ typedef struct {
     int add_weak;
     int may_add_dict;
     int may_add_weak;
+    PyObject *soac_handle;
 } type_new_ctx;
+
+#include "soac_type.inc"
 
 
 /* Check for valid slot names and two special cases */
@@ -4921,6 +4959,11 @@ type_new_impl(type_new_ctx *ctx)
     }
 
     if (type_new_set_attrs(ctx, type) < 0) {
+        goto error;
+    }
+
+    if (ctx->soac_handle != NULL &&
+        soac_install_type_contract(type, (SoacConstructionHandle *)ctx->soac_handle) < 0) {
         goto error;
     }
 
@@ -6590,6 +6633,9 @@ type_setattro(PyObject *self, PyObject *name, PyObject *value)
 {
     PyTypeObject *type = PyTypeObject_CAST(self);
     int res;
+    if (_PySOAC_CheckClassWrite(type, name, value) < 0) {
+        return -1;
+    }
     if (type->tp_flags & Py_TPFLAGS_IMMUTABLETYPE) {
         PyErr_Format(
             PyExc_TypeError,
@@ -6905,6 +6951,7 @@ type_dealloc(PyObject *self)
     assert(et->unique_id == _Py_INVALID_UNIQUE_ID);
 #endif
     heaptype_clear_soac_metadata(et);
+    _PySOAC_TypeContractDealloc(type);
     et->ht_token = NULL;
     Py_TYPE(type)->tp_free((PyObject *)type);
 }
@@ -7079,6 +7126,9 @@ type_traverse(PyObject *self, visitproc visit, void *arg)
     Py_VISIT(type->tp_bases);
     Py_VISIT(type->tp_base);
     Py_VISIT(((PyHeapTypeObject *)type)->ht_module);
+    if (_PySOAC_TypeContractTraverse(type, visit, arg) != 0) {
+        return -1;
+    }
 
     /* There's no need to visit others because they can't be involved
        in cycles:
@@ -7129,9 +7179,10 @@ type_clear(PyObject *self)
     */
 
     PyType_Modified(type);
+    _PySOAC_TypeContractClear(type);
     PyObject *dict = lookup_tp_dict(type);
     if (dict) {
-        PyDict_Clear(dict);
+        _PyDict_ClearForTeardown(dict);
     }
     Py_CLEAR(((PyHeapTypeObject *)type)->ht_module);
 
@@ -7565,6 +7616,9 @@ static int
 object_set_class_world_stopped(PyObject *self, PyTypeObject *newto)
 {
     PyTypeObject *oldto = Py_TYPE(self);
+    if (_PySOAC_CheckClassAssignment(oldto, newto) < 0) {
+        return -1;
+    }
 
     /* In versions of CPython prior to 3.5, the code in
        compatible_for_assignment was not set up to correctly check for memory
@@ -9339,7 +9393,7 @@ type_ready_managed_dict(PyTypeObject *type)
             return -1;
         }
     }
-    if (type->tp_itemsize == 0) {
+    if (type->tp_itemsize == 0 && !_PySOAC_UsesInstanceDictionaryPolicy(type)) {
         type_add_flags(type, Py_TPFLAGS_INLINE_VALUES);
     }
     return 0;
@@ -9414,6 +9468,9 @@ type_ready(PyTypeObject *type, int initial)
         goto error;
     }
     if (type_ready_mro(type, initial) < 0) {
+        goto error;
+    }
+    if (_PySOAC_ReadyTypeInheritance(type) < 0) {
         goto error;
     }
     if (type_ready_set_new(type, initial) < 0) {
