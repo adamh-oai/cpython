@@ -7,6 +7,7 @@
 #include "pycore_descrobject.h"   // propertyobject
 #include "pycore_dict.h"          // _Py_INCREF_DICT()
 #include "pycore_function.h"      // _PyFunction_Vectorcall
+#include "pycore_soac_source_entry_v1.h" // Explicit native-call registration
 #include "pycore_interpframe.h"   // Native dataclass frame views
 #include "pycore_long.h"          // _PyLong_GetOne()
 #include "pycore_modsupport.h"    // _PyArg_NoKeywords()
@@ -81,6 +82,7 @@ handle_func_event(PyFunction_WatchEvent event, PyFunctionObject *func,
 static void
 func_clear_soac_metadata(PyFunctionObject *op)
 {
+    _PySoacSourceEntry_InvalidateV1(op);
     void *metadata = op->func_soac_metadata;
     void (*destructor)(void *) = op->func_soac_metadata_destructor;
     op->func_soac_metadata = NULL;
@@ -114,6 +116,8 @@ func_soac_runtime_error(const char *message)
         PyErr_SetString(exception, message);
     }
 }
+
+#include "soac_source_entry_v1.inc"
 
 static int
 func_check_soac_mutable(PyFunctionObject *func)
@@ -217,6 +221,7 @@ PyFunction_SealSoacStrict(PyObject *object, uint64_t identity)
             return -1;
         }
     }
+    _PySoacSourceEntry_InvalidateV1(func);
     func->func_soac_strict_id = identity;
     return 0;
 }
@@ -258,6 +263,7 @@ PyFunction_SetSoacStrictOwner(PyObject *object, PyObject *owner)
         func_soac_mutation_error("strict function owner must be assigned before sealing");
         return -1;
     }
+    _PySoacSourceEntry_InvalidateV1(func);
     func->func_soac_strict_owner = Py_NewRef(owner);
     func->func_soac_strict_owner_state = FUNC_SOAC_OWNER_ATTACHED;
     return 0;
@@ -424,6 +430,7 @@ _PyFunction_FromConstructor(PyFrameConstructor *constr)
     op->func_soac_strict_owner = NULL;
     op->func_soac_strict_owner_state = FUNC_SOAC_OWNER_NONE;
     op->func_soac_required_boundary = 0;
+    op->func_soac_source_entry = NULL;
     // NOTE: functions created via FrameConstructor do not use deferred
     // reference counting because they are typically not part of cycles
     // nor accessed by multiple threads.
@@ -515,6 +522,7 @@ func_new_with_qualname(PyObject *code, PyObject *globals, PyObject *qualname,
     op->func_soac_strict_owner = NULL;
     op->func_soac_strict_owner_state = FUNC_SOAC_OWNER_NONE;
     op->func_soac_required_boundary = 0;
+    op->func_soac_source_entry = NULL;
     if (record != NULL && soac_dataclass_attach_record(op, record, producer) < 0) {
         /* Created may have allocated a weak witness whose observer acquired
          * a reference, or changed ordinary constructor metadata. Tombstone
@@ -816,6 +824,7 @@ void
 PyFunction_SetVectorcall(PyFunctionObject *func, vectorcallfunc vectorcall)
 {
     assert(func != NULL);
+    _PySoacSourceEntry_InvalidateV1(func);
     _PyFunction_ClearVersion(func);
     func->vectorcall = vectorcall;
 }
@@ -834,6 +843,10 @@ PyFunction_SetSoacMetadata(
     }
     PyFunctionObject *func = (PyFunctionObject *)op;
     func_clear_soac_metadata(func);
+    /* The previous destructor may have reentered and registered
+     * against an intermediate metadata pointer. Invalidate again
+     * before publishing this caller's replacement association. */
+    _PySoacSourceEntry_InvalidateV1(func);
     func->func_soac_metadata = metadata;
     func->func_soac_metadata_destructor = destructor;
     func->func_soac_function_id = soac_function_id;
@@ -1106,6 +1119,7 @@ func_set_code(PyObject *self, PyObject *value, void *Py_UNUSED(ignored))
     if (func_check_soac_code_mutable(op) < 0) {
         return -1;
     }
+    _PySoacSourceEntry_InvalidateV1(op);
     _PyFunction_ClearVersion(op);
     Py_XSETREF(op->func_code, Py_NewRef(value));
     return 0;
@@ -1558,6 +1572,7 @@ static int
 func_clear(PyObject *self)
 {
     PyFunctionObject *op = _PyFunction_CAST(self);
+    _PySoacSourceEntry_InvalidateV1(op);
     soac_dataclass_function_clear(op);
     /* Mark terminal before globals, defaults, owner, or metadata DECREFs can
      * run callbacks. Clearing never makes an assigned owner reinstallable and
@@ -1607,6 +1622,7 @@ func_dealloc(PyObject *self)
     if (_PyObject_ResurrectEnd(self)) {
         return;
     }
+    _PySoacSourceEntry_InvalidateV1(op);
     soac_dataclass_function_clear(op);
 #if _Py_TIER2
     _Py_Executors_InvalidateDependency(_PyInterpreterState_GET(), self, 1);

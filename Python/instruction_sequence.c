@@ -127,6 +127,7 @@ _PyInstructionSequence_Addop(instr_sequence *seq, int opcode, int oparg,
     ci->i_opcode = opcode;
     ci->i_oparg = oparg;
     ci->i_loc = loc;
+    ci->i_soac_origins = (_PySoacReadOrigins){{0, 0}};
     return SUCCESS;
 }
 
@@ -144,6 +145,7 @@ _PyInstructionSequence_InsertInstruction(instr_sequence *seq, int pos,
     ci->i_opcode = opcode;
     ci->i_oparg = oparg;
     ci->i_loc = loc;
+    ci->i_soac_origins = (_PySoacReadOrigins){{0, 0}};
 
     /* fix the labels map */
     for(int lbl=0; lbl < seq->s_labelmap_size; lbl++) {

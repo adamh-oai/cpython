@@ -63,6 +63,8 @@ typedef struct {
     uint8_t func_soac_strict_owner_state;
     /* Permanent pre-seal code guard for an installed mandatory call boundary. */
     uint8_t func_soac_required_boundary;
+    /* Optional C-only native-call registration; owns no Python refs. */
+    struct _PySoacSourceEntryRecordV1 *func_soac_source_entry;
 
     /* Invariant:
      *     func_closure contains the bindings for func_code->co_freevars, so

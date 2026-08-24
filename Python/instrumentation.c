@@ -14,6 +14,7 @@
 #include "pycore_optimizer.h"     // _PyExecutorObject
 #include "pycore_pyatomic_ft_wrappers.h" // FT_ATOMIC_STORE_UINTPTR_RELEASE()
 #include "pycore_pystate.h"       // _PyInterpreterState_GET()
+#include "pycore_soac_outgoing_v1.h" // supplied native source-call site
 #include "pycore_runtime_structs.h" // _PyCoMonitoringData
 #include "pycore_tuple.h"         // _PyTuple_FromArraySteal()
 
@@ -3175,4 +3176,109 @@ _PyInstrumentation_BranchesIterator(PyCodeObject *code)
     bi->bi_code = (PyCodeObject*)Py_NewRef(code);
     bi->bi_offset = 0;
     return (PyObject *)bi;
+}
+
+/* Append inside Python/instrumentation.c so effective monitor selection stays
+ * beside its native helpers. This is a supplied-site validator, not a code
+ * selector or interpreter. It never changes a lifetime frame's pseudo-PC. */
+int
+_PySoac_OutgoingCallSiteV1(
+    PyThreadState *thread, PyCodeObject *code, Py_ssize_t byte_offset,
+    uint32_t kind, Py_ssize_t argument_count,
+    int *instrumented, _Py_CODEUNIT **instruction)
+{
+    assert(thread == _PyThreadState_GET() && code != NULL);
+    *instrumented = 0;
+    *instruction = NULL;
+    _Py_LocalMonitors local = code->_co_monitoring == NULL
+        ? (_Py_LocalMonitors){0} : code->_co_monitoring->local_monitors;
+    _Py_LocalMonitors active = local_union(thread->interp->monitors, local);
+    int missing_site = byte_offset == -1;
+    for (int event = 0; event < _PY_MONITORING_LOCAL_EVENTS; event++) {
+        int requested = active.tools[event] != 0;
+        /* Instrumented EX chooses borrowed retirement even while native
+         * tracing suppresses callback delivery. Unknown cannot guess its form.
+         * For the same reason conservatively refuse an unknown CALL site with
+         * requested CALL observation, rather than invent per-site DISABLE. */
+        int needs_unknown_form = missing_site && event == PY_MONITORING_EVENT_CALL;
+        if (requested && (needs_unknown_form ||
+            (!thread->tracing && (missing_site || event != PY_MONITORING_EVENT_CALL)))) {
+            PyErr_SetString(PyExc_NotImplementedError,
+                            "outgoing source call lacks supported native observer/site information");
+            return -1;
+        }
+    }
+    if (!thread->tracing) {
+        for (int event = _PY_MONITORING_LOCAL_EVENTS;
+             event < _PY_MONITORING_UNGROUPED_EVENTS; event++) {
+            if (thread->interp->monitors.tools[event] != 0) {
+                PyErr_SetString(PyExc_NotImplementedError,
+                                "outgoing source call does not implement this source observer");
+                return -1;
+            }
+        }
+    }
+    if (missing_site) {
+        return 0;
+    }
+    if (byte_offset < 0 || byte_offset % sizeof(_Py_CODEUNIT) != 0 ||
+        byte_offset >= _PyCode_NBYTES(code) ||
+        byte_offset / sizeof(_Py_CODEUNIT) > INT_MAX) {
+        PyErr_SetString(PyExc_ValueError, "invalid outgoing native call-site offset");
+        return -1;
+    }
+    int wanted = (int)(byte_offset / sizeof(_Py_CODEUNIT));
+    int index = 0;
+    unsigned int extended = 0;
+    int extended_count = 0;
+    _Py_CODEUNIT selected = {.cache = 0};
+    /* Native instruction lengths distinguish real instructions from inline
+     * cache words. This only validates the supplied exact emission; never use
+     * the walk to pick a first matching CALL or to infer source correspondence. */
+    while (index <= wanted) {
+        _Py_CODEUNIT unit = _Py_GetBaseCodeUnit(code, index);
+        int length = _PyInstruction_GetLength(code, index);
+        if (length <= 0 || (Py_ssize_t)index + length > Py_SIZE(code)) {
+            PyErr_SetString(PyExc_ValueError, "malformed outgoing native call-site boundary");
+            return -1;
+        }
+        if (unit.op.code == EXTENDED_ARG) {
+            if (++extended_count > 3) {
+                PyErr_SetString(PyExc_ValueError, "invalid outgoing extended argument");
+                return -1;
+            }
+            extended = (extended << 8) | unit.op.arg;
+        }
+        else {
+            if (index == wanted) {
+                selected = unit;
+                extended = (extended << 8) | unit.op.arg;
+                break;
+            }
+            extended = 0;
+            extended_count = 0;
+        }
+        index += length;
+    }
+    int opcode = kind == Py_SOAC_CALL_VM_POSITIONAL_V1 ? CALL
+        : kind == Py_SOAC_CALL_VM_KEYWORDS_V1 ? CALL_KW : CALL_FUNCTION_EX;
+    if (index != wanted || selected.op.code != opcode ||
+        wanted < code->_co_firsttraceable ||
+        (kind != Py_SOAC_CALL_VM_EXPANDED_V1 && extended != (unsigned int)argument_count)) {
+        PyErr_SetString(PyExc_ValueError,
+                        "outgoing source operation does not match its supplied native emission");
+        return -1;
+    }
+    /* A lifetime scope is skipped by instrument_all_executing_code_objects.
+     * Bring this exact code's existing monitor metadata up to date explicitly,
+     * before operand consumption. No callback is invoked by this operation. */
+    if (_Py_Instrument(code, thread->interp) < 0) {
+        return -1;
+    }
+    if (code->_co_monitoring != NULL) {
+        *instrumented = get_tools_for_instruction(
+            code, thread->interp, wanted, PY_MONITORING_EVENT_CALL) != 0;
+    }
+    *instruction = _PyCode_CODE(code) + wanted;
+    return 0;
 }

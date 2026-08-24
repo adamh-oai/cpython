@@ -197,6 +197,8 @@ typedef struct {
 
 static int codegen_nameop(compiler *, location, identifier, expr_context_ty);
 static int codegen_source_nameop(compiler *, location, expr_ty, expr_context_ty);
+static int codegen_binding_nameop(compiler *, location, identifier,
+                                  location, const void *, int);
 
 static int codegen_visit_stmt(compiler *, stmt_ty);
 static int codegen_visit_keyword(compiler *, keyword_ty);
@@ -1544,7 +1546,8 @@ codegen_function(compiler *c, stmt_ty s, int is_async)
     }
 
     RETURN_IF_ERROR(codegen_apply_decorators(c, decos));
-    return codegen_nameop(c, loc, name, Store);
+    return codegen_binding_nameop(c, loc, name, LOC(s), s,
+        is_async ? Py_SOAC_BINDING_ASYNC_FUNCTION : Py_SOAC_BINDING_FUNCTION);
 }
 
 static int
@@ -1754,7 +1757,8 @@ codegen_class(compiler *c, stmt_ty s)
     RETURN_IF_ERROR(codegen_apply_decorators(c, decos));
 
     /* 7. store into <name> */
-    RETURN_IF_ERROR(codegen_nameop(c, loc, s->v.ClassDef.name, Store));
+    RETURN_IF_ERROR(codegen_binding_nameop(
+        c, loc, s->v.ClassDef.name, LOC(s), s, Py_SOAC_BINDING_CLASS));
     return SUCCESS;
 }
 
@@ -2536,7 +2540,8 @@ codegen_try_except(compiler *c, stmt_ty s)
             NEW_JUMP_TARGET_LABEL(c, cleanup_body);
 
             RETURN_IF_ERROR(
-                codegen_nameop(c, loc, handler->v.ExceptHandler.name, Store));
+                codegen_binding_nameop(c, loc, handler->v.ExceptHandler.name,
+                                      LOC(handler), handler, Py_SOAC_BINDING_EXCEPT_ALIAS));
 
             /*
               try:
@@ -2731,7 +2736,8 @@ codegen_try_star_except(compiler *c, stmt_ty s)
 
         if (handler->v.ExceptHandler.name) {
             RETURN_IF_ERROR(
-                codegen_nameop(c, loc, handler->v.ExceptHandler.name, Store));
+                codegen_binding_nameop(c, loc, handler->v.ExceptHandler.name,
+                                      LOC(handler), handler, Py_SOAC_BINDING_EXCEPT_ALIAS));
         }
         else {
             ADDOP(c, loc, POP_TOP);  // match
@@ -2853,7 +2859,7 @@ codegen_try_star(compiler *c, stmt_ty s)
 
 static int
 codegen_import_as(compiler *c, location loc,
-                  identifier name, identifier asname)
+                  identifier name, identifier asname, alias_ty original)
 {
     /* The IMPORT_NAME opcode was already generated.  This function
        merely needs to bind the result to a name.
@@ -2886,11 +2892,13 @@ codegen_import_as(compiler *c, location loc,
             ADDOP_I(c, loc, SWAP, 2);
             ADDOP(c, loc, POP_TOP);
         }
-        RETURN_IF_ERROR(codegen_nameop(c, loc, asname, Store));
+        RETURN_IF_ERROR(codegen_binding_nameop(
+            c, loc, asname, LOC(original), original, Py_SOAC_BINDING_IMPORT_ALIAS));
         ADDOP(c, loc, POP_TOP);
         return SUCCESS;
     }
-    return codegen_nameop(c, loc, asname, Store);
+    return codegen_binding_nameop(
+        c, loc, asname, LOC(original), original, Py_SOAC_BINDING_IMPORT_ALIAS);
 }
 
 static int
@@ -2916,7 +2924,7 @@ codegen_import(compiler *c, stmt_ty s)
         ADDOP_NAME(c, loc, IMPORT_NAME, alias->name, names);
 
         if (alias->asname) {
-            r = codegen_import_as(c, loc, alias->name, alias->asname);
+            r = codegen_import_as(c, loc, alias->name, alias->asname, alias);
             RETURN_IF_ERROR(r);
         }
         else {
@@ -2929,7 +2937,7 @@ codegen_import(compiler *c, stmt_ty s)
                     return ERROR;
                 }
             }
-            r = codegen_nameop(c, loc, tmp, Store);
+            r = codegen_binding_nameop(c, loc, tmp, LOC(alias), alias, Py_SOAC_BINDING_IMPORT_ALIAS);
             if (dot != -1) {
                 Py_DECREF(tmp);
             }
@@ -2983,7 +2991,8 @@ codegen_from_import(compiler *c, stmt_ty s)
             store_name = alias->asname;
         }
 
-        RETURN_IF_ERROR(codegen_nameop(c, LOC(s), store_name, Store));
+        RETURN_IF_ERROR(codegen_binding_nameop(
+            c, LOC(s), store_name, LOC(alias), alias, Py_SOAC_BINDING_IMPORT_FROM_ALIAS));
     }
     /* remove imported module */
     ADDOP(c, LOC(s), POP_TOP);
@@ -3379,7 +3388,23 @@ codegen_source_nameop(compiler *c, location loc, expr_ty name, expr_context_ty c
 {
     assert(name->kind == Name_kind);
     /* Keep the caller's emission location separate from the metadata origin. */
-    return codegen_nameop_impl(c, loc, name->v.Name.id, ctx, name);
+    RETURN_IF_ERROR(codegen_nameop_impl(c, loc, name->v.Name.id, ctx, name));
+    if (METADATA(c)->u_soac_bindings != NULL) {
+        RETURN_IF_ERROR(_PyCompile_SoacReferenceOrigin(
+            c, LOC(name), name, Py_SOAC_BINDING_NAME, ctx));
+    }
+    return SUCCESS;
+}
+
+static int
+codegen_binding_nameop(compiler *c, location loc, identifier name,
+                        location original_loc, const void *original, int kind)
+{
+    RETURN_IF_ERROR(codegen_nameop(c, loc, name, Store));
+    if (METADATA(c)->u_soac_bindings != NULL) {
+        RETURN_IF_ERROR(_PyCompile_SoacReferenceOrigin(c, original_loc, original, kind, Store));
+    }
+    return SUCCESS;
 }
 
 static int

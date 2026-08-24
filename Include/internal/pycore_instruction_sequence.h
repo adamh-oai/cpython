@@ -18,10 +18,17 @@ typedef struct {
     int h_preserve_lasti;
 } _PyExceptHandlerInfo;
 
+/* Opt-in compiler origin IDs. Zero means absent, never a read policy.
+ * Transported with the instruction, separate from mutable line locations. */
+typedef struct {
+    uint32_t lane[2];
+} _PySoacReadOrigins;
+
 typedef struct {
     int i_opcode;
     int i_oparg;
     _Py_SourceLocation i_loc;
+    _PySoacReadOrigins i_soac_origins;
     _PyExceptHandlerInfo i_except_handler_info;
 
     /* Temporary fields, used by the assembler and in instr_sequence_to_cfg */

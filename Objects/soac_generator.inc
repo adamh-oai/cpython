@@ -2,18 +2,282 @@
  * owns no execution frame: suspended roots and the sole handled-exception item
  * belong to owner. The common explicit pointer never reuses origin/finalizer. */
 
-enum soac_gen_phase {
-    SOAC_GEN_BINDING,
-    SOAC_GEN_LIVE,
-    SOAC_GEN_COMPLETING,
-    SOAC_GEN_TERMINAL
+#include "pycore_soac_managed_code.h"
+
+/* Included in genobject.c through soac_generator.inc. All success operations
+ * below are callback-free; native debug bookkeeping may fatal on C OOM. */
+typedef struct {
+    uintptr_t version;
+    uintptr_t phase;
+    uintptr_t storage;
+    uintptr_t thread;
+    uintptr_t generator;
+    uintptr_t owner;
+    uintptr_t slots;
+    uintptr_t count;
+} SoacGeneratorCleanupStateV1;
+
+enum {
+    SOAC_GENERATOR_CLEANUP_LINKED = 1,
+    SOAC_GENERATOR_CLEANUP_TRANSFERRED = 2,
+    SOAC_GENERATOR_CLEANUP_ENDED = 3,
 };
 
-struct _PySoacManagedGenerator {
-    PySoacGeneratorSpec spec;
-    PyObject *owner;
-    enum soac_gen_phase phase;
-};
+_Static_assert(sizeof(SoacGeneratorCleanupStateV1) == sizeof(PySoacGeneratorCleanupV1),
+               "generator cleanup scope must have the public word count");
+_Static_assert(_Alignof(SoacGeneratorCleanupStateV1) == _Alignof(PySoacGeneratorCleanupV1),
+               "generator cleanup scope must have public alignment");
+_Static_assert(sizeof(PySoacRefV1) == sizeof(_PyStackRef),
+               "generator executable transfer must preserve the native token");
+
+static int
+soac_generator_cleanup_storage_valid(PySoacGeneratorCleanupV1 *scope, size_t size)
+{
+    if (scope == NULL || size != sizeof(*scope) ||
+        (uintptr_t)scope % _Alignof(PySoacGeneratorCleanupV1) != 0) {
+        PyErr_SetString(PyExc_ValueError,
+                        "invalid generator cleanup size or alignment");
+        return -1;
+    }
+    return 0;
+}
+
+#ifndef Py_GIL_DISABLED
+static int
+soac_generator_cleanup_overlap(const void *left, size_t left_size,
+                               const void *right, size_t right_size)
+{
+    uintptr_t a = (uintptr_t)left, b = (uintptr_t)right;
+    return a <= b ? b - a < left_size : a - b < right_size;
+}
+
+static int
+soac_generator_retirement_empty(const PySoacRefV1 *slots)
+{
+    for (int i = 0; i < PySoac_GENERATOR_RETIREMENT_V1_SLOTS; i++) {
+        if (!PySoacRef_IsEmptyV1(slots[i])) {
+            return 0;
+        }
+    }
+    return 1;
+}
+#endif
+
+int
+PyGen_GetSoacGeneratorCleanupLayoutV1(
+    uint32_t version, size_t layout_size, PySoacGeneratorCleanupLayoutV1 *out)
+{
+#if defined(Py_GIL_DISABLED) || SIZEOF_VOID_P != 8
+    (void)version; (void)layout_size; (void)out;
+    PyErr_SetString(PyExc_NotImplementedError,
+                    "generator cleanup requires the selected 64-bit GIL build");
+    return -1;
+#else
+    if (version != PySoac_GENERATOR_CLEANUP_ABI_VERSION || out == NULL ||
+        layout_size != sizeof(*out) ||
+        (uintptr_t)out % _Alignof(PySoacGeneratorCleanupLayoutV1) != 0) {
+        PyErr_SetString(PyExc_ValueError,
+                        "unsupported generator cleanup layout version or size");
+        return -1;
+    }
+    *out = (PySoacGeneratorCleanupLayoutV1) {
+        .version = PySoac_GENERATOR_CLEANUP_ABI_VERSION,
+        .word_count = PySoac_GENERATOR_CLEANUP_V1_WORDS,
+        .retirement_count = PySoac_GENERATOR_RETIREMENT_V1_SLOTS,
+        .reserved = 0,
+        .size = sizeof(PySoacGeneratorCleanupV1),
+        .alignment = _Alignof(PySoacGeneratorCleanupV1),
+    };
+    return 0;
+#endif
+}
+
+int
+PyGen_BeginSoacGeneratorCleanupV1(
+    PySoacGeneratorCleanupV1 *scope, size_t scope_size,
+    PyObject *generator, PyObject *owner,
+    PySoacRefV1 *retirement_slots, Py_ssize_t retirement_count)
+{
+#if defined(Py_GIL_DISABLED) || SIZEOF_VOID_P != 8
+    (void)scope; (void)scope_size; (void)generator; (void)owner;
+    (void)retirement_slots; (void)retirement_count;
+    PyErr_SetString(PyExc_NotImplementedError,
+                    "generator cleanup requires the selected 64-bit GIL build");
+    return -1;
+#else
+    if (soac_generator_cleanup_storage_valid(scope, scope_size) < 0) {
+        return -1;
+    }
+    for (size_t i = 0; i < PySoac_GENERATOR_CLEANUP_V1_WORDS; i++) {
+        if (scope->_opaque[i] != 0) {
+            PyErr_SetString(PyExc_RuntimeError,
+                            "generator cleanup storage is one-use");
+            return -1;
+        }
+    }
+    if (retirement_slots == NULL ||
+        retirement_count != PySoac_GENERATOR_RETIREMENT_V1_SLOTS ||
+        (uintptr_t)retirement_slots % _Alignof(PySoacRefV1) != 0 ||
+        soac_generator_cleanup_overlap(scope, sizeof(*scope), retirement_slots,
+            PySoac_GENERATOR_RETIREMENT_V1_SLOTS * sizeof(*retirement_slots))) {
+        PyErr_SetString(PyExc_ValueError,
+                        "generator cleanup requires three distinct aligned native slots");
+        return -1;
+    }
+    /* Object liveness is an unsafe caller precondition; it must be established
+     * from the exact association BEFORE using a remembered Binding pointer. */
+    if (generator == NULL || owner == NULL ||
+        !_PyGen_IsSoacManaged((PyGenObject *)generator)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "generator cleanup requires an actual managed association");
+        return -1;
+    }
+    PyGenObject *gen = (PyGenObject *)generator;
+    struct _PySoacManagedGenerator *managed = gen->gi_soac_managed;
+    size_t sink_size = PySoac_GENERATOR_RETIREMENT_V1_SLOTS * sizeof(*retirement_slots);
+    if (soac_generator_cleanup_overlap(retirement_slots, sink_size, gen,
+            offsetof(PyGenObject, gi_iframe) + offsetof(_PyInterpreterFrame, localsplus)) ||
+        soac_generator_cleanup_overlap(retirement_slots, sink_size, managed, sizeof(*managed)) ||
+        soac_generator_cleanup_overlap(scope, sizeof(*scope), gen,
+            offsetof(PyGenObject, gi_iframe) + offsetof(_PyInterpreterFrame, localsplus)) ||
+        soac_generator_cleanup_overlap(scope, sizeof(*scope), managed, sizeof(*managed))) {
+        PyErr_SetString(PyExc_ValueError,
+                        "generator cleanup storage aliases a native owner");
+        return -1;
+    }
+    int live = managed->owner == owner &&
+        ((managed->phase == SOAC_GEN_LIVE &&
+          !FRAME_STATE_FINISHED(gen->gi_frame_state)) ||
+         (managed->phase == SOAC_GEN_COMPLETING &&
+          gen->gi_frame_state == FRAME_CLEARED));
+    int retiring = managed->phase == SOAC_GEN_TERMINAL &&
+        managed->owner == NULL && managed->retiring_owner == owner &&
+        gen->gi_frame_state == FRAME_CLEARED;
+    if (managed->code_mode != SOAC_GEN_TRANSFERRED_CODE || !(live || retiring) ||
+        managed->cleanup != NULL || PyStackRef_IsNull(gen->gi_iframe.f_executable) ||
+        !PyStackRef_IsHeapSafe(gen->gi_iframe.f_executable) ||
+        !soac_generator_retirement_empty(retirement_slots)) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "generator cleanup requires an unlinked transferred owner and Empty sink");
+        return -1;
+    }
+    SoacGeneratorCleanupStateV1 state = {
+        .version = PySoac_GENERATOR_CLEANUP_ABI_VERSION,
+        .phase = SOAC_GENERATOR_CLEANUP_LINKED,
+        .storage = (uintptr_t)scope,
+        .thread = (uintptr_t)_PyThreadState_GET(),
+        .generator = (uintptr_t)gen,
+        .owner = (uintptr_t)owner,
+        .slots = (uintptr_t)retirement_slots,
+        .count = PySoac_GENERATOR_RETIREMENT_V1_SLOTS,
+    };
+    memcpy(scope, &state, sizeof(state));
+    managed->cleanup = scope;
+    return 0;
+#endif
+}
+
+int
+PyGen_EndSoacGeneratorCleanupV1(PySoacGeneratorCleanupV1 *scope, size_t scope_size)
+{
+#if defined(Py_GIL_DISABLED) || SIZEOF_VOID_P != 8
+    (void)scope; (void)scope_size;
+    PyErr_SetString(PyExc_NotImplementedError,
+                    "generator cleanup requires the selected 64-bit GIL build");
+    return -1;
+#else
+    if (soac_generator_cleanup_storage_valid(scope, scope_size) < 0) {
+        return -1;
+    }
+    SoacGeneratorCleanupStateV1 state;
+    memcpy(&state, scope, sizeof(state));
+    if (state.version != PySoac_GENERATOR_CLEANUP_ABI_VERSION ||
+        state.storage != (uintptr_t)scope ||
+        state.count != PySoac_GENERATOR_RETIREMENT_V1_SLOTS || state.slots == 0 ||
+        (state.phase != SOAC_GENERATOR_CLEANUP_LINKED &&
+         state.phase != SOAC_GENERATOR_CLEANUP_TRANSFERRED)) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "generator cleanup scope is inactive, copied, or already ended");
+        return -1;
+    }
+    if (state.thread != (uintptr_t)_PyThreadState_GET()) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "generator cleanup belongs to another thread state");
+        return -1;
+    }
+    int transferred = state.phase == SOAC_GENERATOR_CLEANUP_TRANSFERRED;
+    if (transferred) {
+        if (state.generator != 0 || state.owner != 0) {
+            PyErr_SetString(PyExc_RuntimeError,
+                            "transferred generator cleanup retains an invalid association");
+            return -1;
+        }
+        /* Do not dereference a dead generator or infer transfer from a pointer
+         * remembered by the capsule. The scope is its own explicit witness. */
+    }
+    else {
+        PyGenObject *gen = (PyGenObject *)state.generator;
+        if (gen == NULL || !_PyGen_IsSoacManaged(gen) ||
+            gen->gi_soac_managed->code_mode != SOAC_GEN_TRANSFERRED_CODE ||
+            gen->gi_soac_managed->cleanup != scope ||
+            !soac_generator_retirement_empty((PySoacRefV1 *)state.slots)) {
+            PyErr_SetString(PyExc_RuntimeError,
+                            "generator cleanup lost its live link or Empty sink");
+            return -1;
+        }
+        gen->gi_soac_managed->cleanup = NULL;
+    }
+    state.phase = SOAC_GENERATOR_CLEANUP_ENDED;
+    state.thread = state.generator = state.owner = state.slots = 0;
+    memcpy(scope, &state, sizeof(state));
+    return transferred;
+#endif
+}
+
+/* Only gen_dealloc calls this, AFTER its unsuccessful resurrection check and
+ * source/origin retirement, immediately before code/name/qualname cleanup. */
+static void
+soac_gen_transfer_destructor_tail(PyGenObject *gen)
+{
+#ifndef Py_GIL_DISABLED
+    struct _PySoacManagedGenerator *managed = gen->gi_soac_managed;
+    if (managed->cleanup == NULL) {
+        return;
+    }
+    PySoacGeneratorCleanupV1 *scope = managed->cleanup;
+    SoacGeneratorCleanupStateV1 state;
+    memcpy(&state, scope, sizeof(state));
+    if (managed->code_mode != SOAC_GEN_TRANSFERRED_CODE ||
+        state.version != PySoac_GENERATOR_CLEANUP_ABI_VERSION ||
+        state.phase != SOAC_GENERATOR_CLEANUP_LINKED ||
+        state.storage != (uintptr_t)scope ||
+        state.thread != (uintptr_t)_PyThreadState_GET() ||
+        state.generator != (uintptr_t)gen || state.slots == 0 ||
+        state.count != PySoac_GENERATOR_RETIREMENT_V1_SLOTS ||
+        !soac_generator_retirement_empty((PySoacRefV1 *)state.slots) ||
+        PyStackRef_IsNull(gen->gi_iframe.f_executable) ||
+        gen->gi_name == NULL || gen->gi_qualname == NULL) {
+        /* Corrupt committed cleanup cannot allocate an exception or unwind
+         * through these still-borrowed source owners. */
+        Py_FatalError("invalid committed managed generator retirement sink");
+    }
+    PySoacRefV1 *slots = (PySoacRefV1 *)state.slots;
+    _PyStackRef executable = gen->gi_iframe.f_executable;
+    PyObject *name = gen->gi_name;
+    PyObject *qualname = gen->gi_qualname;
+    gen->gi_iframe.f_executable = PyStackRef_NULL;
+    gen->gi_name = gen->gi_qualname = NULL;
+    memcpy(&slots[PySoac_GENERATOR_RETIRE_CODE], &executable, sizeof(executable));
+    slots[PySoac_GENERATOR_RETIRE_NAME] = PySoacRef_FromOwnedV1(name);
+    slots[PySoac_GENERATOR_RETIRE_QUALNAME] = PySoacRef_FromOwnedV1(qualname);
+    managed->cleanup = NULL;
+    state.phase = SOAC_GENERATOR_CLEANUP_TRANSFERRED;
+    state.generator = state.owner = 0;
+    memcpy(scope, &state, sizeof(state));
+#else
+    (void)gen;
+#endif
+}
 
 static void
 soac_gen_assert_no_native_activation(PyGenObject *gen)
@@ -46,8 +310,11 @@ soac_gen_retire(PyGenObject *gen)
     managed->owner = NULL;
     if (owner != NULL) {
         PyObject *error = PyErr_GetRaisedException();
+        assert(managed->retiring_owner == NULL);
+        managed->retiring_owner = owner;
         managed->spec.clear(owner, (PyObject *)gen);
         Py_DECREF(owner);
+        managed->retiring_owner = NULL;
         PyErr_SetRaisedException(error);
     }
     soac_gen_assert_no_native_activation(gen);
@@ -244,7 +511,8 @@ static PyObject *
 soac_gen_new_managed(PyTypeObject *type, int code_kind,
                      PyObject *function, PyCodeObject *source_code,
                      PyObject *name, PyObject *qualname, PyObject *owner,
-                     const PySoacGeneratorSpec *spec)
+                     const PySoacGeneratorSpec *spec,
+                     PySoacRefV1 *code_owner)
 {
 #ifdef Py_GIL_DISABLED
     PyErr_SetString(PyExc_NotImplementedError,
@@ -305,7 +573,17 @@ soac_gen_new_managed(PyTypeObject *type, int code_kind,
     gen->gi_running_async = 0;
     gen->gi_frame_state = FRAME_CREATED;
     memset(&gen->gi_iframe, 0, offsetof(_PyInterpreterFrame, localsplus));
-    gen->gi_iframe.f_executable = PyStackRef_FromPyObjectNew((PyObject *)source_code);
+    if (code_owner == NULL) {
+        gen->gi_iframe.f_executable = PyStackRef_FromPyObjectNew((PyObject *)source_code);
+        managed->code_mode = SOAC_GEN_LEGACY_CODE;
+    }
+    else {
+        /* All recoverable allocation precedes the commit; bind may
+         * observe the fully initialized object only after this move. */
+        PySoacRefV1 moved = PySoacRef_TakeV1(code_owner);
+        memcpy(&gen->gi_iframe.f_executable, &moved, sizeof(moved));
+        managed->code_mode = SOAC_GEN_TRANSFERRED_CODE;
+    }
     gen->gi_iframe.f_funcobj = PyStackRef_NULL;
     gen->gi_iframe.owner = FRAME_OWNED_BY_GENERATOR;
     managed->spec = copied_spec;
@@ -340,7 +618,7 @@ PyGen_NewSoacManaged(PyObject *function, PyCodeObject *source_code,
                     const PySoacGeneratorSpec *spec)
 {
     return soac_gen_new_managed(&PyGen_Type, CO_GENERATOR, function, source_code,
-                                name, qualname, owner, spec);
+                                name, qualname, owner, spec, NULL);
 }
 
 PyObject *
@@ -349,7 +627,7 @@ PyCoro_NewSoacManaged(PyObject *function, PyCodeObject *source_code,
                      const PySoacGeneratorSpec *spec)
 {
     return soac_gen_new_managed(&PyCoro_Type, CO_COROUTINE, function, source_code,
-                                name, qualname, owner, spec);
+                                name, qualname, owner, spec, NULL);
 }
 
 PyObject *
@@ -358,7 +636,54 @@ PyAsyncGen_NewSoacManaged(PyObject *function, PyCodeObject *source_code,
                          const PySoacGeneratorSpec *spec)
 {
     return soac_gen_new_managed(&PyAsyncGen_Type, CO_ASYNC_GENERATOR, function,
-                                source_code, name, qualname, owner, spec);
+                                source_code, name, qualname, owner, spec, NULL);
+}
+
+PyObject *
+PySoac_NewManagedWithReferenceV1(
+    PyObject *function, PySoacRefV1 *code_owner,
+    PyObject *name, PyObject *qualname, PyObject *owner,
+    const PySoacGeneratorSpec *spec)
+{
+#if defined(Py_GIL_DISABLED) || SIZEOF_VOID_P != 8
+    (void)function; (void)code_owner; (void)name; (void)qualname;
+    (void)owner; (void)spec;
+    PyErr_SetString(PyExc_NotImplementedError,
+                    "managed references require the selected 64-bit GIL build");
+    return NULL;
+#else
+    if (code_owner == NULL ||
+        (uintptr_t)code_owner % _Alignof(PySoacRefV1) != 0) {
+        PyErr_SetString(PyExc_ValueError,
+                        "managed code requires an aligned native owner slot");
+        return NULL;
+    }
+    PyObject *object = PySoacRef_ObjectViewV1(*code_owner);
+    if (object == NULL || !PyCode_Check(object)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "managed code requires an actual code object");
+        return NULL;
+    }
+    if (!PySoacRef_IsHeapSafeV1(*code_owner)) {
+        PyErr_SetString(PyExc_ValueError,
+                        "managed code must already be heap safe");
+        return NULL;
+    }
+    PyCodeObject *code = (PyCodeObject *)object;
+    int kind = code->co_flags & (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR);
+    PyTypeObject *type;
+    switch (kind) {
+        case CO_GENERATOR: type = &PyGen_Type; break;
+        case CO_COROUTINE: type = &PyCoro_Type; break;
+        case CO_ASYNC_GENERATOR: type = &PyAsyncGen_Type; break;
+        default:
+            PyErr_SetString(PyExc_TypeError,
+                            "managed code must select one native suspended family");
+            return NULL;
+    }
+    return soac_gen_new_managed(type, kind, function, code, name, qualname,
+                                owner, spec, code_owner);
+#endif
 }
 
 PyObject *

@@ -30,6 +30,7 @@
 #include "pycore_sliceobject.h"   // _PyBuildSlice_ConsumeRefs
 #include "pycore_soac_type.h"    // physical member policy guards
 #include "pycore_stackref.h"
+#include "pycore_soac_vm_call_v1.h"
 #include "pycore_template.h"      // _PyTemplate_Build()
 #include "pycore_tuple.h"         // _PyTuple_ITEMS()
 #include "pycore_typeobject.h"    // _PySuper_Lookup()
@@ -3792,46 +3793,67 @@ dummy_func(
                 arguments--;
                 total_args++;
             }
-            // Check if the call can be inlined or not
             if (Py_TYPE(callable_o) == &PyFunction_Type &&
                 (frame->soac_dataclass_checked_activation == NULL ||
                  !_PySOAC_DataclassHasValueSite(frame)) &&
                 !IS_PEP523_HOOKED(tstate) &&
-                ((PyFunctionObject *)callable_o)->vectorcall == _PyFunction_Vectorcall)
-            {
-                int code_flags = ((PyCodeObject*)PyFunction_GET_CODE(callable_o))->co_flags;
-                PyObject *locals = code_flags & CO_OPTIMIZED ? NULL : Py_NewRef(PyFunction_GET_GLOBALS(callable_o));
-                _PyInterpreterFrame *new_frame = _PyEvalFramePushAndInit(
-                    tstate, callable, locals,
-                    arguments, total_args, NULL, frame
-                );
+                _PySoacVMCall_IsRegisteredV1(callable_o)) {
+                _PySoacVMCallV1 source_call;
+                int code_flags = ((PyCodeObject *)PyFunction_GET_CODE(callable_o))->co_flags;
+                PyObject *locals = code_flags & CO_OPTIMIZED ? NULL
+                    : Py_NewRef(PyFunction_GET_GLOBALS(callable_o));
+                _PySoacVMCall_BindVectorV1(
+                    &source_call, tstate, Py_SOAC_CALL_VM_POSITIONAL_V1,
+                    callable, locals, arguments, total_args, NULL);
                 DEAD(args);
                 DEAD(self_or_null);
                 DEAD(callable);
-                // Manipulate stack directly since we leave using DISPATCH_INLINED().
                 SYNC_SP();
-                // The frame has stolen all the arguments from the stack,
-                // so there is no need to clean them up.
-                if (new_frame == NULL) {
-                    ERROR_NO_POP();
-                }
-                frame->return_offset = INSTRUCTION_SIZE;
-                DISPATCH_INLINED(new_frame);
+                res = _PySoacVMCall_FinishV1(&source_call, stack_pointer);
+                ERROR_IF(PyStackRef_IsNull(res));
             }
-            PyObject* res_o = _Py_VectorCallInstrumentation_StackRefSteal(
-                callable,
-                arguments,
-                total_args,
-                PyStackRef_NULL,
-                opcode == INSTRUMENTED_CALL,
-                frame,
-                this_instr,
-                tstate);
-            DEAD(args);
-            DEAD(self_or_null);
-            DEAD(callable);
-            ERROR_IF(res_o == NULL);
-            res = PyStackRef_FromPyObjectSteal(res_o);
+            else {
+                // Check if the call can be inlined or not
+                if (Py_TYPE(callable_o) == &PyFunction_Type &&
+                    (frame->soac_dataclass_checked_activation == NULL ||
+                     !_PySOAC_DataclassHasValueSite(frame)) &&
+                    !IS_PEP523_HOOKED(tstate) &&
+                    ((PyFunctionObject *)callable_o)->vectorcall == _PyFunction_Vectorcall)
+                {
+                    int code_flags = ((PyCodeObject*)PyFunction_GET_CODE(callable_o))->co_flags;
+                    PyObject *locals = code_flags & CO_OPTIMIZED ? NULL : Py_NewRef(PyFunction_GET_GLOBALS(callable_o));
+                    _PyInterpreterFrame *new_frame = _PyEvalFramePushAndInit(
+                        tstate, callable, locals,
+                        arguments, total_args, NULL, frame
+                    );
+                    DEAD(args);
+                    DEAD(self_or_null);
+                    DEAD(callable);
+                    // Manipulate stack directly since we leave using DISPATCH_INLINED().
+                    SYNC_SP();
+                    // The frame has stolen all the arguments from the stack,
+                    // so there is no need to clean them up.
+                    if (new_frame == NULL) {
+                        ERROR_NO_POP();
+                    }
+                    frame->return_offset = INSTRUCTION_SIZE;
+                    DISPATCH_INLINED(new_frame);
+                }
+                PyObject* res_o = _Py_VectorCallInstrumentation_StackRefSteal(
+                    callable,
+                    arguments,
+                    total_args,
+                    PyStackRef_NULL,
+                    opcode == INSTRUMENTED_CALL,
+                    frame,
+                    this_instr,
+                    tstate);
+                DEAD(args);
+                DEAD(self_or_null);
+                DEAD(callable);
+                ERROR_IF(res_o == NULL);
+                res = PyStackRef_FromPyObjectSteal(res_o);
+            }
         }
 
         op(_MONITOR_CALL, (func, maybe_self, args[oparg] -- func, maybe_self, args[oparg])) {
@@ -4698,49 +4720,71 @@ dummy_func(
                 total_args++;
             }
             int positional_args = total_args - (int)PyTuple_GET_SIZE(kwnames_o);
-            // Check if the call can be inlined or not
             if (Py_TYPE(callable_o) == &PyFunction_Type &&
                 (frame->soac_dataclass_checked_activation == NULL ||
                  !_PySOAC_DataclassHasValueSite(frame)) &&
                 !IS_PEP523_HOOKED(tstate) &&
-                ((PyFunctionObject *)callable_o)->vectorcall == _PyFunction_Vectorcall)
-            {
-                int code_flags = ((PyCodeObject*)PyFunction_GET_CODE(callable_o))->co_flags;
-                PyObject *locals = code_flags & CO_OPTIMIZED ? NULL : Py_NewRef(PyFunction_GET_GLOBALS(callable_o));
-                _PyInterpreterFrame *new_frame = _PyEvalFramePushAndInit(
-                    tstate, callable, locals,
-                    arguments, positional_args, kwnames_o, frame
-                );
+                _PySoacVMCall_IsRegisteredV1(callable_o)) {
+                _PySoacVMCallV1 source_call;
+                int code_flags = ((PyCodeObject *)PyFunction_GET_CODE(callable_o))->co_flags;
+                PyObject *locals = code_flags & CO_OPTIMIZED ? NULL
+                    : Py_NewRef(PyFunction_GET_GLOBALS(callable_o));
+                _PySoacVMCall_BindVectorV1(
+                    &source_call, tstate, Py_SOAC_CALL_VM_KEYWORDS_V1,
+                    callable, locals, arguments, positional_args, kwnames_o);
                 DEAD(args);
                 DEAD(self_or_null);
                 DEAD(callable);
                 PyStackRef_CLOSE(kwnames);
-                // Sync stack explicitly since we leave using DISPATCH_INLINED().
                 SYNC_SP();
-                // The frame has stolen all the arguments from the stack,
-                // so there is no need to clean them up.
-                if (new_frame == NULL) {
-                    ERROR_NO_POP();
-                }
-                assert(INSTRUCTION_SIZE == 1 + INLINE_CACHE_ENTRIES_CALL_KW);
-                frame->return_offset = INSTRUCTION_SIZE;
-                DISPATCH_INLINED(new_frame);
+                res = _PySoacVMCall_FinishV1(&source_call, stack_pointer);
+                ERROR_IF(PyStackRef_IsNull(res));
             }
-            PyObject* res_o = _Py_VectorCallInstrumentation_StackRefSteal(
-                callable,
-                arguments,
-                total_args,
-                kwnames,
-                opcode == INSTRUMENTED_CALL_KW,
-                frame,
-                this_instr,
-                tstate);
-            DEAD(kwnames);
-            DEAD(args);
-            DEAD(self_or_null);
-            DEAD(callable);
-            ERROR_IF(res_o == NULL);
-            res = PyStackRef_FromPyObjectSteal(res_o);
+            else {
+                // Check if the call can be inlined or not
+                if (Py_TYPE(callable_o) == &PyFunction_Type &&
+                    (frame->soac_dataclass_checked_activation == NULL ||
+                     !_PySOAC_DataclassHasValueSite(frame)) &&
+                    !IS_PEP523_HOOKED(tstate) &&
+                    ((PyFunctionObject *)callable_o)->vectorcall == _PyFunction_Vectorcall)
+                {
+                    int code_flags = ((PyCodeObject*)PyFunction_GET_CODE(callable_o))->co_flags;
+                    PyObject *locals = code_flags & CO_OPTIMIZED ? NULL : Py_NewRef(PyFunction_GET_GLOBALS(callable_o));
+                    _PyInterpreterFrame *new_frame = _PyEvalFramePushAndInit(
+                        tstate, callable, locals,
+                        arguments, positional_args, kwnames_o, frame
+                    );
+                    DEAD(args);
+                    DEAD(self_or_null);
+                    DEAD(callable);
+                    PyStackRef_CLOSE(kwnames);
+                    // Sync stack explicitly since we leave using DISPATCH_INLINED().
+                    SYNC_SP();
+                    // The frame has stolen all the arguments from the stack,
+                    // so there is no need to clean them up.
+                    if (new_frame == NULL) {
+                        ERROR_NO_POP();
+                    }
+                    assert(INSTRUCTION_SIZE == 1 + INLINE_CACHE_ENTRIES_CALL_KW);
+                    frame->return_offset = INSTRUCTION_SIZE;
+                    DISPATCH_INLINED(new_frame);
+                }
+                PyObject* res_o = _Py_VectorCallInstrumentation_StackRefSteal(
+                    callable,
+                    arguments,
+                    total_args,
+                    kwnames,
+                    opcode == INSTRUMENTED_CALL_KW,
+                    frame,
+                    this_instr,
+                    tstate);
+                DEAD(kwnames);
+                DEAD(args);
+                DEAD(self_or_null);
+                DEAD(callable);
+                ERROR_IF(res_o == NULL);
+                res = PyStackRef_FromPyObjectSteal(res_o);
+            }
         }
 
         op(_PY_FRAME_KW, (callable, self_or_null, args[oparg], kwnames -- new_frame)) {
@@ -4913,81 +4957,108 @@ dummy_func(
             (void)null;
             PyObject *func = PyStackRef_AsPyObjectBorrow(func_st);
 
-            // DICT_MERGE is called before this opcode if there are kwargs.
-            // It converts all dict subtypes in kwargs into regular dicts.
             EVAL_CALL_STAT_INC_IF_FUNCTION(EVAL_CALL_FUNCTION_EX, func);
-            PyObject *result_o;
             assert(!_PyErr_Occurred(tstate));
-            if (opcode == INSTRUMENTED_CALL_FUNCTION_EX) {
-                PyObject *callargs = PyStackRef_AsPyObjectBorrow(callargs_st);
-                PyObject *kwargs = PyStackRef_AsPyObjectBorrow(kwargs_st);
-                assert(kwargs == NULL || PyDict_CheckExact(kwargs));
-                assert(PyTuple_CheckExact(callargs));
-                PyObject *arg = PyTuple_GET_SIZE(callargs) > 0 ?
-                    PyTuple_GET_ITEM(callargs, 0) : &_PyInstrumentation_MISSING;
-                int err = _Py_call_instrumentation_2args(
-                    tstate, PY_MONITORING_EVENT_CALL,
-                    frame, this_instr, func, arg);
-                if (err) {
-                    ERROR_NO_POP();
-                }
-                result_o = _PySOAC_DataclassObjectCallFromFrame(
-                    frame, func, callargs, kwargs);
-
-                if (!PyFunction_Check(func) && !PyMethod_Check(func)) {
-                    if (result_o == NULL) {
-                        _Py_call_instrumentation_exc2(
-                            tstate, PY_MONITORING_EVENT_C_RAISE,
-                            frame, this_instr, func, arg);
+            if (opcode != INSTRUMENTED_CALL_FUNCTION_EX &&
+                Py_TYPE(func) == &PyFunction_Type &&
+                (frame->soac_dataclass_checked_activation == NULL ||
+                 !_PySOAC_DataclassHasValueSite(frame)) &&
+                !IS_PEP523_HOOKED(tstate) &&
+                _PySoacVMCall_IsRegisteredV1(func)) {
+                int consistent = _PySoacVMCall_RequireOptimizedExpandedV1(func);
+                ERROR_IF(consistent < 0);
+                /* Check above is before either container's native owned
+                 * conversion. Iterable normalization already ran at its
+                 * original _MAKE_CALLARGS_A_TUPLE position. */
+                PyObject *callargs = PyStackRef_AsPyObjectSteal(callargs_st);
+                PyObject *kwargs = PyStackRef_IsNull(kwargs_st) ? NULL
+                    : PyStackRef_AsPyObjectSteal(kwargs_st);
+                _PySoacVMCallV1 source_call;
+                _PySoacVMCall_BindExpandedV1(
+                    &source_call, tstate, func_st,
+                    PyTuple_GET_SIZE(callargs), callargs, kwargs);
+                /* BindExpanded retired key scratch, callargs and kwargs in
+                 * native order. No stale VM transport token is closed again. */
+                INPUTS_DEAD();
+                SYNC_SP();
+                result = _PySoacVMCall_FinishV1(&source_call, stack_pointer);
+                ERROR_IF(PyStackRef_IsNull(result));
+            }
+            else {
+                // DICT_MERGE is called before this opcode if there are kwargs.
+                // It converts all dict subtypes in kwargs into regular dicts.
+                PyObject *result_o;
+                if (opcode == INSTRUMENTED_CALL_FUNCTION_EX) {
+                    PyObject *callargs = PyStackRef_AsPyObjectBorrow(callargs_st);
+                    PyObject *kwargs = PyStackRef_AsPyObjectBorrow(kwargs_st);
+                    assert(kwargs == NULL || PyDict_CheckExact(kwargs));
+                    assert(PyTuple_CheckExact(callargs));
+                    PyObject *arg = PyTuple_GET_SIZE(callargs) > 0 ?
+                        PyTuple_GET_ITEM(callargs, 0) : &_PyInstrumentation_MISSING;
+                    int err = _Py_call_instrumentation_2args(
+                        tstate, PY_MONITORING_EVENT_CALL,
+                        frame, this_instr, func, arg);
+                    if (err) {
+                        ERROR_NO_POP();
                     }
-                    else {
-                        int err = _Py_call_instrumentation_2args(
-                            tstate, PY_MONITORING_EVENT_C_RETURN,
-                            frame, this_instr, func, arg);
-                        if (err < 0) {
-                            Py_CLEAR(result_o);
+                    result_o = _PySOAC_DataclassObjectCallFromFrame(
+                        frame, func, callargs, kwargs);
+
+                    if (!PyFunction_Check(func) && !PyMethod_Check(func)) {
+                        if (result_o == NULL) {
+                            _Py_call_instrumentation_exc2(
+                                tstate, PY_MONITORING_EVENT_C_RAISE,
+                                frame, this_instr, func, arg);
+                        }
+                        else {
+                            int err = _Py_call_instrumentation_2args(
+                                tstate, PY_MONITORING_EVENT_C_RETURN,
+                                frame, this_instr, func, arg);
+                            if (err < 0) {
+                                Py_CLEAR(result_o);
+                            }
                         }
                     }
                 }
-            }
-            else {
-                if (Py_TYPE(func) == &PyFunction_Type &&
-                    !IS_PEP523_HOOKED(tstate) &&
-                    ((PyFunctionObject *)func)->vectorcall == _PyFunction_Vectorcall) {
-                    PyObject *callargs = PyStackRef_AsPyObjectSteal(callargs_st);
-                    assert(PyTuple_CheckExact(callargs));
-                    PyObject *kwargs = PyStackRef_IsNull(kwargs_st) ? NULL : PyStackRef_AsPyObjectSteal(kwargs_st);
-                    assert(kwargs == NULL || PyDict_CheckExact(kwargs));
-                    Py_ssize_t nargs = PyTuple_GET_SIZE(callargs);
-                    int code_flags = ((PyCodeObject *)PyFunction_GET_CODE(func))->co_flags;
-                    PyObject *locals = code_flags & CO_OPTIMIZED ? NULL : Py_NewRef(PyFunction_GET_GLOBALS(func));
+                else {
+                    if (Py_TYPE(func) == &PyFunction_Type &&
+                        !IS_PEP523_HOOKED(tstate) &&
+                        ((PyFunctionObject *)func)->vectorcall == _PyFunction_Vectorcall) {
+                        PyObject *callargs = PyStackRef_AsPyObjectSteal(callargs_st);
+                        assert(PyTuple_CheckExact(callargs));
+                        PyObject *kwargs = PyStackRef_IsNull(kwargs_st) ? NULL : PyStackRef_AsPyObjectSteal(kwargs_st);
+                        assert(kwargs == NULL || PyDict_CheckExact(kwargs));
+                        Py_ssize_t nargs = PyTuple_GET_SIZE(callargs);
+                        int code_flags = ((PyCodeObject *)PyFunction_GET_CODE(func))->co_flags;
+                        PyObject *locals = code_flags & CO_OPTIMIZED ? NULL : Py_NewRef(PyFunction_GET_GLOBALS(func));
 
-                    _PyInterpreterFrame *new_frame = _PyEvalFramePushAndInit_Ex(
-                        tstate, func_st, locals,
-                        nargs, callargs, kwargs, frame);
-                    // Need to sync the stack since we exit with DISPATCH_INLINED.
-                    INPUTS_DEAD();
-                    SYNC_SP();
-                    if (new_frame == NULL) {
-                        ERROR_NO_POP();
+                        _PyInterpreterFrame *new_frame = _PyEvalFramePushAndInit_Ex(
+                            tstate, func_st, locals,
+                            nargs, callargs, kwargs, frame);
+                        // Need to sync the stack since we exit with DISPATCH_INLINED.
+                        INPUTS_DEAD();
+                        SYNC_SP();
+                        if (new_frame == NULL) {
+                            ERROR_NO_POP();
+                        }
+                        assert(INSTRUCTION_SIZE == 1 + INLINE_CACHE_ENTRIES_CALL_FUNCTION_EX);
+                        frame->return_offset = INSTRUCTION_SIZE;
+                        DISPATCH_INLINED(new_frame);
                     }
-                    assert(INSTRUCTION_SIZE == 1 + INLINE_CACHE_ENTRIES_CALL_FUNCTION_EX);
-                    frame->return_offset = INSTRUCTION_SIZE;
-                    DISPATCH_INLINED(new_frame);
+                    PyObject *callargs = PyStackRef_AsPyObjectBorrow(callargs_st);
+                    assert(PyTuple_CheckExact(callargs));
+                    PyObject *kwargs = PyStackRef_AsPyObjectBorrow(kwargs_st);
+                    assert(kwargs == NULL || PyDict_CheckExact(kwargs));
+                    result_o = _PySOAC_DataclassObjectCallFromFrame(
+                        frame, func, callargs, kwargs);
                 }
-                PyObject *callargs = PyStackRef_AsPyObjectBorrow(callargs_st);
-                assert(PyTuple_CheckExact(callargs));
-                PyObject *kwargs = PyStackRef_AsPyObjectBorrow(kwargs_st);
-                assert(kwargs == NULL || PyDict_CheckExact(kwargs));
-                result_o = _PySOAC_DataclassObjectCallFromFrame(
-                    frame, func, callargs, kwargs);
+                PyStackRef_XCLOSE(kwargs_st);
+                PyStackRef_CLOSE(callargs_st);
+                DEAD(null);
+                PyStackRef_CLOSE(func_st);
+                ERROR_IF(result_o == NULL);
+                result = PyStackRef_FromPyObjectSteal(result_o);
             }
-            PyStackRef_XCLOSE(kwargs_st);
-            PyStackRef_CLOSE(callargs_st);
-            DEAD(null);
-            PyStackRef_CLOSE(func_st);
-            ERROR_IF(result_o == NULL);
-            result = PyStackRef_FromPyObjectSteal(result_o);
         }
 
         specializing op(_SPECIALIZE_CALL_FUNCTION_EX, (counter/1, func, unused, unused, unused -- func, unused, unused, unused)) {
@@ -5051,10 +5122,19 @@ dummy_func(
         op(_CHECK_IS_NOT_PY_CALLABLE_EX, (func_st, unused, unused, unused -- func_st, unused, unused, unused)) {
             PyObject *func = PyStackRef_AsPyObjectBorrow(func_st);
             EXIT_IF(Py_TYPE(func) == &PyFunction_Type && ((PyFunctionObject *)func)->vectorcall == _PyFunction_Vectorcall);
+            EXIT_IF(PyFunction_Check(func) &&
+                    ((PyFunctionObject *)func)->func_soac_source_entry != NULL &&
+                    _PySoacVMCall_IsRegisteredV1(func));
         }
 
         op(_CALL_FUNCTION_EX_NON_PY_GENERAL, (func_st, null, callargs_st, kwargs_st -- result)) {
             PyObject *func = PyStackRef_AsPyObjectBorrow(func_st);
+            /* Tuple normalization may install a source registration.
+             * Exit with its materialized tuple still live; the generic
+             * continuation must not replay the original iterable. */
+            EXIT_IF(PyFunction_Check(func) &&
+                    ((PyFunctionObject *)func)->func_soac_source_entry != NULL &&
+                    _PySoacVMCall_IsRegisteredV1(func));
             PyObject *callargs = PyStackRef_AsPyObjectBorrow(callargs_st);
             (void)null;
             assert(PyTuple_CheckExact(callargs));

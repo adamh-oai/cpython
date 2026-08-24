@@ -107,6 +107,12 @@ int _PyCompile_SoacFixSlots(_PyCompile_CodeUnitMetadata *,
                            const int *fixed, int noffsets);
 int _PyCompile_SoacEntryCell(_PyCompile_CodeUnitMetadata *, int deref_index);
 int _PyCompile_SoacEntryFreeVars(_PyCompile_CodeUnitMetadata *, int free_count);
+int _PyCompile_SoacReferenceOrigin(struct _PyCompiler *, _Py_SourceLocation,
+                                  const void *original, int kind, expr_context_ty);
+int _PyCompile_SoacFinalReferenceInstruction(_PyCompile_CodeUnitMetadata *,
+                                            int ordinal, int opcode, int oparg,
+                                            _PySoacReadOrigins);
+int _PyCompile_SoacFinishReferences(_PyCompile_CodeUnitMetadata *, int count);
 
 typedef enum {
     COMPILE_OP_FAST,

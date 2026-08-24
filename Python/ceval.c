@@ -1,6 +1,11 @@
 /* Execute compiled code */
 
 #include "ceval.h"
+#include "pycore_soac_call_v1.h"
+#include "pycore_soac_source_entry_v1.h"
+#include "pycore_soac_vm_call_v1.h"
+#include "pycore_soac_outgoing_v1.h"
+#include "soac_reference_v1.inc"  // one native opaque-reference implementation
 
 int
 Py_GetRecursionLimit(void)
@@ -1682,11 +1687,12 @@ fail:
 }
 
 static int
-initialize_locals(PyThreadState *tstate, PyFunctionObject *func,
+initialize_locals(PyThreadState *tstate, PyFunctionObject *func, PyCodeObject *co,
     _PyStackRef *localsplus, _PyStackRef const *args,
     Py_ssize_t argcount, PyObject *kwnames, unsigned char *soac_supplied)
 {
-    PyCodeObject *co = (PyCodeObject*)func->func_code;
+    /* Execute/bind the native frame's captured code even if argument
+     * comparison callbacks replace the function's current code. */
     const Py_ssize_t total_args = co->co_argcount + co->co_kwonlyargcount;
     /* Create a dictionary for keyword parameters (**kwags) */
     PyObject *kwdict;
@@ -1959,6 +1965,370 @@ clear_thread_frame(PyThreadState *tstate, _PyInterpreterFrame * frame)
     _PyThreadState_PopFrame(tstate, frame);
 }
 
+/* REVIEW DRAFT ONLY. Insert in Python/ceval.c after clear_thread_frame.
+ * The public opaque-reference declarations/primitive layer are a separate
+ * frozen dependency. This fragment enables no entry registration or opcode.
+ */
+
+_Static_assert(sizeof(PySoacRefV1) == sizeof(_PyStackRef),
+               "binding transfer must preserve the native reference");
+_Static_assert(_Alignof(PySoacRefV1) == _Alignof(_PyStackRef),
+               "binding transfer must preserve native reference alignment");
+
+static int
+soac_call_error(const char *message)
+{
+    PyErr_SetString(PyExc_ValueError, message);
+    return -1;
+}
+
+static int
+soac_call_supported(void)
+{
+#if defined(Py_GIL_DISABLED) || SIZEOF_VOID_P != 8
+    PyErr_SetString(PyExc_NotImplementedError,
+                    "SOAC source binding V1 requires the 64-bit GIL build");
+    return 0;
+#else
+    assert(PyGILState_Check());
+    return 1;
+#endif
+}
+
+static void
+soac_call_require_supported(void)
+{
+    if (!soac_call_supported()) {
+        Py_FatalError("SOAC binding producer used without a supported ABI query");
+    }
+}
+
+static int
+soac_call_range(const void *ptr, size_t bytes, size_t alignment)
+{
+    if (bytes == 0) {
+        return 1;
+    }
+    uintptr_t start = (uintptr_t)ptr;
+    return ptr != NULL && start % alignment == 0 &&
+           bytes <= UINTPTR_MAX - start;
+}
+
+static int
+soac_call_overlaps(const void *left, size_t left_size,
+                   const void *right, size_t right_size)
+{
+    if (left_size == 0 || right_size == 0) {
+        return 0;
+    }
+    /* All caller ranges have already passed the overflow check. Private view
+     * and datastack ranges are valid C allocations owned by this producer. */
+    uintptr_t a = (uintptr_t)left;
+    uintptr_t b = (uintptr_t)right;
+    return a < b + right_size && b < a + left_size;
+}
+
+static int
+soac_call_aliases_primaries(const PySoacBoundCallViewV1 *view,
+                           const void *ptr, size_t bytes, int mask_is_output)
+{
+    return soac_call_overlaps(ptr, bytes, view, sizeof(*view)) ||
+           soac_call_overlaps(ptr, bytes, view->frame,
+                              view->frame_size * sizeof(PyObject *)) ||
+           (!mask_is_output &&
+            soac_call_overlaps(ptr, bytes, view->supplied,
+                               (size_t)view->info.supplied_count));
+}
+
+/* Validate before dereferencing any borrowed frame/code fields. Terminal and
+ * copied views fail at their own header, without following dead pointers. */
+static int
+soac_call_validate(const PySoacBoundCallViewV1 *view, int require_ready)
+{
+    if (!soac_call_supported()) {
+        return -1;
+    }
+    if (!soac_call_range(view, sizeof(*view), _Alignof(PySoacBoundCallViewV1)) ||
+        view->self != view || view->abi_version != Py_SOAC_SOURCE_ENTRY_ABI_V1 ||
+        (view->state != _Py_SOAC_CALL_BOUND_V1 &&
+         view->state != _Py_SOAC_CALL_BODY_READY_V1) ||
+        (require_ready && view->state != _Py_SOAC_CALL_BODY_READY_V1)) {
+        return soac_call_error("invalid, terminal, or not-BodyReady SOAC call view");
+    }
+    PyThreadState *thread = _PyThreadState_GET();
+    if (thread != view->thread || thread->current_frame != view->caller) {
+        return soac_call_error("SOAC call view used on a different thread or parent");
+    }
+    _PyInterpreterFrame *frame = view->frame;
+    if (frame == NULL || (PyObject **)frame + view->frame_size != thread->datastack_top) {
+        return soac_call_error("SOAC call view is not the top temporary frame");
+    }
+    if (frame == thread->current_frame || frame->owner != FRAME_OWNED_BY_THREAD ||
+        frame->frame_obj != NULL || frame->previous != view->caller ||
+        PyStackRef_AsPyObjectBorrow(frame->f_funcobj) != view->info.function ||
+        PyStackRef_AsPyObjectBorrow(frame->f_executable) != (PyObject *)view->info.code ||
+        frame->f_globals != view->info.globals || frame->f_builtins != view->info.builtins ||
+        frame->f_locals != NULL || frame->soac_dataclass_role != 0 ||
+        frame->soac_dataclass_invocation != NULL ||
+        frame->soac_dataclass_checked_activation != NULL ||
+        frame->stackpointer != frame->localsplus + view->info.code->co_nlocalsplus) {
+        return soac_call_error("SOAC temporary binding frame changed before transfer");
+    }
+    for (Py_ssize_t i = view->info.parameter_count;
+         i < view->info.code->co_nlocalsplus; i++) {
+        if (!PyStackRef_IsNull(frame->localsplus[i])) {
+            return soac_call_error("SOAC binding frame executed before transfer");
+        }
+    }
+    if (view->state == _Py_SOAC_CALL_BODY_READY_V1 && view->caller != NULL &&
+        view->caller->stackpointer != view->ready_stackpointer) {
+        return soac_call_error("SOAC caller stack changed after BodyReady");
+    }
+    return 0;
+}
+
+static void
+soac_call_publish_terminal(PySoacBoundCallViewV1 *view, uint32_t state)
+{
+    view->state = state;
+    view->thread = NULL;
+    view->frame = NULL;
+    view->caller = NULL;
+    view->ready_stackpointer = NULL;
+    view->frame_size = 0;
+    view->info = (PySoacSourceCallInfoV1){0};
+    view->supplied = NULL;
+    assert(PySoacRef_IsEmptyV1(view->namespace_value));
+}
+
+/* Both Bound Abort and native binding failure use the SAME native clear. The
+ * namespace is still raw if binding failed before its token was prepared.
+ * Publish terminal and detach the prepared token before any Python teardown.
+ */
+static void
+soac_call_abort_frame(PySoacBoundCallViewV1 *view)
+{
+    PyThreadState *thread = view->thread;
+    _PyInterpreterFrame *frame = view->frame;
+    PySoacRefV1 namespace_value = PySoacRef_TakeV1(&view->namespace_value);
+    soac_call_publish_terminal(view, _Py_SOAC_CALL_ABORTED_V1);
+    PyObject *pending = PyErr_GetRaisedException();
+    if (!PySoacRef_IsEmptyV1(namespace_value)) {
+        assert(frame->f_locals == NULL);
+        /* This token was created from the already-owned f_locals reference,
+         * never from Borrow. Restore it without an INCREF, even in debug. */
+        frame->f_locals = PySoacRef_IntoOwnedV1(namespace_value);
+    }
+    frame->previous = NULL;
+    clear_thread_frame(thread, frame);  /* locals -> namespace -> func -> code */
+    PyErr_SetRaisedException(pending);
+}
+
+void
+_PySoacCall_CaptureInfoV1(PySoacSourceCallInfoV1 *out, uint32_t kind,
+                        _PyStackRef function, PyCodeObject *code)
+{
+    soac_call_require_supported();
+    assert(out != NULL && kind <= Py_SOAC_CALL_VM_EXPANDED_V1);
+    PyFunctionObject *func = (PyFunctionObject *)PyStackRef_AsPyObjectBorrow(function);
+    assert(PyFunction_Check(func) && PyCode_Check(code));
+    assert(func->func_code == (PyObject *)code);
+    Py_ssize_t supplied = (Py_ssize_t)code->co_argcount + code->co_kwonlyargcount;
+    Py_ssize_t parameters = supplied + !!(code->co_flags & CO_VARARGS) +
+                           !!(code->co_flags & CO_VARKEYWORDS);
+    assert(parameters <= code->co_nlocalsplus);
+    *out = (PySoacSourceCallInfoV1){
+        .kind = kind,
+        .function = (PyObject *)func,
+        .code = code,
+        .globals = func->func_globals,
+        .builtins = func->func_builtins,
+        .parameter_count = parameters,
+        .supplied_count = supplied,
+    };
+}
+
+int
+_PySoacCall_BindV1(PySoacBoundCallViewV1 *view, PyThreadState *thread,
+                 const PySoacSourceCallInfoV1 *captured,
+                 _PyStackRef function, PyObject *locals,
+                 const _PyStackRef *args, Py_ssize_t argcount, PyObject *kwnames,
+                 unsigned char *supplied, Py_ssize_t supplied_count)
+{
+    soac_call_require_supported();
+    assert(view != NULL && thread == _PyThreadState_GET() && captured != NULL);
+    assert(captured->reserved == 0 && captured->kind <= Py_SOAC_CALL_VM_EXPANDED_V1);
+    assert(argcount >= 0 && (kwnames == NULL || PyTuple_Check(kwnames)));
+    assert(argcount <= PY_SSIZE_T_MAX - (kwnames == NULL ? 0 : PyTuple_GET_SIZE(kwnames)));
+    assert(args != NULL || (argcount == 0 &&
+           (kwnames == NULL || PyTuple_GET_SIZE(kwnames) == 0)));
+    assert(supplied_count == captured->supplied_count &&
+           (supplied_count == 0 || supplied != NULL));
+    PyFunctionObject *func = (PyFunctionObject *)PyStackRef_AsPyObjectBorrow(function);
+    PyCodeObject *code = captured->code;
+    assert((PyObject *)func == captured->function && PyFunction_Check(func));
+    assert(func->func_code == (PyObject *)code && PyCode_Check(code));
+    assert(func->func_globals == captured->globals && func->func_builtins == captured->builtins);
+    *view = (PySoacBoundCallViewV1){
+        .self = view,
+        .abi_version = Py_SOAC_SOURCE_ENTRY_ABI_V1,
+        .state = _Py_SOAC_CALL_BINDING_V1,
+        .thread = thread,
+        .caller = thread->current_frame,
+        .frame_size = (size_t)code->co_framesize,
+        .info = *captured,
+        .supplied = supplied,
+        .namespace_value = PySoacRef_EmptyV1(),
+    };
+    CALL_STAT_INC(frames_pushed);
+    _PyInterpreterFrame *frame = _PyThreadState_PushFrame(thread, code->co_framesize);
+    if (frame == NULL) {
+        soac_call_publish_terminal(view, _Py_SOAC_CALL_ABORTED_V1);
+        /* Match the existing native allocation-failure ownership order. There
+         * is no frame/code owner yet and no initialized parameter to inspect. */
+        PyStackRef_CLOSE(function);
+        Py_XDECREF(locals);
+        Py_ssize_t count = argcount + (kwnames == NULL ? 0 : PyTuple_GET_SIZE(kwnames));
+        for (Py_ssize_t i = 0; i < count; i++) {
+            PyStackRef_CLOSE(args[i]);
+        }
+        PyErr_NoMemory();
+        return -1;
+    }
+    view->frame = frame;
+    _PyFrame_Initialize(thread, frame, function, locals, code, 0, view->caller);
+    if (initialize_locals(thread, func, code, frame->localsplus, args,
+                          argcount, kwnames, supplied) < 0) {
+        soac_call_abort_frame(view);
+        return -1;
+    }
+    /* Token creation can allocate a debug handle; do it BEFORE BodyReady, not
+     * in Take. This moves the existing raw owner without an extra refcount.
+     * On pre-staging failure, Abort's Empty token leaves raw f_locals intact. */
+    if (frame->f_locals != NULL) {
+        view->namespace_value = PySoacRef_FromOwnedV1(frame->f_locals);
+        frame->f_locals = NULL;
+    }
+    view->state = _Py_SOAC_CALL_BOUND_V1;
+    return 0;
+}
+
+int
+_PySoacCall_MarkBodyReadyV1(PySoacBoundCallViewV1 *view,
+                          _PyStackRef *post_retirement_stackpointer)
+{
+    if (soac_call_validate(view, 0) < 0) {
+        return -1;
+    }
+    if (view->state != _Py_SOAC_CALL_BOUND_V1 ||
+        (view->caller == NULL && post_retirement_stackpointer != NULL) ||
+        (view->caller != NULL && (post_retirement_stackpointer == NULL ||
+         view->caller->stackpointer != post_retirement_stackpointer))) {
+        return soac_call_error("SOAC BodyReady requires the published post-retirement stack");
+    }
+    view->ready_stackpointer = post_retirement_stackpointer;
+    view->state = _Py_SOAC_CALL_BODY_READY_V1;
+    return 0;
+}
+
+int
+PySoacCall_GetInfoV1(const PySoacBoundCallViewV1 *view,
+                   PySoacSourceCallInfoV1 *out, size_t out_size)
+{
+    if (soac_call_validate(view, 1) < 0) {
+        return -1;
+    }
+    if (out_size != sizeof(*out) ||
+        !soac_call_range(out, sizeof(*out), _Alignof(PySoacSourceCallInfoV1)) ||
+        soac_call_aliases_primaries(view, out, sizeof(*out), 0)) {
+        return soac_call_error("invalid SOAC source-call info output");
+    }
+    *out = view->info;
+    return 0;
+}
+
+static PySoacRefV1
+soac_call_move_native(_PyStackRef *slot)
+{
+    PySoacRefV1 result;
+    memcpy(&result, slot, sizeof(result));  /* transport, not semantic DUP */
+    *slot = PyStackRef_NULL;
+    return result;
+}
+
+int
+PySoacCall_TakeBindingV1(PySoacBoundCallViewV1 *view,
+                       PySoacBoundActivationV1 *activation, size_t activation_size,
+                       PySoacRefV1 *parameters, Py_ssize_t parameter_count,
+                       unsigned char *supplied, Py_ssize_t supplied_count)
+{
+    if (soac_call_validate(view, 1) < 0) {
+        return -1;
+    }
+    if (activation_size != sizeof(*activation) ||
+        parameter_count != view->info.parameter_count ||
+        supplied_count != view->info.supplied_count ||
+        parameter_count < 0 || supplied_count < 0 ||
+        (size_t)parameter_count > SIZE_MAX / sizeof(*parameters)) {
+        return soac_call_error("invalid SOAC binding output sizes");
+    }
+    size_t parameter_bytes = (size_t)parameter_count * sizeof(*parameters);
+    size_t supplied_bytes = (size_t)supplied_count;
+    if (!soac_call_range(activation, sizeof(*activation), _Alignof(PySoacBoundActivationV1)) ||
+        !soac_call_range(parameters, parameter_bytes, _Alignof(PySoacRefV1)) ||
+        !soac_call_range(supplied, supplied_bytes, 1) ||
+        soac_call_aliases_primaries(view, activation, sizeof(*activation), 0) ||
+        soac_call_aliases_primaries(view, parameters, parameter_bytes, 0) ||
+        soac_call_aliases_primaries(view, supplied, supplied_bytes, 1) ||
+        soac_call_overlaps(activation, sizeof(*activation), parameters, parameter_bytes) ||
+        soac_call_overlaps(activation, sizeof(*activation), supplied, supplied_bytes) ||
+        soac_call_overlaps(parameters, parameter_bytes, supplied, supplied_bytes)) {
+        return soac_call_error("invalid or overlapping SOAC binding output buffers");
+    }
+    if (!PySoacRef_IsEmptyV1(activation->function) ||
+        !PySoacRef_IsEmptyV1(activation->code) ||
+        !PySoacRef_IsEmptyV1(activation->namespace_value)) {
+        return soac_call_error("SOAC binding activation outputs must be Empty");
+    }
+    for (Py_ssize_t i = 0; i < parameter_count; i++) {
+        if (!PySoacRef_IsEmptyV1(parameters[i])) {
+            return soac_call_error("SOAC binding parameter outputs must be Empty");
+        }
+    }
+    /* No fallible operation, allocation, callback, semantic DUP or close below.
+     * All source primaries move once, including parameters never read by code. */
+    _PyInterpreterFrame *frame = view->frame;
+    PyThreadState *thread = view->thread;
+    activation->globals = view->info.globals;
+    activation->builtins = view->info.builtins;
+    if (supplied_count != 0) {
+        memmove(supplied, view->supplied, supplied_bytes);
+    }
+    for (Py_ssize_t i = 0; i < parameter_count; i++) {
+        parameters[i] = soac_call_move_native(&frame->localsplus[i]);
+    }
+    activation->function = soac_call_move_native(&frame->f_funcobj);
+    activation->code = soac_call_move_native(&frame->f_executable);
+    activation->namespace_value = PySoacRef_TakeV1(&view->namespace_value);
+    frame->f_globals = NULL;
+    frame->f_builtins = NULL;
+    frame->previous = NULL;
+    frame->stackpointer = frame->localsplus;
+    soac_call_publish_terminal(view, _Py_SOAC_CALL_TAKEN_V1);
+    _PyThreadState_PopFrame(thread, frame);
+    return 0;
+}
+
+int
+PySoacCall_AbortV1(PySoacBoundCallViewV1 *view)
+{
+    if (soac_call_validate(view, 0) < 0) {
+        return -1;
+    }
+    soac_call_abort_frame(view);
+    return 0;
+}
+
 static void
 clear_gen_frame(PyThreadState *tstate, _PyInterpreterFrame * frame)
 {
@@ -1998,6 +2368,793 @@ _PyEval_FrameClearAndPop(PyThreadState *tstate, _PyInterpreterFrame * frame)
     }
 }
 
+/* IGNORED REVIEW DRAFT. Place in Python/ceval.c after the frozen binder/view
+ * implementation. Explicit public C call only: no VM opcode, normal function
+ * vectorcall, Rust body, dataclass or outgoing-call site is redirected here.
+ */
+
+static PyObject *
+soac_source_entry_unavailable(const char *message)
+{
+    PyObject *exception = PySoac_GetStrictRuntimeUnavailableError();
+    if (exception != NULL) {
+        PyErr_SetString(exception, message);
+    }
+    return NULL;
+}
+
+static void
+soac_source_entry_release_failed_bind(PySoacReleaseSourceCallV1 release,
+                                      void *context)
+{
+    /* Release may destroy the final immutable context pin after native bind
+     * cleanup has destroyed its function/code. It must not dereference either.
+     * Preserve the original bind error even if cleanup changes PyErr. */
+    PyObject *pending = PyErr_GetRaisedException();
+    release(context);
+    PyErr_SetRaisedException(pending);
+}
+
+/* Shared output contract only; VM and borrowed-C input producers stay
+ * separate. The callback consumes context and must retire its view. */
+static _PyStackRef
+soac_source_entry_execute_result(PySoacBoundCallViewV1 *view,
+                                PySoacExecuteSourceCallV1 execute, void *context)
+{
+    PySoacRefV1 result = PySoacRef_EmptyV1();
+    int status = execute(view, context, &result);
+    if (view->state != _Py_SOAC_CALL_TAKEN_V1 &&
+        view->state != _Py_SOAC_CALL_ABORTED_V1) {
+        Py_FatalError("SOAC Execute returned without retiring its bound view");
+    }
+    if (status == 0 && !PySoacRef_IsEmptyV1(result) &&
+        PySoacRef_IsHeapSafeV1(result) && !PyErr_Occurred()) {
+        _PyStackRef native;
+        /* Move the very same close/debug-handle obligation; no DUP, INCREF,
+         * IntoOwned/FromOwned normalization or tag inspection. */
+        memcpy(&native, &result, sizeof(native));
+        return native;
+    }
+    if (status == -1 && PySoacRef_IsEmptyV1(result) && PyErr_Occurred()) {
+        return PyStackRef_NULL;
+    }
+    Py_FatalError("SOAC Execute violated its native-reference result contract");
+}
+
+PyObject *
+PySoac_CallBorrowedVectorcallV1(PyObject *object, PyObject *const *args,
+                               size_t nargsf, PyObject *kwnames)
+{
+    if (object == NULL || !PyFunction_Check(object) ||
+        (kwnames != NULL && !PyTuple_Check(kwnames))) {
+        PyErr_SetString(PyExc_TypeError,
+                        "SOAC borrowed source call needs a function and keyword tuple");
+        return NULL;
+    }
+    PySoacReferenceAbiV1 abi;
+    if (PySoacRef_GetAbiV1(&abi, sizeof(abi)) < 0) {
+        return NULL;
+    }
+    if (PyErr_Occurred()) {
+        return NULL;
+    }
+    PyThreadState *thread = _PyThreadState_GET();
+    PyFunctionObject *function = (PyFunctionObject *)object;
+    PySoacSourceEntrySpecV1 spec;
+    if (!_PySoacSourceEntry_CopyV1(function, &spec)) {
+        return soac_source_entry_unavailable("no matching SOAC native source-entry registration");
+    }
+    if (PyFunction_CheckSoacStrictDefaults(object) < 0) {
+        return NULL;
+    }
+    Py_ssize_t argcount = PyVectorcall_NARGS(nargsf);
+    Py_ssize_t kwcount = kwnames == NULL ? 0 : PyTuple_GET_SIZE(kwnames);
+    if (argcount < 0 || kwcount > PY_SSIZE_T_MAX - argcount) {
+        PyErr_SetString(PyExc_ValueError, "SOAC source-call argument count overflow");
+        return NULL;
+    }
+    Py_ssize_t total_args = argcount + kwcount;
+    if ((total_args != 0 && args == NULL) ||
+        (size_t)total_args > SIZE_MAX / sizeof(_PyStackRef)) {
+        PyErr_SetString(PyExc_ValueError, "invalid SOAC borrowed argument array");
+        return NULL;
+    }
+    for (Py_ssize_t i = 0; i < total_args; i++) {
+        if (args[i] == NULL) {
+            PyErr_SetString(PyExc_ValueError, "NULL SOAC borrowed argument");
+            return NULL;
+        }
+    }
+    /* Match _PyFunction_Vectorcall's namespace choice and _PyEval_Vector's
+     * borrowed-C acquisition order. The same borrowed keyword tuple, including
+     * a tuple subclass, survives untouched for its actual caller's lifetime.
+     * The OFFSET slot is neither read nor written. */
+    PyCodeObject *code = spec.expected_code;
+    PyObject *locals = (code->co_flags & CO_OPTIMIZED) ? NULL : function->func_globals;
+    Py_ssize_t supplied_count = (Py_ssize_t)code->co_argcount + code->co_kwonlyargcount;
+    _PyStackRef stack_array[8];
+    _PyStackRef *arguments = stack_array;
+    unsigned char stack_supplied[8];
+    unsigned char *supplied = stack_supplied;
+    if (total_args > 8) {
+        arguments = PyMem_Malloc(sizeof(*arguments) * (size_t)total_args);
+        if (arguments == NULL) {
+            return PyErr_NoMemory();
+        }
+    }
+    if (supplied_count > 8) {
+        supplied = PyMem_Malloc((size_t)supplied_count);
+        if (supplied == NULL) {
+            if (arguments != stack_array) PyMem_Free(arguments);
+            return PyErr_NoMemory();
+        }
+    }
+    /* Revalidate before acquiring any native primary, then Capture->Pin->Bind
+     * has no Python callback except those inside native binding itself. The
+     * native record never pins function/code or normalizes borrowed VM tokens. */
+    PySoacSourceEntrySpecV1 rechecked;
+    if (!_PySoacSourceEntry_CopyV1(function, &rechecked) ||
+        rechecked.expected_code != code ||
+        rechecked.expected_metadata != spec.expected_metadata ||
+        rechecked.expected_function_id != spec.expected_function_id ||
+        rechecked.expected_strict_id != spec.expected_strict_id ||
+        rechecked.expected_owner != spec.expected_owner ||
+        rechecked.expected_vectorcall != spec.expected_vectorcall ||
+        rechecked.pin != spec.pin || rechecked.release != spec.release ||
+        rechecked.execute != spec.execute) {
+        if (arguments != stack_array) PyMem_Free(arguments);
+        if (supplied != stack_supplied) PyMem_Free(supplied);
+        return soac_source_entry_unavailable("SOAC source entry changed before binding");
+    }
+    Py_XINCREF(locals);
+    for (Py_ssize_t i = 0; i < argcount; i++) {
+        arguments[i] = PyStackRef_FromPyObjectNew(args[i]);
+    }
+    for (Py_ssize_t i = 0; i < kwcount; i++) {
+        arguments[argcount + i] = PyStackRef_FromPyObjectNew(args[argcount + i]);
+    }
+    _PyStackRef callable = PyStackRef_FromPyObjectNew(object);
+    PySoacSourceCallInfoV1 captured;
+    _PySoacCall_CaptureInfoV1(&captured, Py_SOAC_CALL_BORROWED_VECTOR_V1, callable, code);
+    void *context = spec.pin(spec.expected_metadata, &captured);
+    if (PyErr_Occurred()) {
+        Py_FatalError("SOAC source Pin must be infallible and preserve the exception state");
+    }
+    PySoacBoundCallViewV1 view;
+    int bound = _PySoacCall_BindV1(
+        &view, thread, &captured, callable, locals, arguments, argcount,
+        kwnames, supplied, supplied_count);
+    /* All argument/function/namespace tokens were consumed by Bind on BOTH
+     * outcomes. Free only obsolete transport storage, never close it again. */
+    if (arguments != stack_array) {
+        PyMem_Free(arguments);
+    }
+    if (bound < 0) {
+        if (supplied != stack_supplied) PyMem_Free(supplied);
+        soac_source_entry_release_failed_bind(spec.release, context);
+        return NULL;
+    }
+    /* Borrowed C callers retain their argument/key owners. There are no EX
+     * containers or caller tokens to steal here. Native _PyEval_Vector retires
+     * only the copied transport array before body evaluation; that is done.
+     * The caller's already-synchronized SP remains unchanged, not DEAD-ed. */
+    _PyStackRef *ready_sp = view.caller == NULL ? NULL : view.caller->stackpointer;
+    if (_PySoacCall_MarkBodyReadyV1(&view, ready_sp) < 0) {
+        Py_FatalError("SOAC borrowed producer could not establish BodyReady");
+    }
+    _PyStackRef result = soac_source_entry_execute_result(&view, spec.execute, context);
+    /* Execute owns context on both outcomes; do not Release again. */
+    if (supplied != stack_supplied) {
+        PyMem_Free(supplied);
+    }
+    return PyStackRef_IsNull(result) ? NULL : PyStackRef_AsPyObjectSteal(result);
+}
+
+
+/* IGNORED REVIEW DRAFT. Place in ceval.c after the registration adapter.
+ * Native CALL/KW/EX producers are explicit; no VM argument passes through
+ * PyObject** vectorcall and no original strict bytecode is evaluated. */
+
+int
+_PySoacVMCall_IsRegisteredV1(PyObject *object)
+{
+    if (!PyFunction_Check(object)) {
+        return 0;
+    }
+    PySoacSourceEntrySpecV1 entry;
+    return _PySoacSourceEntry_CopyV1((PyFunctionObject *)object, &entry);
+}
+
+int
+_PySoacVMCall_RequireOptimizedExpandedV1(PyObject *object)
+{
+    assert(PyFunction_Check(object));
+    if (((PyCodeObject *)PyFunction_GET_CODE(object))->co_flags & CO_OPTIMIZED) {
+        return 0;
+    }
+    (void)soac_source_entry_unavailable(
+        "SOAC source EX entry requires its function-like original code; nonoptimized EX is not admitted");
+    return -1;
+}
+
+static void
+soac_vm_call_init(_PySoacVMCallV1 *call)
+{
+    call->state = _Py_SOAC_VM_CALL_FAILED_V1;
+    call->pinned = 0;
+    call->context = NULL;
+    call->supplied = call->inline_supplied;
+    /* view, entry and scratch are not token owners until Bind initializes
+     * them. Do not zero-fill an opaque native reference and call it Empty. */
+}
+
+static void
+soac_vm_close_unbound(_PyStackRef function, PyObject *locals,
+                     const _PyStackRef *arguments, Py_ssize_t count)
+{
+    /* Pre-frame failure: native frame-push order, with the actual token
+     * reference kinds. The producer's cause survives reentrant cleanup. */
+    PyObject *pending = PyErr_GetRaisedException();
+    PyStackRef_CLOSE(function);
+    Py_XDECREF(locals);
+    for (Py_ssize_t i = 0; i < count; i++) {
+        PyStackRef_CLOSE(arguments[i]);
+    }
+    PyErr_SetRaisedException(pending);
+}
+
+void
+_PySoacVMCall_BindVectorV1(_PySoacVMCallV1 *call, PyThreadState *thread,
+                          uint32_t kind, _PyStackRef function, PyObject *locals,
+                          const _PyStackRef *arguments, Py_ssize_t positional,
+                          PyObject *kwnames)
+{
+    soac_call_require_supported();
+    assert(call != NULL && thread == _PyThreadState_GET());
+    assert(kind >= Py_SOAC_CALL_VM_POSITIONAL_V1 && kind <= Py_SOAC_CALL_VM_EXPANDED_V1);
+    assert(positional >= 0 && (kwnames == NULL || PyTuple_Check(kwnames)));
+    soac_vm_call_init(call);
+    Py_ssize_t keyword_count = kwnames == NULL ? 0 : PyTuple_GET_SIZE(kwnames);
+    assert(keyword_count <= PY_SSIZE_T_MAX - positional);
+    Py_ssize_t total = positional + keyword_count;
+    PyObject *object = PyStackRef_AsPyObjectBorrow(function);
+    if (!_PySoacSourceEntry_CopyV1((PyFunctionObject *)object, &call->entry)) {
+        (void)soac_source_entry_unavailable("SOAC VM entry changed before native binding");
+        soac_vm_close_unbound(function, locals, arguments, total);
+        return;
+    }
+    if (PyFunction_CheckSoacStrictDefaults(object) < 0) {
+        soac_vm_close_unbound(function, locals, arguments, total);
+        return;
+    }
+    PyCodeObject *code = call->entry.expected_code;
+    Py_ssize_t supplied_count = (Py_ssize_t)code->co_argcount + code->co_kwonlyargcount;
+    if (supplied_count > (Py_ssize_t)sizeof(call->inline_supplied)) {
+        call->supplied = PyMem_Malloc((size_t)supplied_count);
+        if (call->supplied == NULL) {
+            PyErr_NoMemory();
+            soac_vm_close_unbound(function, locals, arguments, total);
+            return;
+        }
+    }
+    /* Native EX has already unpacked and acquired its tokens. This is its
+     * final frame-code capture, not the earlier namespace/flags read. Native
+     * GIL allocation schedules GC; it is not a Python callback here. Pin is
+     * infallible, C/Rust-only and immediately precedes native binding. */
+    PySoacSourceCallInfoV1 captured;
+    _PySoacCall_CaptureInfoV1(&captured, kind, function, code);
+    call->context = call->entry.pin(call->entry.expected_metadata, &captured);
+    call->pinned = 1;
+    if (PyErr_Occurred()) {
+        Py_FatalError("SOAC source Pin must be infallible and preserve the exception state");
+    }
+    if (_PySoacCall_BindV1(&call->view, thread, &captured, function, locals,
+                         arguments, positional, kwnames,
+                         call->supplied, supplied_count) == 0) {
+        call->state = _Py_SOAC_VM_CALL_BOUND_V1;
+    }
+    /* Bind consumed every token on both outcomes. The opcode, not this
+     * helper, will now DEAD its operand slots and publish its actual SP. */
+}
+
+void
+_PySoacVMCall_BindExpandedV1(_PySoacVMCallV1 *call, PyThreadState *thread,
+                            _PyStackRef function, Py_ssize_t positional,
+                            PyObject *callargs, PyObject *kwargs)
+{
+    soac_call_require_supported();
+    assert(call != NULL && thread == _PyThreadState_GET());
+    assert(PyFunction_Check(PyStackRef_AsPyObjectBorrow(function)));
+    assert(PyTuple_CheckExact(callargs));
+    assert(kwargs == NULL || PyDict_CheckExact(kwargs));
+    assert(positional == PyTuple_GET_SIZE(callargs));
+    /* The opcode checked this before taking containers. Function-like native
+     * compiler scopes include every admitted source/provider role. This is
+     * not a role proof; the trusted registrar must supply that independently. */
+    assert(((PyCodeObject *)PyFunction_GET_CODE(PyStackRef_AsPyObjectBorrow(function)))->co_flags & CO_OPTIMIZED);
+    soac_vm_call_init(call);
+    bool has_dict = kwargs != NULL && PyDict_GET_SIZE(kwargs) > 0;
+    PyObject *kwnames = NULL;
+    PyObject *const *object_array = NULL;
+    _PyStackRef stack_array[8];
+    _PyStackRef *arguments;
+    if (has_dict) {
+        object_array = _PyStack_UnpackDict(thread, _PyTuple_ITEMS(callargs),
+                                         positional, kwargs, &kwnames);
+        if (object_array == NULL) {
+            PyStackRef_CLOSE(function);
+            goto retire_containers;
+        }
+        Py_ssize_t keyword_count = PyDict_GET_SIZE(kwargs);
+        arguments = (_PyStackRef *)object_array;
+        /* Exact native EX acquisition: positional values are borrowed from
+         * callargs, but keyword values already have owned unpack references. */
+        for (Py_ssize_t i = 0; i < positional; i++) {
+            arguments[i] = PyStackRef_FromPyObjectNew(object_array[i]);
+        }
+        for (Py_ssize_t i = 0; i < keyword_count; i++) {
+            arguments[positional + i] = PyStackRef_FromPyObjectSteal(object_array[positional + i]);
+        }
+    }
+    else {
+        arguments = positional <= 8 ? stack_array
+            : PyMem_Malloc(sizeof(*arguments) * (size_t)positional);
+        if (arguments == NULL) {
+            PyErr_NoMemory();
+            PyStackRef_CLOSE(function);
+            goto retire_containers;
+        }
+        for (Py_ssize_t i = 0; i < positional; i++) {
+            arguments[i] = PyStackRef_FromPyObjectNew(PyTuple_GET_ITEM(callargs, i));
+        }
+    }
+    _PySoacVMCall_BindVectorV1(call, thread, Py_SOAC_CALL_VM_EXPANDED_V1,
+                             function, NULL, arguments, positional, kwnames);
+    /* The same native bind-success and bind-error retirement phases. No
+     * Close of the stale argument transport: Bind already consumed it. */
+    if (has_dict) {
+        _PyStack_UnpackDict_FreeNoDecRef(object_array, kwnames);
+    }
+    else if (positional > 8) {
+        PyMem_Free(arguments);
+    }
+retire_containers:
+    Py_DECREF(callargs);
+    Py_XDECREF(kwargs);
+}
+
+_PyStackRef
+_PySoacVMCall_FinishV1(_PySoacVMCallV1 *call, _PyStackRef *published_stackpointer)
+{
+    assert(call != NULL);
+    if (call->state != _Py_SOAC_VM_CALL_FAILED_V1 &&
+        call->state != _Py_SOAC_VM_CALL_BOUND_V1) {
+        Py_FatalError("SOAC VM producer finished twice or with an invalid state");
+    }
+    uint32_t previous = call->state;
+    call->state = _Py_SOAC_VM_CALL_FINISHED_V1;
+    void *context = call->context;
+    call->context = NULL;
+    int pinned = call->pinned;
+    call->pinned = 0;
+    if (previous == _Py_SOAC_VM_CALL_FAILED_V1) {
+        if (call->supplied != NULL && call->supplied != call->inline_supplied) {
+            PyMem_Free(call->supplied);
+        }
+        call->supplied = NULL;
+        if (pinned) {
+            soac_source_entry_release_failed_bind(call->entry.release, context);
+        }
+        assert(PyErr_Occurred());
+        return PyStackRef_NULL;
+    }
+    assert(pinned);
+    if (_PySoacCall_MarkBodyReadyV1(&call->view, published_stackpointer) < 0) {
+        Py_FatalError("SOAC VM opcode did not establish its actual BodyReady boundary");
+    }
+    _PyStackRef result = soac_source_entry_execute_result(&call->view, call->entry.execute, context);
+    if (call->supplied != call->inline_supplied) {
+        PyMem_Free(call->supplied);
+    }
+    call->supplied = NULL;
+    return result;
+}
+
+
+/* IGNORED native22 C implementation. Insert after the frozen VM22 producer
+ * in ceval.c. No Rust body or registration is enabled by these operations. */
+
+#define SOAC_OUTGOING_INLINE_VALUES 8
+
+typedef struct {
+    _PyInterpreterFrame *frame;       /* borrowed actual current source parent */
+    _Py_CODEUNIT *instruction;        /* supplied validated original emission */
+    int instrumented;                /* form snapshot, not callback suppression */
+    PyObject *namespace_value;        /* existing resolved namespace borrow */
+} SoacOutgoingSiteV1;
+
+static int
+soac_outgoing_invalid(const char *message)
+{
+    PyErr_SetString(PyExc_ValueError, message);
+    return -1;
+}
+
+static int
+soac_outgoing_preflight(
+    const PySoacOutgoingCallContextV1 *context, size_t context_size,
+    uint32_t kind, PySoacRefV1 *operands, Py_ssize_t argument_count,
+    PySoacRefV1 *result, SoacOutgoingSiteV1 *site)
+{
+    if (!soac_call_supported()) return -1;
+    /* A call is not an error-cleanup primitive. Preserve an already pending
+     * exception and leave every input untouched, rather than running a callee
+     * with an unrelated cause installed. */
+    if (PyErr_Occurred()) return -1;
+    if (context_size != sizeof(*context) ||
+        !soac_call_range(context, context_size, _Alignof(PySoacOutgoingCallContextV1)) ||
+        context->abi_version != Py_SOAC_OUTGOING_CONTEXT_ABI_V1 || context->reserved != 0) {
+        return soac_outgoing_invalid("invalid outgoing source-call context ABI");
+    }
+    if (context->source_scope_size != sizeof(PySoacLifetimeScopeV1) ||
+        !soac_call_range(context->source_scope, context->source_scope_size,
+                         _Alignof(PySoacLifetimeScopeV1))) {
+        return soac_outgoing_invalid("invalid outgoing source-scope range");
+    }
+    if (kind < Py_SOAC_CALL_VM_POSITIONAL_V1 || kind > Py_SOAC_CALL_VM_EXPANDED_V1 ||
+        argument_count < 0 || argument_count > INT_MAX - 1) {
+        return soac_outgoing_invalid("outgoing argument count/kind is invalid or overflows native CALL");
+    }
+    size_t count = kind == Py_SOAC_CALL_VM_EXPANDED_V1 ? 4 : (size_t)argument_count + 3;
+    if (count > SIZE_MAX / sizeof(*operands) ||
+        !soac_call_range(operands, count * sizeof(*operands), _Alignof(PySoacRefV1)) ||
+        !soac_call_range(result, sizeof(*result), _Alignof(PySoacRefV1))) {
+        return soac_outgoing_invalid("invalid outgoing native-reference region");
+    }
+    size_t bytes = count * sizeof(*operands);
+    if (soac_call_overlaps(operands, bytes, result, sizeof(*result)) ||
+        soac_call_overlaps(operands, bytes, context, context_size) ||
+        soac_call_overlaps(result, sizeof(*result), context, context_size) ||
+        soac_call_overlaps(operands, bytes, context->source_scope, context->source_scope_size) ||
+        soac_call_overlaps(result, sizeof(*result), context->source_scope, context->source_scope_size)) {
+        return soac_outgoing_invalid("outgoing operand/result/context storage overlaps");
+    }
+    if (!PySoacRef_IsEmptyV1(*result)) {
+        return soac_outgoing_invalid("outgoing result slot must start Empty");
+    }
+    _PyInterpreterFrame *frame = _PyFrame_BorrowSoacLifetimeScopeV1(
+        context->source_scope, context->source_scope_size, context->source_code);
+    if (frame == NULL) return -1;
+    if (frame->soac_dataclass_invocation != NULL || frame->soac_dataclass_role != 0 ||
+        frame->soac_dataclass_checked_activation != NULL) {
+        return soac_outgoing_invalid("ordinary outgoing call cannot consume a trusted dataclass edge");
+    }
+    if (frame->f_globals == NULL || frame->f_builtins == NULL ||
+        (context->source_namespace != NULL &&
+         ((context->source_code->co_flags & CO_OPTIMIZED) ||
+          !PyMapping_Check(context->source_namespace)))) {
+        return soac_outgoing_invalid("outgoing call lacks its resolved source namespace");
+    }
+    if (PySoacRef_IsEmptyV1(operands[0])) {
+        return soac_outgoing_invalid("outgoing callable operand is Empty");
+    }
+    if (kind == Py_SOAC_CALL_VM_EXPANDED_V1) {
+        PyObject *tuple = PySoacRef_ObjectViewV1(operands[2]);
+        PyObject *dict = PySoacRef_ObjectViewV1(operands[3]);
+        if (!PySoacRef_IsEmptyV1(operands[1]) || tuple == NULL ||
+            !PyTuple_CheckExact(tuple) || (dict != NULL && !PyDict_CheckExact(dict))) {
+            return soac_outgoing_invalid("outgoing EX requires its already-prepared exact containers");
+        }
+    }
+    else {
+        PyObject *names = PySoacRef_ObjectViewV1(operands[argument_count + 2]);
+        if ((kind == Py_SOAC_CALL_VM_POSITIONAL_V1 && names != NULL) ||
+            (kind == Py_SOAC_CALL_VM_KEYWORDS_V1 &&
+             (names == NULL || !PyTuple_CheckExact(names) ||
+              PyTuple_GET_SIZE(names) > argument_count))) {
+            return soac_outgoing_invalid("outgoing CALL/KW keyword shape is invalid");
+        }
+        for (Py_ssize_t i = 0; i < argument_count; i++) {
+            if (PySoacRef_IsEmptyV1(operands[i + 2])) {
+                return soac_outgoing_invalid("outgoing argument operand is Empty");
+            }
+        }
+    }
+    site->frame = frame;
+    site->namespace_value = context->source_namespace;
+    return _PySoac_OutgoingCallSiteV1(
+        _PyThreadState_GET(), context->source_code, context->instruction_offset,
+        kind, argument_count, &site->instrumented, &site->instruction);
+}
+
+static void
+soac_outgoing_move(_PyStackRef *native, PySoacRefV1 *public, Py_ssize_t count)
+{
+    _Static_assert(sizeof(PySoacRefV1) == sizeof(_PyStackRef), "native reference size changed");
+    _Static_assert(_Alignof(PySoacRefV1) == _Alignof(_PyStackRef), "native reference alignment changed");
+    for (Py_ssize_t i = 0; i < count; i++) {
+        PySoacRefV1 moved = PySoacRef_TakeV1(&public[i]);
+        memcpy(&native[i], &moved, sizeof(native[i]));
+    }
+    /* No alias cast and no second close obligation. The public lanes are all
+     * Empty before any method/monitor/bind/finalizer callback can happen. */
+}
+
+static _PyStackRef
+soac_outgoing_take_native(_PyStackRef *slot)
+{
+    _PyStackRef result = *slot;
+    *slot = PyStackRef_NULL;
+    return result;
+}
+
+static void
+soac_outgoing_close_native(_PyStackRef *slot)
+{
+    PyStackRef_XCLOSE(soac_outgoing_take_native(slot));
+}
+
+static void
+soac_outgoing_discard_transports(_PyStackRef *slots, Py_ssize_t count)
+{
+    /* The binder/frame now owns these exact native handles. Never Close the
+     * obsolete transport values, including on a bind-error return. */
+    for (Py_ssize_t i = 0; i < count; i++) slots[i] = PyStackRef_NULL;
+}
+
+static void
+soac_outgoing_unwind_vector(_PyStackRef *slots, Py_ssize_t count)
+{
+    PyObject *pending = PyErr_GetRaisedException();
+    for (Py_ssize_t i = count; i > 0; i--) soac_outgoing_close_native(&slots[i - 1]);
+    PyErr_SetRaisedException(pending);
+}
+
+static int
+soac_outgoing_publish(_PyStackRef native, PySoacRefV1 *result)
+{
+    if (PyStackRef_IsNull(native)) {
+        assert(PyErr_Occurred());
+        return -1;
+    }
+    assert(!PyErr_Occurred() && PyStackRef_IsHeapSafe(native));
+    memcpy(result, &native, sizeof(native));
+    return 0;
+}
+
+static int
+soac_outgoing_monitor_call(SoacOutgoingSiteV1 *site,
+                           PyObject *callable, PyObject *first)
+{
+    if (!site->instrumented) return 0;
+    assert(site->instruction != NULL);
+    return _Py_call_instrumentation_2args(
+        _PyThreadState_GET(), PY_MONITORING_EVENT_CALL, site->frame,
+        site->instruction, callable, first);
+}
+
+static PyObject *
+soac_outgoing_monitor_c_result(SoacOutgoingSiteV1 *site,
+                               PyObject *callable, PyObject *first, PyObject *result)
+{
+    if (site->instrumented) {
+        if (result == NULL) {
+            _Py_call_instrumentation_exc2(_PyThreadState_GET(), PY_MONITORING_EVENT_C_RAISE,
+                                          site->frame, site->instruction, callable, first);
+        }
+        else if (_Py_call_instrumentation_2args(
+            _PyThreadState_GET(), PY_MONITORING_EVENT_C_RETURN, site->frame,
+            site->instruction, callable, first) < 0) {
+            Py_CLEAR(result);
+        }
+    }
+    return result;
+}
+
+static _PyStackRef
+soac_outgoing_custom_vector(SoacOutgoingSiteV1 *site, _PyStackRef *slots,
+                             _PyStackRef *arguments, int total, _PyStackRef *names_slot)
+{
+    /* Same borrowed object-view conversion/OFFSET room as the native CALL
+     * helper. Native scratch tokens, not new Python references, support it. */
+    PyObject *result;
+    STACKREFS_TO_PYOBJECTS(arguments, total, objects);
+    if (CONVERSION_FAILED(objects)) {
+        result = NULL;
+        goto cleanup;
+    }
+    PyObject *callable = PyStackRef_AsPyObjectBorrow(slots[0]);
+    PyObject *names = PyStackRef_AsPyObjectBorrow(*names_slot);
+    int positional = total - (names == NULL ? 0 : (int)PyTuple_GET_SIZE(names));
+    result = PySoac_VectorcallWithContext(
+        callable, objects, (size_t)positional | PY_VECTORCALL_ARGUMENTS_OFFSET,
+        names, site->frame->f_globals, site->namespace_value);
+    STACKREFS_TO_PYOBJECTS_CLEANUP(objects);
+    PyObject *first = total == 0 ? &_PyInstrumentation_MISSING
+        : PyStackRef_AsPyObjectBorrow(arguments[0]);
+    result = soac_outgoing_monitor_c_result(site, callable, first, result);
+    assert((result != NULL) ^ (PyErr_Occurred() != NULL));
+cleanup:
+    /* Native C/custom CALL closes keyword names, reverse values/self, then
+     * callable, after its result monitor. Publish each lane before Close. */
+    soac_outgoing_close_native(names_slot);
+    for (int i = total; i > 0; i--) soac_outgoing_close_native(&arguments[i - 1]);
+    soac_outgoing_close_native(&slots[0]);
+    return result == NULL ? PyStackRef_NULL : PyStackRef_FromPyObjectSteal(result);
+}
+
+PyAPI_FUNC(int)
+PySoac_CallVectorWithReferencesV1(
+    const PySoacOutgoingCallContextV1 *context, size_t context_size,
+    uint32_t kind, PySoacRefV1 *operands, Py_ssize_t argument_count,
+    PySoacRefV1 *result)
+{
+    /* Preserve an existing cause before kind, context or build validation. */
+    if (PyErr_Occurred()) return -1;
+    if (kind != Py_SOAC_CALL_VM_POSITIONAL_V1 && kind != Py_SOAC_CALL_VM_KEYWORDS_V1) {
+        return soac_outgoing_invalid("vector reference call requires CALL or CALL_KW");
+    }
+    SoacOutgoingSiteV1 site;
+    if (soac_outgoing_preflight(context, context_size, kind, operands,
+                                argument_count, result, &site) < 0) return -1;
+    Py_ssize_t count = argument_count + 3;
+    _PyStackRef inline_slots[SOAC_OUTGOING_INLINE_VALUES + 3];
+    _PyStackRef *slots = inline_slots;
+    if (argument_count > SOAC_OUTGOING_INLINE_VALUES) {
+        slots = PyMem_Malloc((size_t)count * sizeof(*slots));
+        if (slots == NULL) { PyErr_NoMemory(); return -1; }
+    }
+    soac_outgoing_move(slots, operands, count);  /* COMMIT, no callback */
+    PyThreadState *thread = _PyThreadState_GET();
+    _PyStackRef returned = PyStackRef_NULL;
+
+    /* Native _MAYBE_EXPAND_METHOD precedes CALL monitoring. Acquire its self
+     * and function before closing the old method; a weakref callback can
+     * mutate the evaluated function, so admission is still later. */
+    PyObject *callable = PyStackRef_AsPyObjectBorrow(slots[0]);
+    if (Py_TYPE(callable) == &PyMethod_Type && PyStackRef_IsNull(slots[1])) {
+        PyObject *self = PyMethod_GET_SELF(callable);
+        PyObject *function = PyMethod_GET_FUNCTION(callable);
+        slots[1] = PyStackRef_FromPyObjectNew(self);
+        _PyStackRef method = soac_outgoing_take_native(&slots[0]);
+        slots[0] = PyStackRef_FromPyObjectNew(function);
+        PyStackRef_CLOSE(method);
+        callable = PyStackRef_AsPyObjectBorrow(slots[0]);
+    }
+    int has_self = !PyStackRef_IsNull(slots[1]);
+    int total = (int)argument_count + has_self;
+    _PyStackRef *arguments = slots + (has_self ? 1 : 2);
+    _PyStackRef *names_slot = &slots[argument_count + 2];
+    PyObject *first = total == 0 ? &_PyInstrumentation_MISSING
+        : PyStackRef_AsPyObjectBorrow(arguments[0]);
+    if (soac_outgoing_monitor_call(&site, callable, first) < 0) {
+        soac_outgoing_unwind_vector(slots, count);
+        goto done;
+    }
+    /* Snapshot the same post-monitor/pre-bind dispatch choice as native VM.
+     * Do not reconsult PEP523 after keyword/default callbacks. */
+    int native_fast = Py_TYPE(callable) == &PyFunction_Type && !IS_PEP523_HOOKED(thread);
+    PyObject *names = PyStackRef_AsPyObjectBorrow(*names_slot);
+    Py_ssize_t positional = total - (names == NULL ? 0 : PyTuple_GET_SIZE(names));
+    if (native_fast && _PySoacVMCall_IsRegisteredV1(callable)) {
+        _PySoacVMCallV1 call;
+        int flags = ((PyCodeObject *)PyFunction_GET_CODE(callable))->co_flags;
+        PyObject *locals = flags & CO_OPTIMIZED ? NULL : Py_NewRef(PyFunction_GET_GLOBALS(callable));
+        _PySoacVMCall_BindVectorV1(&call, thread, kind,
+                                  soac_outgoing_take_native(&slots[0]), locals,
+                                  arguments, positional, names);
+        soac_outgoing_discard_transports(arguments, total);
+        soac_outgoing_close_native(names_slot);
+        /* Caller operand region is Empty and scope SP is its real current
+         * unchanged source-parent cursor, not a manufactured VM stack. */
+        returned = _PySoacVMCall_FinishV1(&call, site.frame->stackpointer);
+    }
+    else if (native_fast && ((PyFunctionObject *)callable)->vectorcall == _PyFunction_Vectorcall) {
+        PyCodeObject *code = (PyCodeObject *)PyFunction_GET_CODE(callable);
+        if (code->_co_soac_strict_source_id != 0) {
+            (void)soac_source_entry_unavailable("outgoing call cannot evaluate original strict bytecode");
+            soac_outgoing_unwind_vector(slots, count);
+            goto done;
+        }
+        PyObject *locals = code->co_flags & CO_OPTIMIZED ? NULL : Py_NewRef(PyFunction_GET_GLOBALS(callable));
+        _PyInterpreterFrame *callee = _PyEvalFramePushAndInit(
+            thread, soac_outgoing_take_native(&slots[0]), locals,
+            arguments, (size_t)positional, names, site.frame);
+        soac_outgoing_discard_transports(arguments, total);
+        soac_outgoing_close_native(names_slot);
+        if (callee != NULL) {
+            /* The selected VM fast path would DISPATCH_INLINED regardless of
+             * a PEP523 hook installed later during argument binding. */
+            PyObject *object = _PyEval_EvalFrameDefault(thread, callee, 0);
+            if (object != NULL) returned = PyStackRef_FromPyObjectSteal(object);
+        }
+    }
+    else {
+        returned = soac_outgoing_custom_vector(&site, slots, arguments, total, names_slot);
+    }
+done:
+    if (slots != inline_slots) PyMem_Free(slots);  /* bytes only, never Close */
+    return soac_outgoing_publish(returned, result);
+}
+
+PyAPI_FUNC(int)
+PySoac_CallPreparedWithReferencesV1(
+    const PySoacOutgoingCallContextV1 *context, size_t context_size,
+    PySoacRefV1 *operands, PySoacRefV1 *result)
+{
+    /* Preserve an existing cause before kind, context or build validation. */
+    if (PyErr_Occurred()) return -1;
+    SoacOutgoingSiteV1 site;
+    if (soac_outgoing_preflight(context, context_size, Py_SOAC_CALL_VM_EXPANDED_V1,
+                                operands, 0, result, &site) < 0) return -1;
+    _PyStackRef slots[4];
+    soac_outgoing_move(slots, operands, 4);  /* COMMIT, no callback */
+    PyThreadState *thread = _PyThreadState_GET();
+    PyObject *callable = PyStackRef_AsPyObjectBorrow(slots[0]);
+    PyObject *tuple = PyStackRef_AsPyObjectBorrow(slots[2]);
+    PyObject *kwargs = PyStackRef_AsPyObjectBorrow(slots[3]);
+    Py_ssize_t positional = PyTuple_GET_SIZE(tuple);
+    PyObject *first = positional == 0 ? &_PyInstrumentation_MISSING : PyTuple_GET_ITEM(tuple, 0);
+    if (soac_outgoing_monitor_call(&site, callable, first) < 0) {
+        soac_outgoing_unwind_vector(slots, 4);
+        return -1;
+    }
+    /* Instrumented EX deliberately never takes the consuming branch, even
+     * if callback delivery was suppressed or tools changed during CALL. */
+    int native_fast = !site.instrumented && Py_TYPE(callable) == &PyFunction_Type
+        && !IS_PEP523_HOOKED(thread);
+    _PyStackRef returned = PyStackRef_NULL;
+    if (native_fast && _PySoacVMCall_IsRegisteredV1(callable)) {
+        if (_PySoacVMCall_RequireOptimizedExpandedV1(callable) < 0) {
+            soac_outgoing_unwind_vector(slots, 4);
+            return -1;
+        }
+        PyObject *owned_tuple = PyStackRef_AsPyObjectSteal(soac_outgoing_take_native(&slots[2]));
+        PyObject *owned_kwargs = PyStackRef_IsNull(slots[3]) ? NULL
+            : PyStackRef_AsPyObjectSteal(soac_outgoing_take_native(&slots[3]));
+        _PySoacVMCallV1 call;
+        _PySoacVMCall_BindExpandedV1(&call, thread, soac_outgoing_take_native(&slots[0]),
+                                    positional, owned_tuple, owned_kwargs);
+        returned = _PySoacVMCall_FinishV1(&call, site.frame->stackpointer);
+    }
+    else if (native_fast && ((PyFunctionObject *)callable)->vectorcall == _PyFunction_Vectorcall) {
+        PyCodeObject *code = (PyCodeObject *)PyFunction_GET_CODE(callable);
+        if (code->_co_soac_strict_source_id != 0) {
+            (void)soac_source_entry_unavailable("outgoing EX cannot evaluate original strict bytecode");
+            soac_outgoing_unwind_vector(slots, 4);
+            return -1;
+        }
+        PyObject *owned_tuple = PyStackRef_AsPyObjectSteal(soac_outgoing_take_native(&slots[2]));
+        PyObject *owned_kwargs = PyStackRef_IsNull(slots[3]) ? NULL
+            : PyStackRef_AsPyObjectSteal(soac_outgoing_take_native(&slots[3]));
+        PyObject *locals = code->co_flags & CO_OPTIMIZED ? NULL : Py_NewRef(PyFunction_GET_GLOBALS(callable));
+        /* Deliberately reuse the actual ordinary helper, including its
+         * separately recorded unoptimized early-namespace failure issue. */
+        _PyInterpreterFrame *callee = _PyEvalFramePushAndInit_Ex(
+            thread, soac_outgoing_take_native(&slots[0]), locals,
+            positional, owned_tuple, owned_kwargs, site.frame);
+        if (callee != NULL) {
+            PyObject *object = _PyEval_EvalFrameDefault(thread, callee, 0);
+            if (object != NULL) returned = PyStackRef_FromPyObjectSteal(object);
+        }
+    }
+    else {
+        PyObject *object = PySoac_ObjectCallWithContext(
+            callable, tuple, kwargs, site.frame->f_globals, site.namespace_value);
+        /* This is native EX's PyFunction/PyMethod exception to C completion
+         * monitoring, not CALL/KW's unconditional custom-call rule. */
+        if (!PyFunction_Check(callable) && !PyMethod_Check(callable)) {
+            object = soac_outgoing_monitor_c_result(&site, callable, first, object);
+        }
+        soac_outgoing_close_native(&slots[3]);
+        soac_outgoing_close_native(&slots[2]);
+        soac_outgoing_close_native(&slots[0]);
+        if (object != NULL) returned = PyStackRef_FromPyObjectSteal(object);
+    }
+    return soac_outgoing_publish(returned, result);
+}
+
+
 /* Consumes references to func, locals and all the args */
 static _PyInterpreterFrame *
 eval_frame_push_and_init(PyThreadState *tstate, _PyStackRef func,
@@ -2016,7 +3173,7 @@ eval_frame_push_and_init(PyThreadState *tstate, _PyStackRef func,
     frame->soac_dataclass_checked_activation = Py_XNewRef(soac_activation);
     unsigned char *supplied = soac_activation == NULL ? NULL
         : _PySOAC_DataclassSuppliedMask(soac_activation);
-    if (initialize_locals(tstate, func_obj, frame->localsplus, args, argcount, kwnames,
+    if (initialize_locals(tstate, func_obj, code, frame->localsplus, args, argcount, kwnames,
                           supplied)) {
         assert(frame->owner == FRAME_OWNED_BY_THREAD);
         clear_thread_frame(tstate, frame);

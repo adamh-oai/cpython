@@ -20,6 +20,7 @@
 #include "pycore_pylifecycle.h"   // _PyOS_URandomNonblock()
 #include "pycore_runtime.h"       // _Py_ID()
 #include "pycore_soac_type.h"    // physical slot write/read policy
+#include "pycore_soac_vm_call_v1.h" // Explicit consuming source entry
 #include "pycore_unicodeobject.h" // _PyUnicodeASCIIIter_Type
 
 #include <stdlib.h> // rand()
@@ -2649,6 +2650,14 @@ _Py_Specialize_CallFunctionEx(_PyStackRef func_st, _Py_CODEUNIT *instr)
 
     assert(ENABLE_SPECIALIZATION);
     assert(_PyOpcode_Caches[CALL_FUNCTION_EX] == INLINE_CACHE_ENTRIES_CALL_FUNCTION_EX);
+
+    /* A source function keeps its checked custom vectorcall, but its
+     * actual VM call must use the consuming generic EX producer. */
+    if (PyFunction_Check(func) &&
+        ((PyFunctionObject *)func)->func_soac_source_entry != NULL &&
+        _PySoacVMCall_IsRegisteredV1(func)) {
+        goto failure;
+    }
 
     if (Py_TYPE(func) == &PyFunction_Type &&
         ((PyFunctionObject *)func)->vectorcall == _PyFunction_Vectorcall) {

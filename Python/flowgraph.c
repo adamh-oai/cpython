@@ -32,6 +32,7 @@ typedef struct _PyCfgInstruction {
     int i_opcode;
     int i_oparg;
     _Py_SourceLocation i_loc;
+    _PySoacReadOrigins i_soac_origins;
     struct _PyCfgBasicblock *i_target; /* target block (if jump instruction) */
     struct _PyCfgBasicblock *i_except; /* target block when exception is raised */
 } cfg_instr;
@@ -200,6 +201,7 @@ basicblock_addop(basicblock *b, int opcode, int oparg, location loc)
     i->i_opcode = opcode;
     i->i_oparg = oparg;
     i->i_loc = loc;
+    i->i_soac_origins = (_PySoacReadOrigins){{0, 0}};
     // memory is already zero initialized
     assert(i->i_target == NULL);
     assert(i->i_except == NULL);
@@ -2564,6 +2566,9 @@ make_super_instruction(cfg_instr *inst1, cfg_instr *inst2, int super_op)
     if (inst1->i_oparg >= 16 || inst2->i_oparg >= 16) {
         return;
     }
+    assert(inst1->i_soac_origins.lane[1] == 0 && inst2->i_soac_origins.lane[1] == 0);
+    inst1->i_soac_origins.lane[1] = inst2->i_soac_origins.lane[0];
+    inst2->i_soac_origins = (_PySoacReadOrigins){{0, 0}};
     INSTR_SET_OP1(inst1, super_op, (inst1->i_oparg << 4) | inst2->i_oparg);
     INSTR_SET_OP0(inst2, NOP);
 }
@@ -3898,6 +3903,7 @@ _PyCfg_FromInstructionSequence(_PyInstructionSequence *seq)
                     if (_PyCfgBuilder_Addop(g, ann_instr->i_opcode, ann_instr->i_oparg, ann_instr->i_loc) < 0) {
                         goto error;
                     }
+                    basicblock_last_instr(g->g_curblock)->i_soac_origins = ann_instr->i_soac_origins;
                 }
                 offset += seq->s_annotations_code->s_used - 1;
             }
@@ -3920,6 +3926,7 @@ _PyCfg_FromInstructionSequence(_PyInstructionSequence *seq)
         if (_PyCfgBuilder_Addop(g, opcode, oparg, instr->i_loc) < 0) {
             goto error;
         }
+        basicblock_last_instr(g->g_curblock)->i_soac_origins = instr->i_soac_origins;
     }
     if (_PyCfgBuilder_CheckSize(g) < 0) {
         goto error;
@@ -3950,6 +3957,7 @@ _PyCfg_ToInstructionSequence(cfg_builder *g, _PyInstructionSequence *seq)
                 _PyInstructionSequence_Addop(
                     seq, instr->i_opcode, instr->i_oparg, instr->i_loc));
 
+            seq->s_instrs[seq->s_used - 1].i_soac_origins = instr->i_soac_origins;
             _PyExceptHandlerInfo *hi = &seq->s_instrs[seq->s_used-1].i_except_handler_info;
             if (instr->i_except != NULL) {
                 hi->h_label = instr->i_except->b_label.id;
@@ -3997,6 +4005,25 @@ _PyCfg_OptimizedCfgToInstructionSequence(cfg_builder *g,
      * borrowed references.
      */
     RETURN_IF_ERROR(optimize_load_fast(g));
+
+    /* Observe actual final lanes only after native DUP/Borrow selection.
+     * This does not modify the CFG, locations, or instruction scheduling. */
+    if (umd->u_soac_bindings != NULL) {
+        int ordinal = 0;
+        for (basicblock *b = g->g_entryblock; b != NULL; b = b->b_next) {
+            for (int i = 0; i < b->b_iused; i++) {
+                if (ordinal == INT_MAX) {
+                    PyErr_SetString(PyExc_OverflowError, "native reference CFG is too large");
+                    return ERROR;
+                }
+                cfg_instr *instruction = &b->b_instr[i];
+                RETURN_IF_ERROR(_PyCompile_SoacFinalReferenceInstruction(
+                    umd, ordinal++, instruction->i_opcode, instruction->i_oparg,
+                    instruction->i_soac_origins));
+            }
+        }
+        RETURN_IF_ERROR(_PyCompile_SoacFinishReferences(umd, ordinal));
+    }
 
     /* Can't modify the bytecode after computing jump offsets. */
     if (_PyCfg_ToInstructionSequence(g, seq) < 0) {

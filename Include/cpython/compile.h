@@ -54,14 +54,14 @@ PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSource(
     const char *source, Py_ssize_t length, PyObject *filename, int optimize);
 
 /* Compile the same authenticated source once, returning (code, strings,
- * (Py_SOAC_CLASS_BINDINGS_SCHEMA, nodes, class_recipes)). All containers are
+ * (Py_SOAC_CLASS_BINDINGS_SCHEMA, nodes, class_recipes, read_tables)). All containers are
  * exact immutable tuples. Each node refers to an exact member of code's final
  * constant tree; metadata never authorizes execution of that member.
  * strings is an exact tuple of (line, column, end_line, end_column, text)
  * entries for future-stringized annotations in that native AST. The returned
  * ordinary data is not an execution or optimizer capability.
  *
- * Version 1 tuple rows (IDs are nonnegative, optional values are None):
+ * Version 2 preserves these class rows (IDs nonnegative, optional values None):
  * node = (id, parent_id, exact_code, scope_kind, symtable_kind, source_span)
  * recipe = (class_id, owners, initializers, regions, captures, exports, accesses)
  * owner = (id, kind, final_localsplus_index, native_kind_byte, region_id)
@@ -85,7 +85,36 @@ PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSourceDetails(
     const char *source, Py_ssize_t length, PyObject *filename, int optimize);
 
 /* Fixed wire values, independent of internal compiler enum numbering. */
-#define Py_SOAC_CLASS_BINDINGS_SCHEMA 1
+#define Py_SOAC_CLASS_BINDINGS_SCHEMA 2
+/* Native reference receipts share the same final code-node tree.
+ * table = (code_id, final_CFG_instruction_count, reads, gaps)
+ * read = (original_Name_span, emissions), including zero-emission dead sites
+ * emission = (ordinal, form, first_slot, second_slot_or_None, lane,
+ *             preceding_binding_origin_or_None)
+ * binding_origin = (kind, original_AST_span), never guessed from i_loc
+ * gap = (reason, original_Name_span_or_None, ordinal_or_None,
+ *        lane_or_None, native_opcode_or_None)
+ * A missing, unsupported, divergent or paired-only receipt cannot select a
+ * standalone reference operation. Gap opcodes are pinned diagnostic data.
+ * All ordinals precede assembler expansion and are not runtime positions. */
+#define Py_SOAC_READ_FAST_DUPLICATE 0
+#define Py_SOAC_READ_FAST_CHECKED_DUPLICATE 1
+#define Py_SOAC_READ_FAST_BORROW 2
+#define Py_SOAC_READ_FAST_PAIR_DUPLICATE 3
+#define Py_SOAC_READ_FAST_PAIR_BORROW 4
+#define Py_SOAC_READ_STORE_FAST_LOAD_FAST 5
+#define Py_SOAC_BINDING_NAME 0
+#define Py_SOAC_BINDING_FUNCTION 1
+#define Py_SOAC_BINDING_ASYNC_FUNCTION 2
+#define Py_SOAC_BINDING_CLASS 3
+#define Py_SOAC_BINDING_IMPORT_ALIAS 4
+#define Py_SOAC_BINDING_IMPORT_FROM_ALIAS 5
+#define Py_SOAC_BINDING_EXCEPT_ALIAS 6
+#define Py_SOAC_READ_GAP_ELIMINATED 0
+#define Py_SOAC_READ_GAP_UNSUPPORTED 1
+#define Py_SOAC_READ_GAP_MISSING_ORIGIN 2
+#define Py_SOAC_READ_GAP_MISSING_STORE 3
+#define Py_SOAC_READ_GAP_DIVERGENT 4
 #define Py_SOAC_SCOPE_MODULE 0
 #define Py_SOAC_SCOPE_CLASS 1
 #define Py_SOAC_SCOPE_FUNCTION 2
