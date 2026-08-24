@@ -273,6 +273,63 @@ class TestFunctionAttributeCallbackStack(unittest.TestCase):
             )
 
 
+class TestOrdinaryInstancePolicyGuard(unittest.TestCase):
+    """Mandatory ordinary-storage writes are not type-version capabilities."""
+
+    def test_actual_store_macros_keep_independent_policy_guard(self):
+        analysis = analyzer.analyze_files([
+            os.path.join(test_tools.basepath, "Python", "bytecodes.c")
+        ])
+        guard = analysis.uops["_GUARD_NO_ORDINARY_INSTANCE_WRITES"]
+        self.assertFalse(guard.properties.escapes)
+        self.assertTrue(guard.properties.side_exit)
+        self.assertEqual([item.name for item in guard.stack.inputs], ["owner"])
+        self.assertEqual([item.name for item in guard.stack.outputs], ["owner"])
+        for instruction, writer in (
+            ("STORE_ATTR_INSTANCE_VALUE", "_STORE_ATTR_INSTANCE_VALUE"),
+            ("STORE_ATTR_WITH_HINT", "_STORE_ATTR_WITH_HINT"),
+        ):
+            with self.subTest(instruction=instruction):
+                parts = [
+                    part.name for part in analysis.instructions[instruction].parts
+                    if isinstance(part, analyzer.Uop)
+                ]
+                self.assertEqual(parts.count(guard.name), 1)
+                self.assertLess(parts.index(guard.name), parts.index(writer))
+                if "_GUARD_TYPE_VERSION_AND_LOCK" in parts:
+                    self.assertLess(
+                        parts.index(guard.name),
+                        parts.index("_GUARD_TYPE_VERSION_AND_LOCK"),
+                    )
+
+    def test_policy_query_is_pure_but_selected_validator_can_escape(self):
+        query = analyzer.analyze_forest(parse_src("""
+            op(TEST, (owner -- owner)) {
+                PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
+                EXIT_IF(_PySOAC_HasOrdinaryInstanceWrites(tp));
+            }
+        """)).uops["TEST"]
+        self.assertFalse(query.properties.escapes)
+        validation = analyzer.analyze_forest(parse_src("""
+            op(TEST, (owner -- owner)) {
+                int err = _PySOAC_CheckInlineInstanceWrite(
+                    PyStackRef_AsPyObjectBorrow(owner), name, value);
+                ERROR_IF(err < 0);
+            }
+        """)).uops["TEST"]
+        self.assertIn(
+            "_PySOAC_CheckInlineInstanceWrite",
+            {call.call.text for call in validation.properties.escaping_calls.values()},
+        )
+        with self.assertRaises(SyntaxError):
+            analyzer.analyze_forest(parse_src("""
+                op(TEST, (owner -- owner)) {
+                    EXIT_IF(_PySOAC_CheckInlineInstanceWrite(
+                        PyStackRef_AsPyObjectBorrow(owner), name, value));
+                }
+            """))
+
+
 class TestGeneratedCases(unittest.TestCase):
     def setUp(self) -> None:
         super().setUp()
