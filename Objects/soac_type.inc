@@ -1345,6 +1345,35 @@ _PySOAC_ClearDataclassSlotsHandle(PyObject *object)
     PyErr_SetRaisedException(exception);
 }
 
+/* Preparation may fail while the pending allocation barrier is still closed.
+ * Its one provider reference is the future existing state edge, temporarily
+ * owned by the C caller. On failure that caller publishes terminal state before
+ * retiring it. The actual permanent namespace policy was installed first. */
+static int
+soac_prepare_type_seal(PyTypeObject *type, PyObject **provider_out)
+{
+    *provider_out = NULL;
+    PyObject *dict = type->tp_dict;
+    PyObject *provider = PyDict_GetItemWithError(dict, &_Py_ID(__annotate__));
+    if (provider == NULL && !PyErr_Occurred()) {
+        provider = PyDict_GetItemWithError(dict, &_Py_ID(__annotate_func__));
+    }
+    if (provider == NULL && PyErr_Occurred()) return -1;
+    *provider_out = Py_NewRef(provider != NULL ? provider : Py_None);
+    return PyDict_SealSoacNamespace(dict);
+}
+
+/* This MOVE and scalar publication cannot allocate, release or run Python.
+ * Pending admission performs it before ENFORCED, so no supported allocator can
+ * observe an admitted class with an unsealed namespace/provider association. */
+static void
+soac_commit_type_seal(SoacTypeContract *state, PyObject *provider)
+{
+    assert(!state->sealed && state->annotation_provider == NULL && provider != NULL);
+    state->annotation_provider = provider;
+    state->sealed = 1;
+}
+
 #include "soac_type_pending.inc"
 
 int
@@ -1424,20 +1453,18 @@ PyType_SealSoacContract(PyObject *object, PyObject *owner)
     if (state->sealed) {
         return 0;
     }
-    PyObject *dict = ((PyTypeObject *)object)->tp_dict;
-    PyObject *provider = PyDict_GetItemWithError(dict, &_Py_ID(__annotate__));
-    if (provider == NULL && !PyErr_Occurred()) {
-        provider = PyDict_GetItemWithError(dict, &_Py_ID(__annotate_func__));
+    if (state->construction != NULL &&
+        soac_type_phase(state) != Py_SOAC_TYPE_STATE_ENFORCED) {
+        return soac_type_state_error("pending class sealing belongs to final admission");
     }
-    if (provider == NULL && PyErr_Occurred()) {
+    PyObject *provider = NULL;
+    if (soac_prepare_type_seal((PyTypeObject *)object, &provider) < 0) {
+        PyObject *error = PyErr_GetRaisedException();
+        Py_XDECREF(provider);
+        PyErr_SetRaisedException(error);
         return -1;
     }
-    state->annotation_provider = Py_NewRef(provider != NULL ? provider : Py_None);
-    if (PyDict_SealSoacNamespace(((PyTypeObject *)object)->tp_dict) < 0) {
-        Py_CLEAR(state->annotation_provider);
-        return -1;
-    }
-    state->sealed = 1;
+    soac_commit_type_seal(state, provider);
     return 0;
 }
 

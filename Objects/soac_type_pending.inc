@@ -153,6 +153,7 @@ PyType_AdmitSoacPendingV1(PyObject *object, PyObject *owner, PyObject *expected_
     root->lineage_phase = SOAC_LINEAGE_ADMITTING;
     state->phase = Py_SOAC_TYPE_STATE_ADMITTING;
     SoacTypeContract *prepared = NULL;
+    PyObject *seal_provider = NULL;  /* future state edge, not another owner */
     /* An ordinary layout is never changed late to fit an indexed factory.
      * The separately reviewed ordinary-storage mode supplies its own join. */
     if (inputs.dictionary_mode == Py_SOAC_INSTANCE_DICT_INDEXED &&
@@ -194,11 +195,17 @@ PyType_AdmitSoacPendingV1(PyObject *object, PyObject *owner, PyObject *expected_
     if (PyErr_Occurred() || soac_admission_live(type, state, root, owner) < 0 ||
         soac_validate_final_slot_views(state, type) < 0) goto failed;
 
-    /* All allocations, cache notifications and callback-capable preparation
-     * precede this final hook. Success must be allocation/Python/release-free. */
+    if (soac_prepare_type_seal(type, &seal_provider) < 0 ||
+        soac_admission_live(type, state, root, owner) < 0) goto failed;
+
+    /* All allocations, cache notifications, namespace sealing and provider
+     * preparation precede this final hook. Success must be allocation/Python/
+     * release-free. No later caller seal can stand in for this publication. */
     int status = state->commit_final(owner, object, &inputs);
     if (status != 0 || PyErr_Occurred() ||
         soac_admission_live(type, state, root, owner) < 0) goto failed;
+    soac_commit_type_seal(state, seal_provider);
+    seal_provider = NULL;  /* MOVE committed before opening allocation */
     root->selected = state;  /* comparison-only; no strong type backedge */
     root->lineage_phase = SOAC_LINEAGE_RESOLVED;
     state->phase = Py_SOAC_TYPE_STATE_ENFORCED;
@@ -213,6 +220,7 @@ failed:
     soac_type_state_error("pending final admission failed");
     PyObject *error = PyErr_GetRaisedException();
     Py_XDECREF(prepared);
+    Py_XDECREF(seal_provider);
     soac_release_contract_inputs(&inputs);
     PyErr_SetRaisedException(error);
     return -1;
