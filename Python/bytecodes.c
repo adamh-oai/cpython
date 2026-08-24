@@ -5307,20 +5307,22 @@ dummy_func(
             PyObject **ptr = (PyObject **)(((char *)func) + offset);
             assert(*ptr == NULL);
             *ptr = attr;
+            /* MOVE the actual function token to the output before the
+             * escaping callback publishes the compacted operand stack. */
+            func_out = func_in;
+            DEAD(func_in);
             if (frame->soac_checked_activation != NULL) {
                 int err = _PySOAC_InterpreterFunctionAttribute(
                     frame, soac_instr, (PyFunctionObject *)func,
                     (uint32_t)oparg, attr);
                 if (err < 0) {
                     /* attr has moved into the function; keep its actual
-                     * function input live for the ordinary error unwind. */
+                     * function output live for the ordinary error unwind. */
                     ERROR_NO_POP();
                 }
             }
             /* The callback may replace attr: do not read that borrowed
              * installed value again after the publication event. */
-            func_out = func_in;
-            DEAD(func_in);
         }
 
         inst(RETURN_GENERATOR, (-- res)) {

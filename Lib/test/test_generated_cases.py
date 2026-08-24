@@ -201,6 +201,78 @@ class TestDefaultEvalFrameSelection(unittest.TestCase):
         self.assertEqual(instruction.parts[0].stack.outputs, [])
 
 
+class TestFunctionAttributeCallbackStack(unittest.TestCase):
+    """Validate the actual callback's token stack, not rendered native C."""
+
+    def test_real_attribute_callback_publishes_function_output(self):
+        analysis = analyzer.analyze_files([
+            os.path.join(test_tools.basepath, "Python", "bytecodes.c")
+        ])
+        instruction = analysis.instructions["SET_FUNCTION_ATTRIBUTE"]
+        self.assertEqual(len(instruction.parts), 1)
+        uop = instruction.parts[0]
+        self.assertIsInstance(uop, analyzer.Uop)
+        self.assertIn(
+            "_PySOAC_InterpreterFunctionAttribute",
+            {call.call.text for call in uop.properties.escaping_calls.values()},
+        )
+
+        class ErrorStackEmitter(tier1_generator.Emitter):
+            def __init__(self):
+                super().__init__(CWriter.null(), analysis.labels)
+                self.callback_errors = []
+
+            def error_no_pop(self, token, tokens, uop, storage, instruction):
+                self.callback_errors.append(storage.copy())
+                return super().error_no_pop(
+                    token, tokens, uop, storage, instruction
+                )
+
+        emitter = ErrorStackEmitter()
+        reachable, _, stack = tier1_generator.write_uop(
+            uop, emitter, 1, Stack(), instruction, False
+        )
+        self.assertTrue(reachable)
+        self.assertEqual([local.name for local in stack.variables], ["func_out"])
+        self.assertEqual(stack.logical_sp.as_int(), -1)
+
+        # Failure must unwind the same published function token, with the
+        # attribute already owned by that function and neither input live.
+        self.assertEqual(len(emitter.callback_errors), 1)
+        error = emitter.callback_errors[0]
+        self.assertEqual(error.inputs, [])
+        self.assertEqual(error.outputs, [])
+        self.assertEqual(
+            [local.name for local in error.stack.variables], ["func_out"]
+        )
+        self.assertTrue(error.stack.variables[0].in_memory())
+        self.assertEqual(error.stack.physical_sp, error.stack.logical_sp)
+        self.assertEqual(error.spilled, 0)
+
+    def test_dead_attribute_below_live_function_still_refuses_spill(self):
+        analysis = analyzer.analyze_forest(parse_src("""
+            inst(TEST, (attr_st, func_in -- func_out)) {
+                PyObject *func = PyStackRef_AsPyObjectBorrow(func_in);
+                PyObject *attr = PyStackRef_AsPyObjectSteal(attr_st);
+                int err = _PySOAC_InterpreterFunctionAttribute(
+                    frame, frame->instr_ptr, (PyFunctionObject *)func, 1, attr);
+                if (err < 0) {
+                    ERROR_NO_POP();
+                }
+                func_out = func_in;
+                DEAD(func_in);
+            }
+        """))
+        instruction = analysis.instructions["TEST"]
+        emitter = tier1_generator.Emitter(CWriter.null(), analysis.labels)
+        with self.assertRaisesRegex(
+            SyntaxError, "Input 'attr_st' is not live, but 'func_in' is"
+        ):
+            tier1_generator.write_uop(
+                instruction.parts[0], emitter, 1, Stack(), instruction, False
+            )
+
+
 class TestGeneratedCases(unittest.TestCase):
     def setUp(self) -> None:
         super().setUp()
