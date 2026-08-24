@@ -30,6 +30,7 @@ skip_if_different_mount_drives()
 test_tools.skip_if_missing("cases_generator")
 with test_tools.imports_under_tool("cases_generator"):
     from analyzer import StackItem
+    import analyzer
     from cwriter import CWriter
     import parser
     from stack import Local, Stack
@@ -74,6 +75,130 @@ class TestEffects(unittest.TestCase):
         self.assertEqual(stack.base_offset.to_c(), "-1 - oparg - oparg*2")
         self.assertEqual(stack.physical_sp.to_c(), "0")
         self.assertEqual(stack.logical_sp.to_c(), "1 - oparg - oparg*2 + oparg*4")
+
+
+class TestDefaultEvalFrameSelection(unittest.TestCase):
+    """Inspect real generator operations, never rendered native C."""
+
+    @staticmethod
+    def analyze_macro(sequence):
+        source = """
+            op(_CHECK_PEP_523, (--)) { DEOPT_IF(IS_PEP523_HOOKED(tstate)); }
+            op(_PY_FRAME_GENERAL, (-- frame)) { frame = PyStackRef_NULL; }
+            op(_UNKNOWN_FRAME, (-- frame)) { frame = PyStackRef_NULL; }
+            op(_SAVE_RETURN_OFFSET, (frame -- frame)) { }
+            op(_PUSH_FRAME, (frame --)) { DEAD(frame); }
+            macro(TEST) = """ + sequence + ";"
+        return analyzer.analyze_forest(parse_src(source))
+
+    def test_real_push_frame_macros_keep_their_preproducer_guard(self):
+        analysis = analyzer.analyze_files([
+            os.path.join(test_tools.basepath, "Python", "bytecodes.c")
+        ])
+        self.assertTrue(analysis.uops["_CHECK_PEP_523"].properties.deopts)
+        expected = {
+            "BINARY_OP_SUBSCR_GETITEM": "_BINARY_OP_SUBSCR_INIT_CALL",
+            "SEND_GEN": "_SEND_GEN_FRAME",
+            "LOAD_ATTR_PROPERTY": "_LOAD_ATTR_PROPERTY_FRAME",
+            "FOR_ITER_GEN": "_FOR_ITER_GEN_FRAME",
+            "CALL_PY_GENERAL": "_PY_FRAME_GENERAL",
+            "CALL_BOUND_METHOD_GENERAL": "_PY_FRAME_GENERAL",
+            "CALL_BOUND_METHOD_EXACT_ARGS": "_INIT_CALL_PY_EXACT_ARGS",
+            "CALL_PY_EXACT_ARGS": "_INIT_CALL_PY_EXACT_ARGS",
+            "CALL_ALLOC_AND_ENTER_INIT": "_CREATE_INIT_FRAME",
+            "CALL_KW_PY": "_PY_FRAME_KW",
+            "CALL_KW_BOUND_METHOD": "_PY_FRAME_KW",
+            "CALL_EX_PY": "_PY_FRAME_EX",
+        }
+        actual = {}
+        for instruction in analysis.instructions.values():
+            parts = [
+                part.replicates or part
+                for part in instruction.parts if isinstance(part, analyzer.Uop)
+            ]
+            names = [part.name for part in parts]
+            if "_PUSH_FRAME" not in names:
+                continue
+            self.assertIn(instruction.name, expected, "new producer needs explicit audit")
+            producer = expected[instruction.name]
+            self.assertEqual(names.count("_PUSH_FRAME"), 1)
+            self.assertEqual(names.count(producer), 1)
+            self.assertLess(names.index("_CHECK_PEP_523"), names.index(producer))
+            self.assertLess(names.index(producer), names.index("_PUSH_FRAME"))
+            actual[instruction.name] = producer
+        self.assertEqual(actual, expected, "exercise every actual native push path")
+
+    def test_known_guarded_producer_is_accepted(self):
+        analysis = self.analyze_macro(
+            "_CHECK_PEP_523 + _PY_FRAME_GENERAL + _SAVE_RETURN_OFFSET + _PUSH_FRAME"
+        )
+        self.assertEqual(
+            [part.name for part in analysis.instructions["TEST"].parts],
+            ["_CHECK_PEP_523", "_PY_FRAME_GENERAL", "_SAVE_RETURN_OFFSET", "_PUSH_FRAME"],
+        )
+
+    def test_missing_guard_is_rejected(self):
+        with self.assertRaises(SyntaxError):
+            self.analyze_macro("_PY_FRAME_GENERAL + _PUSH_FRAME")
+
+    def test_guard_after_callback_capable_producer_is_rejected(self):
+        with self.assertRaises(SyntaxError):
+            self.analyze_macro("_PY_FRAME_GENERAL + _CHECK_PEP_523 + _PUSH_FRAME")
+
+    def test_unknown_frame_producer_is_rejected(self):
+        with self.assertRaises(SyntaxError):
+            self.analyze_macro("_CHECK_PEP_523 + _UNKNOWN_FRAME + _PUSH_FRAME")
+
+    def test_intervening_unknown_operation_is_rejected(self):
+        with self.assertRaises(SyntaxError):
+            self.analyze_macro(
+                "_CHECK_PEP_523 + _PY_FRAME_GENERAL + _UNKNOWN_FRAME + _PUSH_FRAME"
+            )
+
+    def test_choice_and_producer_cannot_be_reused_by_a_second_push(self):
+        with self.assertRaises(SyntaxError):
+            self.analyze_macro(
+                "_CHECK_PEP_523 + _PY_FRAME_GENERAL + _PUSH_FRAME"
+                " + _PY_FRAME_GENERAL + _PUSH_FRAME"
+            )
+
+    def test_replicated_producer_requires_actual_replica_origin(self):
+        guarded = """
+            op(_CHECK_PEP_523, (--)) { DEOPT_IF(IS_PEP523_HOOKED(tstate)); }
+            op(_PUSH_FRAME, (frame --)) { DEAD(frame); }
+        """
+        source = guarded + """
+            replicate(2) op(_INIT_CALL_PY_EXACT_ARGS, (-- frame)) {
+                frame = PyStackRef_NULL;
+            }
+            macro(TEST) =
+                _CHECK_PEP_523 + _INIT_CALL_PY_EXACT_ARGS_0 + _PUSH_FRAME;
+        """
+        analysis = analyzer.analyze_forest(parse_src(source))
+        self.assertIs(
+            analysis.instructions["TEST"].parts[1].replicates,
+            analysis.uops["_INIT_CALL_PY_EXACT_ARGS"],
+        )
+        with self.assertRaises(SyntaxError):
+            analyzer.analyze_forest(parse_src(guarded + """
+                op(_INIT_CALL_PY_EXACT_ARGS_0, (-- frame)) {
+                    frame = PyStackRef_NULL;
+                }
+                macro(TEST) =
+                    _CHECK_PEP_523 + _INIT_CALL_PY_EXACT_ARGS_0 + _PUSH_FRAME;
+            """))
+
+    def test_dispatch_with_explicit_choice_retains_exit_properties(self):
+        analysis = analyzer.analyze_forest(parse_src("""
+            inst(TEST, (--)) {
+                DISPATCH_INLINED(new_frame, eval_frame_before_binding);
+            }
+        """))
+        instruction = analysis.instructions["TEST"]
+        self.assertTrue(instruction.properties.always_exits)
+        self.assertTrue(instruction.properties.needs_guard_ip)
+        self.assertEqual(instruction.parts[0].stack.inputs, [])
+        self.assertEqual(instruction.parts[0].stack.outputs, [])
 
 
 class TestGeneratedCases(unittest.TestCase):

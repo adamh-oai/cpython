@@ -1313,6 +1313,63 @@ def get_instruction_size_for_uop(instructions: dict[str, Instruction], uop: Uop)
     return size
 
 
+# These are actual native frame-producing operations, not value/variable-name
+# matches. A new producer must supply the same committed default-evaluator
+# invariant before it can feed _PUSH_FRAME.
+_DEFAULT_EVAL_FRAME_PRODUCERS = frozenset({
+    "_BINARY_OP_SUBSCR_INIT_CALL",
+    "_SEND_GEN_FRAME",
+    "_LOAD_ATTR_PROPERTY_FRAME",
+    "_FOR_ITER_GEN_FRAME",
+    "_PY_FRAME_GENERAL",
+    "_INIT_CALL_PY_EXACT_ARGS",
+    "_CREATE_INIT_FRAME",
+    "_PY_FRAME_KW",
+    "_PY_FRAME_EX",
+})
+
+
+def _validate_default_eval_frame_pushes(instruction: Instruction) -> None:
+    parts = [
+        part.replicates or part
+        for part in instruction.parts if isinstance(part, Uop)
+    ]
+    if not any(part.name == "_PUSH_FRAME" for part in parts):
+        return
+    guarded = False
+    producer: Uop | None = None
+    for part in parts:
+        name = part.name
+        if name == "_CHECK_PEP_523":
+            if producer is not None:
+                raise analysis_error(
+                    "Default evaluator guard must precede the frame producer",
+                    instruction.where,
+                )
+            guarded = True
+        elif name in _DEFAULT_EVAL_FRAME_PRODUCERS:
+            if not guarded or producer is not None:
+                raise analysis_error(
+                    "Frame producer requires its own prior default evaluator guard",
+                    instruction.where,
+                )
+            producer = part
+        elif name == "_PUSH_FRAME":
+            if not guarded or producer is None:
+                raise analysis_error(
+                    "_PUSH_FRAME requires a guarded, known frame producer",
+                    instruction.where,
+                )
+            # The choice belongs to this one frame entry, not a later push.
+            guarded = False
+            producer = None
+        elif producer is not None and name != "_SAVE_RETURN_OFFSET":
+            raise analysis_error(
+                "Unrepresented operation between a frame producer and _PUSH_FRAME",
+                instruction.where,
+            )
+
+
 def analyze_forest(forest: list[parser.AstNode]) -> Analysis:
     instructions: dict[str, Instruction] = {}
     uops: dict[str, Uop] = {}
@@ -1340,6 +1397,8 @@ def analyze_forest(forest: list[parser.AstNode]) -> Analysis:
     for node in forest:
         if isinstance(node, parser.Macro):
             add_macro(node, instructions, uops)
+    for instruction in instructions.values():
+        _validate_default_eval_frame_pushes(instruction)
     for node in forest:
         match node:
             case parser.Family():

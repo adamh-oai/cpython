@@ -220,9 +220,14 @@ do { \
         DISPATCH_GOTO_NON_TRACING(); \
     }
 
-#define DISPATCH_INLINED(NEW_FRAME)                     \
+/* Assert the evaluator chosen by the producer, not mutable interpreter state.
+ * Binding can call Python and install a hook after a default call was selected.
+ * The choice is a C local only; it is never a Python-stack or frame payload. */
+#define DISPATCH_INLINED(NEW_FRAME, EVAL_FRAME)          \
     do {                                                \
-        assert(tstate->interp->eval_frame == NULL);     \
+        _PyFrameEvalFunction _dispatch_eval_frame = (EVAL_FRAME); \
+        assert(_dispatch_eval_frame == NULL);           \
+        (void)_dispatch_eval_frame;                     \
         _PyFrame_SetStackPointer(frame, stack_pointer); \
         assert((NEW_FRAME)->previous == frame);         \
         frame = tstate->current_frame = (NEW_FRAME);     \

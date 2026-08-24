@@ -1388,7 +1388,7 @@ dummy_func(
                 frame->return_offset = (uint16_t)(INSTRUCTION_SIZE + oparg);
                 assert(gen_frame->previous == NULL);
                 gen_frame->previous = frame;
-                DISPATCH_INLINED(gen_frame);
+                DISPATCH_INLINED(gen_frame, tstate->interp->eval_frame);
             }
             if (PyStackRef_IsNone(v) && PyIter_Check(receiver_o)) {
                 retval_o = Py_TYPE(receiver_o)->tp_iternext(receiver_o);
@@ -2632,7 +2632,7 @@ dummy_func(
             SYNC_SP();
             new_frame->localsplus[1] = PyStackRef_FromPyObjectNew(name);
             frame->return_offset = INSTRUCTION_SIZE;
-            DISPATCH_INLINED(new_frame);
+            DISPATCH_INLINED(new_frame, tstate->interp->eval_frame);
         }
 
         op(_GUARD_DORV_NO_DICT, (owner -- owner)) {
@@ -3813,11 +3813,13 @@ dummy_func(
                 ERROR_IF(PyStackRef_IsNull(res));
             }
             else {
-                // Check if the call can be inlined or not
+                // Check if the call can be inlined or not. The entered branch
+                // commits this evaluator before any callback-capable binding.
+                _PyFrameEvalFunction eval_frame_before_binding;
                 if (Py_TYPE(callable_o) == &PyFunction_Type &&
                     (frame->soac_dataclass_checked_activation == NULL ||
                      !_PySOAC_DataclassHasValueSite(frame)) &&
-                    !IS_PEP523_HOOKED(tstate) &&
+                    (eval_frame_before_binding = tstate->interp->eval_frame) == NULL &&
                     ((PyFunctionObject *)callable_o)->vectorcall == _PyFunction_Vectorcall)
                 {
                     int code_flags = ((PyCodeObject*)PyFunction_GET_CODE(callable_o))->co_flags;
@@ -3837,7 +3839,7 @@ dummy_func(
                         ERROR_NO_POP();
                     }
                     frame->return_offset = INSTRUCTION_SIZE;
-                    DISPATCH_INLINED(new_frame);
+                    DISPATCH_INLINED(new_frame, eval_frame_before_binding);
                 }
                 PyObject* res_o = _Py_VectorCallInstrumentation_StackRefSteal(
                     callable,
@@ -4053,7 +4055,12 @@ dummy_func(
         }
 
         op(_PUSH_FRAME, (new_frame -- )) {
-            assert(!IS_PEP523_HOOKED(tstate));
+            /* The generator validates _CHECK_PEP_523 before this frame's
+             * producer. Binding can install a hook after that committed
+             * default choice, so the live interpreter field is not an
+             * invariant here. Tier 2 retains the same choice through its
+             * existing executor-invalidation rule. No C pointer is carried
+             * on the Python stack to re-prove this compile-time fact. */
             _PyInterpreterFrame *temp = PyStackRef_Unwrap(new_frame);
             DEAD(new_frame);
             SYNC_SP();
@@ -4741,11 +4748,13 @@ dummy_func(
                 ERROR_IF(PyStackRef_IsNull(res));
             }
             else {
-                // Check if the call can be inlined or not
+                // Check if the call can be inlined or not. The entered branch
+                // commits this evaluator before any callback-capable binding.
+                _PyFrameEvalFunction eval_frame_before_binding;
                 if (Py_TYPE(callable_o) == &PyFunction_Type &&
                     (frame->soac_dataclass_checked_activation == NULL ||
                      !_PySOAC_DataclassHasValueSite(frame)) &&
-                    !IS_PEP523_HOOKED(tstate) &&
+                    (eval_frame_before_binding = tstate->interp->eval_frame) == NULL &&
                     ((PyFunctionObject *)callable_o)->vectorcall == _PyFunction_Vectorcall)
                 {
                     int code_flags = ((PyCodeObject*)PyFunction_GET_CODE(callable_o))->co_flags;
@@ -4767,7 +4776,7 @@ dummy_func(
                     }
                     assert(INSTRUCTION_SIZE == 1 + INLINE_CACHE_ENTRIES_CALL_KW);
                     frame->return_offset = INSTRUCTION_SIZE;
-                    DISPATCH_INLINED(new_frame);
+                    DISPATCH_INLINED(new_frame, eval_frame_before_binding);
                 }
                 PyObject* res_o = _Py_VectorCallInstrumentation_StackRefSteal(
                     callable,
@@ -5023,8 +5032,9 @@ dummy_func(
                     }
                 }
                 else {
+                    _PyFrameEvalFunction eval_frame_before_binding;
                     if (Py_TYPE(func) == &PyFunction_Type &&
-                        !IS_PEP523_HOOKED(tstate) &&
+                        (eval_frame_before_binding = tstate->interp->eval_frame) == NULL &&
                         ((PyFunctionObject *)func)->vectorcall == _PyFunction_Vectorcall) {
                         PyObject *callargs = PyStackRef_AsPyObjectSteal(callargs_st);
                         assert(PyTuple_CheckExact(callargs));
@@ -5045,7 +5055,7 @@ dummy_func(
                         }
                         assert(INSTRUCTION_SIZE == 1 + INLINE_CACHE_ENTRIES_CALL_FUNCTION_EX);
                         frame->return_offset = INSTRUCTION_SIZE;
-                        DISPATCH_INLINED(new_frame);
+                        DISPATCH_INLINED(new_frame, eval_frame_before_binding);
                     }
                     PyObject *callargs = PyStackRef_AsPyObjectBorrow(callargs_st);
                     assert(PyTuple_CheckExact(callargs));
