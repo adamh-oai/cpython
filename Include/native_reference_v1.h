@@ -177,6 +177,8 @@ typedef int (*PySoacExecuteSourceCallV1)(
 typedef struct {
     uint32_t abi_version;
     uint32_t reserved;
+    /* Exact identity installed with the attached source owner, never the
+     * legacy unchecked func_soac_function_id. Not execution authority. */
     uint64_t expected_function_id;
     uint64_t expected_strict_id;
     PyCodeObject *expected_code;

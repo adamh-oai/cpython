@@ -27,14 +27,16 @@ soac_source_entry_matches(PyFunctionObject *function,
 {
     /* Check borrowed identities against their live owning fields before
      * following code. Code's verified-source stamp proves original native
-     * provenance, not Rust-body correspondence or execution authority. */
+     * provenance, not Rust-body correspondence or execution authority.
+     * The owner ID is installed with that actual one-shot owner, not the
+     * old unchecked direct-call field (which may correctly remain zero). */
     if (function->func_soac_strict_owner_state != FUNC_SOAC_OWNER_ATTACHED ||
         function->func_soac_strict_owner == NULL ||
         function->func_soac_strict_owner != spec->expected_owner ||
         function->func_soac_metadata == NULL ||
         function->func_soac_metadata != spec->expected_metadata ||
-        function->func_soac_function_id == 0 ||
-        function->func_soac_function_id != spec->expected_function_id ||
+        function->func_soac_source_owner_id == 0 ||
+        function->func_soac_source_owner_id != spec->expected_function_id ||
         function->func_soac_strict_id != spec->expected_strict_id ||
         function->func_code != (PyObject *)spec->expected_code ||
         function->vectorcall == NULL ||

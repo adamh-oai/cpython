@@ -236,10 +236,11 @@ PyFunction_GetSoacStrictId(PyObject *object)
     return ((PyFunctionObject *)object)->func_soac_strict_id;
 }
 
-int
-PyFunction_SetSoacStrictOwner(PyObject *object, PyObject *owner)
+static int
+func_set_soac_strict_owner(PyObject *object, PyObject *owner,
+                           uint64_t identity, int has_identity)
 {
-    if (!PyFunction_Check(object)) {
+    if (object == NULL || !PyFunction_Check(object)) {
         PyErr_BadInternalCall();
         return -1;
     }
@@ -252,8 +253,14 @@ PyFunction_SetSoacStrictOwner(PyObject *object, PyObject *owner)
         func_soac_mutation_error("cannot delete a strict function owner");
         return -1;
     }
+    if (has_identity && identity == 0) {
+        PyErr_SetString(PyExc_ValueError,
+                        "strict source owner requires a nonzero identity");
+        return -1;
+    }
     if (func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_ATTACHED) {
-        if (func->func_soac_strict_owner == owner) {
+        if (func->func_soac_strict_owner == owner &&
+            (!has_identity || func->func_soac_source_owner_id == identity)) {
             return 0;
         }
         func_soac_mutation_error("strict function owner is already assigned");
@@ -265,8 +272,22 @@ PyFunction_SetSoacStrictOwner(PyObject *object, PyObject *owner)
     }
     _PySoacSourceEntry_InvalidateV1(func);
     func->func_soac_strict_owner = Py_NewRef(owner);
+    func->func_soac_source_owner_id = has_identity ? identity : 0;
     func->func_soac_strict_owner_state = FUNC_SOAC_OWNER_ATTACHED;
     return 0;
+}
+
+int
+PyFunction_SetSoacStrictOwner(PyObject *object, PyObject *owner)
+{
+    return func_set_soac_strict_owner(object, owner, 0, 0);
+}
+
+int
+PyFunction_SetSoacStrictOwnerWithIdentityV1(PyObject *object, PyObject *owner,
+                                          uint64_t source_owner_identity)
+{
+    return func_set_soac_strict_owner(object, owner, source_owner_identity, 1);
 }
 
 PyObject *
@@ -431,6 +452,7 @@ _PyFunction_FromConstructor(PyFrameConstructor *constr)
     op->func_soac_strict_owner_state = FUNC_SOAC_OWNER_NONE;
     op->func_soac_required_boundary = 0;
     op->func_soac_source_entry = NULL;
+    op->func_soac_source_owner_id = 0;
     // NOTE: functions created via FrameConstructor do not use deferred
     // reference counting because they are typically not part of cycles
     // nor accessed by multiple threads.
@@ -523,6 +545,7 @@ func_new_with_qualname(PyObject *code, PyObject *globals, PyObject *qualname,
     op->func_soac_strict_owner_state = FUNC_SOAC_OWNER_NONE;
     op->func_soac_required_boundary = 0;
     op->func_soac_source_entry = NULL;
+    op->func_soac_source_owner_id = 0;
     if (record != NULL && soac_dataclass_attach_record(op, record, producer) < 0) {
         /* Created may have allocated a weak witness whose observer acquired
          * a reference, or changed ordinary constructor metadata. Tombstone
@@ -1576,7 +1599,9 @@ func_clear(PyObject *self)
     soac_dataclass_function_clear(op);
     /* Mark terminal before globals, defaults, owner, or metadata DECREFs can
      * run callbacks. Clearing never makes an assigned owner reinstallable and
-     * never revokes the function's permanent semantic identity. */
+     * never revokes the function's permanent semantic identity. The scalar
+     * source-owner identity also survives, but terminal state can never
+     * authorize another source entry or owner installation. */
     if (op->func_soac_strict_owner_state != FUNC_SOAC_OWNER_NONE ||
         op->func_soac_strict_id != 0) {
         op->func_soac_strict_owner_state = FUNC_SOAC_OWNER_TERMINAL;
