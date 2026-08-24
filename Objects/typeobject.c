@@ -2577,6 +2577,20 @@ PyType_GenericAlloc(PyTypeObject *type, Py_ssize_t nitems)
         return NULL;
     }
 
+    /* An owned instance dictionary is installed before any publication or
+     * user callback. The helper also records the ordinary instance's split
+     * allocation capacity, so explicit dict.clear() keeps stock release order.
+     * It leaves the zeroed object untouched on failure. */
+    if (_PyDict_InitSoacInstanceStorage(obj) < 0) {
+        assert(_PySOAC_UsesInstanceDictionaryPolicy(type));
+        assert(Py_REFCNT(obj) == 1);
+        /* Ready-time admission restricts tp_free to a native allocation mate.
+         * Do not invoke tp_dealloc: __del__ must not see a failed allocation.
+         * The specialized decref preserves debug/reftracer bookkeeping. */
+        _Py_DECREF_SPECIALIZED(obj, (destructor)type->tp_free);
+        _Py_DECREF_TYPE(type);
+        return NULL;
+    }
     if (_PyType_IS_GC(type)) {
         _PyObject_GC_TRACK(obj);
     }
@@ -9415,6 +9429,16 @@ type_ready_managed_dict(PyTypeObject *type)
 static int
 type_ready_post_checks(PyTypeObject *type)
 {
+    /* Inherited physical contracts apply to ordinary subclasses too. An
+     * unverified custom allocator cannot bypass pre-publication initialization
+     * or supply a different allocation/free pair. Reject before callbacks. */
+    if (_PySOAC_UsesInstanceDictionaryPolicy(type) &&
+        (type->tp_alloc != PyType_GenericAlloc ||
+         type->tp_free != (_PyType_IS_GC(type) ? PyObject_GC_Del : PyObject_Free))) {
+        PyErr_SetString(soac_type_mutation_error(),
+            "strict instance storage requires the verified generic allocator");
+        return -1;
+    }
     // bpo-44263: tp_traverse is required if Py_TPFLAGS_HAVE_GC is set.
     // Note: tp_clear is optional.
     if (type->tp_flags & Py_TPFLAGS_HAVE_GC
