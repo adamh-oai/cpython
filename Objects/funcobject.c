@@ -276,6 +276,17 @@ PyFunction_MarkSoacRequiredBoundary(PyObject *object, PyObject *owner)
 }
 
 int
+PyFunction_HasSoacRequiredBoundary(PyObject *object)
+{
+    if (object == NULL || !PyFunction_Check(object)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "required strict boundary query needs an exact function");
+        return -1;
+    }
+    return ((PyFunctionObject *)object)->func_soac_required_boundary != 0;
+}
+
+int
 PyFunction_AddWatcher(PyFunction_WatchCallback callback)
 {
     PyInterpreterState *interp = _PyInterpreterState_GET();

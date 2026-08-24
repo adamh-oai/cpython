@@ -108,6 +108,8 @@ PyAPI_FUNC(PyObject *) PyFunction_GetSoacStrictOwner(PyObject *);
  * One-way: all __code__ setter attempts fail before audit/watchers, including
  * identical code objects. Defaults remain mutable until full strict sealing. */
 PyAPI_FUNC(int) PyFunction_MarkSoacRequiredBoundary(PyObject *, PyObject *);
+/* Permanent metadata only, not owner authentication or execution authority. */
+PyAPI_FUNC(int) PyFunction_HasSoacRequiredBoundary(PyObject *);
 PyAPI_FUNC(PyObject *) PyFunction_GetKwDefaults(PyObject *);
 PyAPI_FUNC(int) PyFunction_SetKwDefaults(PyObject *, PyObject *);
 PyAPI_FUNC(PyObject *) PyFunction_GetClosure(PyObject *);
