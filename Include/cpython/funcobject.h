@@ -61,6 +61,8 @@ typedef struct {
     /* GC-visible strict runtime state; never stored in the opaque JIT pointer. */
     PyObject *func_soac_strict_owner;
     uint8_t func_soac_strict_owner_state;
+    /* Permanent pre-seal code guard for an installed mandatory call boundary. */
+    uint8_t func_soac_required_boundary;
 
     /* Invariant:
      *     func_closure contains the bindings for func_code->co_freevars, so
@@ -98,6 +100,10 @@ PyAPI_FUNC(uint64_t) PyFunction_GetSoacStrictId(PyObject *);
  * NULL/StrictRuntimeUnavailableError after irreversible GC clearing. */
 PyAPI_FUNC(int) PyFunction_SetSoacStrictOwner(PyObject *, PyObject *);
 PyAPI_FUNC(PyObject *) PyFunction_GetSoacStrictOwner(PyObject *);
+/* Requires the exact already-attached, nonterminal native function owner.
+ * One-way: all __code__ setter attempts fail before audit/watchers, including
+ * identical code objects. Defaults remain mutable until full strict sealing. */
+PyAPI_FUNC(int) PyFunction_MarkSoacRequiredBoundary(PyObject *, PyObject *);
 PyAPI_FUNC(PyObject *) PyFunction_GetKwDefaults(PyObject *);
 PyAPI_FUNC(int) PyFunction_SetKwDefaults(PyObject *, PyObject *);
 PyAPI_FUNC(PyObject *) PyFunction_GetClosure(PyObject *);

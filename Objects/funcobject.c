@@ -233,6 +233,24 @@ PyFunction_GetSoacStrictOwner(PyObject *object)
 }
 
 int
+PyFunction_MarkSoacRequiredBoundary(PyObject *object, PyObject *owner)
+{
+    if (!PyFunction_Check(object)) {
+        PyErr_SetString(PyExc_TypeError, "required strict boundary needs an exact function");
+        return -1;
+    }
+    PyFunctionObject *func = (PyFunctionObject *)object;
+    if (owner == NULL ||
+        func->func_soac_strict_owner_state != FUNC_SOAC_OWNER_ATTACHED ||
+        func->func_soac_strict_owner != owner) {
+        func_soac_runtime_error("required strict boundary needs its attached live function owner");
+        return -1;
+    }
+    func->func_soac_required_boundary = 1;
+    return 0;
+}
+
+int
 PyFunction_AddWatcher(PyFunction_WatchCallback callback)
 {
     PyInterpreterState *interp = _PyInterpreterState_GET();
@@ -305,6 +323,7 @@ _PyFunction_FromConstructor(PyFrameConstructor *constr)
     op->func_soac_strict_id = 0;
     op->func_soac_strict_owner = NULL;
     op->func_soac_strict_owner_state = FUNC_SOAC_OWNER_NONE;
+    op->func_soac_required_boundary = 0;
     // NOTE: functions created via FrameConstructor do not use deferred
     // reference counting because they are typically not part of cycles
     // nor accessed by multiple threads.
@@ -389,6 +408,7 @@ PyFunction_NewWithQualName(PyObject *code, PyObject *globals, PyObject *qualname
     op->func_soac_strict_id = 0;
     op->func_soac_strict_owner = NULL;
     op->func_soac_strict_owner_state = FUNC_SOAC_OWNER_NONE;
+    op->func_soac_required_boundary = 0;
     if (((code_obj->co_flags & CO_NESTED) == 0) ||
         (code_obj->co_flags & CO_METHOD)) {
         // Use deferred reference counting for top-level functions, but not
@@ -884,6 +904,12 @@ func_set_code(PyObject *self, PyObject *value, void *Py_UNUSED(ignored))
 {
     PyFunctionObject *op = _PyFunction_CAST(self);
     if (func_check_soac_mutable(op) < 0) {
+        return -1;
+    }
+    if (op->func_soac_required_boundary) {
+        /* Even an identical code object fires MODIFY_CODE and can discard
+           the checked vectorcall. Reject before audit hooks or watchers. */
+        func_soac_mutation_error("cannot assign code on a function with a required strict boundary");
         return -1;
     }
 
