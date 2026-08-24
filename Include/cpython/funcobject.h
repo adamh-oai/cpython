@@ -58,6 +58,9 @@ typedef struct {
     uint32_t func_version;
     /* Permanent semantic identity, independent of replaceable JIT metadata. */
     uint64_t func_soac_strict_id;
+    /* GC-visible strict runtime state; never stored in the opaque JIT pointer. */
+    PyObject *func_soac_strict_owner;
+    uint8_t func_soac_strict_owner_state;
 
     /* Invariant:
      *     func_closure contains the bindings for func_code->co_freevars, so
@@ -90,6 +93,11 @@ PyAPI_FUNC(void *) PyFunction_GetSoacMetadata(PyObject *);
 PyAPI_FUNC(uint64_t) PyFunction_GetSoacFunctionId(PyObject *);
 PyAPI_FUNC(int) PyFunction_SealSoacStrict(PyObject *, uint64_t identity);
 PyAPI_FUNC(uint64_t) PyFunction_GetSoacStrictId(PyObject *);
+/* Single assignment before sealing; the identical owner is idempotent.
+ * Get returns a borrowed reference, NULL/no error when never attached, or
+ * NULL/StrictRuntimeUnavailableError after irreversible GC clearing. */
+PyAPI_FUNC(int) PyFunction_SetSoacStrictOwner(PyObject *, PyObject *);
+PyAPI_FUNC(PyObject *) PyFunction_GetSoacStrictOwner(PyObject *);
 PyAPI_FUNC(PyObject *) PyFunction_GetKwDefaults(PyObject *);
 PyAPI_FUNC(int) PyFunction_SetKwDefaults(PyObject *, PyObject *);
 PyAPI_FUNC(PyObject *) PyFunction_GetClosure(PyObject *);

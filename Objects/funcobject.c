@@ -93,6 +93,21 @@ func_soac_mutation_error(const char *message)
     }
 }
 
+enum {
+    FUNC_SOAC_OWNER_NONE,
+    FUNC_SOAC_OWNER_ATTACHED,
+    FUNC_SOAC_OWNER_TERMINAL,
+};
+
+static void
+func_soac_runtime_error(const char *message)
+{
+    PyObject *exception = PySoac_GetStrictRuntimeUnavailableError();
+    if (exception != NULL) {
+        PyErr_SetString(exception, message);
+    }
+}
+
 static int
 func_check_soac_mutable(PyFunctionObject *func)
 {
@@ -125,6 +140,10 @@ PyFunction_SealSoacStrict(PyObject *object, uint64_t identity)
         return -1;
     }
     PyFunctionObject *func = (PyFunctionObject *)object;
+    if (func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_TERMINAL) {
+        func_soac_runtime_error("strict function owner is terminal");
+        return -1;
+    }
     if (func->func_soac_strict_id != 0) {
         if (func->func_soac_strict_id == identity) {
             return 0;
@@ -163,6 +182,53 @@ PyFunction_GetSoacStrictId(PyObject *object)
         return 0;
     }
     return ((PyFunctionObject *)object)->func_soac_strict_id;
+}
+
+int
+PyFunction_SetSoacStrictOwner(PyObject *object, PyObject *owner)
+{
+    if (!PyFunction_Check(object)) {
+        PyErr_BadInternalCall();
+        return -1;
+    }
+    PyFunctionObject *func = (PyFunctionObject *)object;
+    if (func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_TERMINAL) {
+        func_soac_runtime_error("strict function owner is terminal");
+        return -1;
+    }
+    if (owner == NULL) {
+        func_soac_mutation_error("cannot delete a strict function owner");
+        return -1;
+    }
+    if (func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_ATTACHED) {
+        if (func->func_soac_strict_owner == owner) {
+            return 0;
+        }
+        func_soac_mutation_error("strict function owner is already assigned");
+        return -1;
+    }
+    if (func->func_soac_strict_id != 0) {
+        func_soac_mutation_error("strict function owner must be assigned before sealing");
+        return -1;
+    }
+    func->func_soac_strict_owner = Py_NewRef(owner);
+    func->func_soac_strict_owner_state = FUNC_SOAC_OWNER_ATTACHED;
+    return 0;
+}
+
+PyObject *
+PyFunction_GetSoacStrictOwner(PyObject *object)
+{
+    if (!PyFunction_Check(object)) {
+        PyErr_BadInternalCall();
+        return NULL;
+    }
+    PyFunctionObject *func = (PyFunctionObject *)object;
+    if (func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_TERMINAL) {
+        func_soac_runtime_error("strict function owner is terminal");
+        return NULL;
+    }
+    return func->func_soac_strict_owner;  /* borrowed */
 }
 
 int
@@ -236,6 +302,8 @@ _PyFunction_FromConstructor(PyFrameConstructor *constr)
     op->func_soac_function_id = 0;
     op->func_version = FUNC_VERSION_UNSET;
     op->func_soac_strict_id = 0;
+    op->func_soac_strict_owner = NULL;
+    op->func_soac_strict_owner_state = FUNC_SOAC_OWNER_NONE;
     // NOTE: functions created via FrameConstructor do not use deferred
     // reference counting because they are typically not part of cycles
     // nor accessed by multiple threads.
@@ -318,6 +386,8 @@ PyFunction_NewWithQualName(PyObject *code, PyObject *globals, PyObject *qualname
     op->func_soac_function_id = 0;
     op->func_version = FUNC_VERSION_UNSET;
     op->func_soac_strict_id = 0;
+    op->func_soac_strict_owner = NULL;
+    op->func_soac_strict_owner_state = FUNC_SOAC_OWNER_NONE;
     if (((code_obj->co_flags & CO_NESTED) == 0) ||
         (code_obj->co_flags & CO_METHOD)) {
         // Use deferred reference counting for top-level functions, but not
@@ -1282,6 +1352,13 @@ static int
 func_clear(PyObject *self)
 {
     PyFunctionObject *op = _PyFunction_CAST(self);
+    /* Mark terminal before globals, defaults, owner, or metadata DECREFs can
+     * run callbacks. Clearing never makes an assigned owner reinstallable and
+     * never revokes the function's permanent semantic identity. */
+    if (op->func_soac_strict_owner_state != FUNC_SOAC_OWNER_NONE ||
+        op->func_soac_strict_id != 0) {
+        op->func_soac_strict_owner_state = FUNC_SOAC_OWNER_TERMINAL;
+    }
     func_clear_version(_PyInterpreterState_GET(), op);
     PyObject *globals = op->func_globals;
     op->func_globals = NULL;
@@ -1303,6 +1380,7 @@ func_clear(PyObject *self)
     Py_CLEAR(op->func_annotate);
     Py_CLEAR(op->func_typeparams);
     func_clear_soac_metadata(op);
+    Py_CLEAR(op->func_soac_strict_owner);
     // Don't Py_CLEAR(op->func_code), since code is always required
     // to be non-NULL. Similarly, name and qualname shouldn't be NULL.
     // However, name and qualname could be str subclasses, so they
@@ -1362,6 +1440,7 @@ func_traverse(PyObject *self, visitproc visit, void *arg)
     Py_VISIT(f->func_annotate);
     Py_VISIT(f->func_typeparams);
     Py_VISIT(f->func_qualname);
+    Py_VISIT(f->func_soac_strict_owner);
     return 0;
 }
 
