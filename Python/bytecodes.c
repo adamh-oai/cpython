@@ -5388,11 +5388,17 @@ dummy_func(
             PyFunctionObject *func_obj = (PyFunctionObject *)
                 _PySOAC_FunctionFromFrame(codeobj, GLOBALS(), frame, soac_instr);
 
+            /* Birth/CREATE observers may replace __code__. Leave those
+             * functions unversioned instead of pairing the original version
+             * with different code. Compare while the input still supports the
+             * original code; on this branch the function owns it as well. */
+            if (func_obj != NULL && func_obj->func_code == codeobj) {
+                _PyFunction_SetVersion(
+                    func_obj, ((PyCodeObject *)codeobj)->co_version);
+            }
             PyStackRef_CLOSE(codeobj_st);
             ERROR_IF(func_obj == NULL);
 
-            _PyFunction_SetVersion(
-                func_obj, ((PyCodeObject *)codeobj)->co_version);
             func = PyStackRef_FromPyObjectSteal((PyObject *)func_obj);
         }
 
