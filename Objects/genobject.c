@@ -78,12 +78,20 @@ PyGen_GetCode(PyGenObject *gen) {
     return res;
 }
 
+#include "soac_generator.inc"
+
 static int
 gen_traverse(PyObject *self, visitproc visit, void *arg)
 {
     PyGenObject *gen = _PyGen_CAST(self);
     Py_VISIT(gen->gi_name);
     Py_VISIT(gen->gi_qualname);
+    if (_PyGen_IsSoacManaged(gen)) {
+        soac_gen_assert_no_native_activation(gen);
+        Py_VISIT(gen->gi_soac_managed->owner);
+        _Py_VISIT_STACKREF(gen->gi_iframe.f_executable);
+        return 0;
+    }
     if (gen->gi_frame_state != FRAME_CLEARED) {
         _PyInterpreterFrame *frame = &gen->gi_iframe;
         assert(frame->frame_obj == NULL ||
@@ -167,6 +175,10 @@ static void
 gen_clear_frame(PyGenObject *gen)
 {
     assert(FT_ATOMIC_LOAD_INT8_RELAXED(gen->gi_frame_state) == FRAME_CLEARED);
+    if (_PyGen_IsSoacManaged(gen)) {
+        soac_gen_retire(gen);
+        return;
+    }
     _PyInterpreterFrame *frame = &gen->gi_iframe;
     frame->previous = NULL;
     _PyFrame_ClearExceptCode(frame);
@@ -233,6 +245,10 @@ gen_dealloc(PyObject *self)
     PyStackRef_CLEAR(gen->gi_iframe.f_executable);
     Py_CLEAR(gen->gi_name);
     Py_CLEAR(gen->gi_qualname);
+    if (_PyGen_IsSoacManaged(gen)) {
+        PyMem_Free(gen->gi_soac_managed);
+        gen->gi_soac_managed = NULL;
+    }
 
     PyObject_GC_Del(gen);
 }
@@ -258,6 +274,7 @@ gen_raise_already_executing_error(PyGenObject *gen)
 static PySendResult
 gen_send_ex2(PyGenObject *gen, PyObject *arg, PyObject **presult, int exc)
 {
+    assert(!_PyGen_IsSoacManaged(gen));
     assert(FT_ATOMIC_LOAD_INT8_RELAXED(gen->gi_frame_state) == FRAME_EXECUTING);
 
     PyThreadState *tstate = _PyThreadState_GET();
@@ -370,6 +387,13 @@ gen_send_ex(PyGenObject *gen, PyObject *arg, PyObject **presult)
                FRAME_STATE_SUSPENDED(frame_state));
     } while (!_Py_GEN_TRY_SET_FRAME_STATE(gen, frame_state, FRAME_EXECUTING));
 
+    if (_PyGen_IsSoacManaged(gen)) {
+        const PySoacGeneratorInput input = {
+            .operation = PySoac_GENERATOR_SEND,
+            .arg = arg == NULL ? Py_None : arg,
+        };
+        return soac_gen_step(gen, frame_state, &input, presult);
+    }
     return gen_send_ex2(gen, arg, presult, 0);
 }
 
@@ -447,6 +471,16 @@ gen_close_iter(PyObject *yf)
     return 0;
 }
 
+int
+PyGen_CloseSoacDelegate(PyObject *delegate)
+{
+    if (delegate == NULL) {
+        PyErr_BadInternalCall();
+        return -1;
+    }
+    return gen_close_iter(delegate);
+}
+
 static inline bool
 is_resume(_Py_CODEUNIT *instr)
 {
@@ -485,6 +519,10 @@ gen_close(PyObject *self, PyObject *args)
 
         assert(FRAME_STATE_SUSPENDED(frame_state));
     } while (!_Py_GEN_TRY_SET_FRAME_STATE(gen, frame_state, FRAME_EXECUTING));
+
+    if (_PyGen_IsSoacManaged(gen)) {
+        return soac_gen_close(gen, frame_state);
+    }
 
     int err = 0;
     _PyInterpreterFrame *frame = &gen->gi_iframe;
@@ -598,6 +636,19 @@ failed_throw:
     return -1;
 }
 
+PyObject *
+PyGen_NormalizeSoacThrow(PyObject *typ, PyObject *value, PyObject *traceback)
+{
+    if (typ == NULL) {
+        PyErr_BadInternalCall();
+        return NULL;
+    }
+    if (gen_set_exception(typ, value, traceback) < 0) {
+        return NULL;
+    }
+    return PyErr_GetRaisedException();
+}
+
 static PyObject *
 gen_throw_current_exception(PyGenObject *gen)
 {
@@ -645,6 +696,21 @@ _gen_throw(PyGenObject *gen, int close_on_genexit,
         assert((frame_state == FRAME_CREATED) ||
                FRAME_STATE_SUSPENDED(frame_state));
     } while (!_Py_GEN_TRY_SET_FRAME_STATE(gen, frame_state, FRAME_EXECUTING));
+
+    if (_PyGen_IsSoacManaged(gen)) {
+        const PySoacGeneratorInput input = {
+            .operation = PySoac_GENERATOR_THROW,
+            .close_on_genexit = close_on_genexit,
+            .arg = typ,
+            .value = val,
+            .traceback = tb,
+        };
+        PyObject *value;
+        if (soac_gen_step(gen, frame_state, &input, &value) == PYGEN_RETURN) {
+            return gen_set_stop_iteration(gen, value);
+        }
+        return value;
+    }
 
     if (frame_state == FRAME_SUSPENDED_YIELD_FROM) {
         _PyInterpreterFrame *frame = &gen->gi_iframe;
@@ -721,6 +787,33 @@ throw_here:
     return gen_throw_current_exception(gen);
 }
 
+
+int
+PyGen_ThrowSoacDelegate(PyObject *delegate, int close_on_genexit,
+                        PyObject *typ, PyObject *value, PyObject *traceback,
+                        PyObject **result)
+{
+    if (result != NULL) {
+        *result = NULL;
+    }
+    if (delegate == NULL || typ == NULL || result == NULL) {
+        PyErr_BadInternalCall();
+        return -1;
+    }
+    if (PyGen_CheckExact(delegate) || PyCoro_CheckExact(delegate)) {
+        *result = _gen_throw((PyGenObject *)delegate, close_on_genexit,
+                             typ, value, traceback);
+        return 1;
+    }
+    PyObject *method;
+    int found = PyObject_GetOptionalAttr(delegate, &_Py_ID(throw), &method);
+    if (found <= 0) {
+        return found;
+    }
+    *result = PyObject_CallFunctionObjArgs(method, typ, value, traceback, NULL);
+    Py_DECREF(method);
+    return 1;
+}
 
 static PyObject *
 gen_throw(PyObject *op, PyObject *const *args, Py_ssize_t nargs)
@@ -887,6 +980,9 @@ static PyObject *
 gen_getyieldfrom(PyObject *self, void *Py_UNUSED(ignored))
 {
     PyGenObject *gen = _PyGen_CAST(self);
+    if (_PyGen_IsSoacManaged(gen)) {
+        return soac_gen_yield_from(gen);
+    }
 #ifdef Py_GIL_DISABLED
     int8_t frame_state = _Py_atomic_load_int8_relaxed(&gen->gi_frame_state);
     do {
@@ -956,6 +1052,11 @@ _gen_getframe(PyGenObject *gen, const char *const name)
     if (FRAME_STATE_FINISHED(frame_state)) {
         Py_RETURN_NONE;
     }
+    if (_PyGen_IsSoacManaged(gen)) {
+        PyErr_SetString(PyExc_NotImplementedError,
+                        "optimized generator execution frame is not materialized");
+        return NULL;
+    }
     // TODO: still not thread-safe with free threading
     return _Py_XNewRef((PyObject *)_PyFrame_GetFrameObject(&gen->gi_iframe));
 }
@@ -1009,6 +1110,9 @@ gen_sizeof(PyObject *op, PyObject *Py_UNUSED(ignored))
     PyGenObject *gen = _PyGen_CAST(op);
     Py_ssize_t res;
     res = offsetof(PyGenObject, gi_iframe) + offsetof(_PyInterpreterFrame, localsplus);
+    if (_PyGen_IsSoacManaged(gen)) {
+        return PyLong_FromSsize_t(res + sizeof(*gen->gi_soac_managed));
+    }
     PyCodeObject *code = _PyGen_GetCode(gen);
     res += _PyFrame_NumSlotsForCodeObject(code) * sizeof(PyObject *);
     return PyLong_FromSsize_t(res);
@@ -1095,6 +1199,8 @@ make_gen(PyTypeObject *type, PyFunctionObject *func, PyCodeObject *code)
     if (gen == NULL) {
         return NULL;
     }
+    gen->gi_soac_managed = NULL;
+    gen->gi_origin_or_finalizer = NULL;
     gen->gi_frame_state = FRAME_CLEARED;
     gen->gi_weakreflist = NULL;
     gen->gi_exc_state.exc_value = NULL;
@@ -1164,6 +1270,10 @@ static PyObject *
 gen_new_with_qualname(PyTypeObject *type, PyFrameObject *f,
                       PyObject *name, PyObject *qualname)
 {
+    if (_PyFrame_CheckSoacLifetimeExecution(f->f_frame) < 0) {
+        Py_DECREF(f);  /* These constructors always steal the frame. */
+        return NULL;
+    }
     PyCodeObject *code = _PyFrame_GetCode(f->f_frame);
     int size = code->co_nlocalsplus + code->co_stacksize;
     PyGenObject *gen = PyObject_GC_NewVar(PyGenObject, type, size);
@@ -1171,6 +1281,8 @@ gen_new_with_qualname(PyTypeObject *type, PyFrameObject *f,
         Py_DECREF(f);
         return NULL;
     }
+    gen->gi_soac_managed = NULL;
+    gen->gi_origin_or_finalizer = NULL;
     /* Copy the frame */
     assert(f->f_frame->frame_obj == NULL);
     assert(f->f_frame->owner == FRAME_OWNED_BY_FRAME_OBJECT);

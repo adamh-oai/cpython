@@ -10,13 +10,15 @@
 #include "pycore_stackref.h"      // PyStackRef_AsPyObjectBorrow()
 #include "pycore_stats.h"         // CALL_STAT_INC()
 #include "pycore_soac_dataclass.h"
+#include "pycore_soac_lifetime_frame.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 #define _PyInterpreterFrame_LASTI(IF) \
-    ((int)((IF)->instr_ptr - _PyFrame_GetBytecode((IF))))
+    ((_PyFrame_IsSoacLifetime((IF)) && (IF)->instr_ptr == NULL) ? -1 : \
+     (int)((IF)->instr_ptr - _PyFrame_GetBytecode((IF))))
 
 static inline PyCodeObject *_PyFrame_GetCode(_PyInterpreterFrame *f) {
     assert(!PyStackRef_IsNull(f->f_executable));
@@ -32,6 +34,9 @@ static inline PyCodeObject *_PyFrame_GetCode(_PyInterpreterFrame *f) {
 static inline int
 _PyFrame_CheckSoacExecution(_PyInterpreterFrame *frame)
 {
+    if (_PyFrame_CheckSoacLifetimeExecution(frame) < 0) {
+        return -1;
+    }
     if (!(_PyFrame_GetCode(frame)->co_flags & CO_FUTURE_STRICT)) {
         PyObject *function = PyStackRef_AsPyObjectBorrow(frame->f_funcobj);
         if (frame->soac_dataclass_checked_activation != NULL ||
@@ -105,6 +110,9 @@ _PyFrame_GetBytecode(_PyInterpreterFrame *f)
 static inline int _Py_NO_SANITIZE_THREAD
 _PyFrame_SafeGetLasti(struct _PyInterpreterFrame *f)
 {
+    if (_PyFrame_IsSoacLifetime(f)) {
+        return -1;
+    }
     // Code based on _PyFrame_GetBytecode() but replace _PyFrame_GetCode()
     // with _PyFrame_SafeGetCode().
     PyCodeObject *co = _PyFrame_SafeGetCode(f);
@@ -295,6 +303,9 @@ _PyFrame_SetStackPointer(_PyInterpreterFrame *frame, _PyStackRef *stack_pointer)
 static inline bool _Py_NO_SANITIZE_THREAD
 _PyFrame_IsIncomplete(_PyInterpreterFrame *frame)
 {
+    if (_PyFrame_IsSoacLifetime(frame)) {
+        return false;
+    }
     if (frame->owner >= FRAME_OWNED_BY_INTERPRETER) {
         return true;
     }
@@ -331,6 +342,9 @@ _PyFrame_GetFrameObject(_PyInterpreterFrame *frame)
 {
 
     assert(!_PyFrame_IsIncomplete(frame));
+    if (_PyFrame_IsSoacLifetime(frame)) {
+        return _PyFrame_GetSoacLifetimeObject(frame);
+    }
     PyFrameObject *res =  frame->frame_obj;
     if (res != NULL) {
         return res;

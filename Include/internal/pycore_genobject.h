@@ -13,12 +13,24 @@ extern "C" {
 #include <stddef.h>               // offsetof()
 
 
+/* Every exact managed suspended family has no native execution frame. */
+static inline int
+_PyGen_IsSoacManaged(PyGenObject *gen)
+{
+    return (PyGen_CheckExact((PyObject *)gen) ||
+            PyCoro_CheckExact((PyObject *)gen) ||
+            PyAsyncGen_CheckExact((PyObject *)gen)) &&
+           gen->gi_soac_managed != NULL;
+}
+
 static inline
 PyGenObject *_PyGen_GetGeneratorFromFrame(_PyInterpreterFrame *frame)
 {
     assert(frame->owner == FRAME_OWNED_BY_GENERATOR);
     size_t offset_in_gen = offsetof(PyGenObject, gi_iframe);
-    return (PyGenObject *)(((char *)frame) - offset_in_gen);
+    PyGenObject *gen = (PyGenObject *)(((char *)frame) - offset_in_gen);
+    assert(!_PyGen_IsSoacManaged(gen));
+    return gen;
 }
 
 PyAPI_FUNC(PyObject *)_PyGen_yf(PyGenObject *);

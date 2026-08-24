@@ -24,6 +24,10 @@ enum _frameowner {
     FRAME_OWNED_BY_GENERATOR = 1,
     FRAME_OWNED_BY_FRAME_OBJECT = 2,
     FRAME_OWNED_BY_INTERPRETER = 3,
+    /* Source-lifetime frames are never interpreter activations. */
+    FRAME_OWNED_BY_SOAC_ACTIVE = 4,
+    FRAME_OWNED_BY_SOAC_FINISHED = 5,
+    FRAME_OWNED_BY_SOAC_CLEARED = 6,
 };
 
 struct _PyInterpreterFrame {
@@ -61,6 +65,8 @@ struct _PyInterpreterFrame {
 
 /* _PyGenObject_HEAD defines the initial segment of generator
    and coroutine objects. */
+struct _PySoacManagedGenerator;
+
 #define _PyGenObject_HEAD(prefix)                                           \
     PyObject_HEAD                                                           \
     /* List of weak reference. */                                           \
@@ -71,6 +77,7 @@ struct _PyInterpreterFrame {
     PyObject *prefix##_qualname;                                            \
     _PyErr_StackItem prefix##_exc_state;                                    \
     PyObject *prefix##_origin_or_finalizer;                                 \
+    struct _PySoacManagedGenerator *prefix##_soac_managed;                   \
     char prefix##_hooks_inited;                                             \
     char prefix##_closed;                                                   \
     char prefix##_running_async;                                            \

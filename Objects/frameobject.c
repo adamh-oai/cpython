@@ -32,6 +32,8 @@
 
 #define OFF(x) offsetof(PyFrameObject, x)
 
+#include "soac_lifetime_frame.inc"
+
 /*[clinic input]
 class frame "PyFrameObject *" "&PyFrame_Type"
 [clinic start generated code]*/
@@ -433,6 +435,9 @@ framelocalsproxy_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
         return NULL;
     }
     PyFrameObject *frame = (PyFrameObject*)item;
+    if (soac_frame_check_inspection(frame, "frame locals proxy") < 0) {
+        return NULL;
+    }
 
     if (kwds != NULL && PyDict_Size(kwds) != 0) {
         PyErr_SetString(PyExc_TypeError,
@@ -978,6 +983,9 @@ static PyObject *
 frame_locals_get_impl(PyFrameObject *self)
 /*[clinic end generated code: output=b4ace8bb4cae71f4 input=7bd444d0dc8ddf44]*/
 {
+    if (soac_frame_check_inspection(self, "frame locals") < 0) {
+        return NULL;
+    }
     assert(!_PyFrame_IsIncomplete(self->f_frame));
 
     PyCodeObject *co = _PyFrame_GetCode(self->f_frame);
@@ -1002,6 +1010,9 @@ int
 PyFrame_GetLineNumber(PyFrameObject *f)
 {
     assert(f != NULL);
+    if (soac_frame_check_inspection(f, "current frame line") < 0) {
+        return -1;
+    }
     if (f->f_lineno == -1) {
         // We should calculate it once. If we can't get the line number,
         // set f->f_lineno to 0.
@@ -1032,6 +1043,9 @@ frame_lineno_get_impl(PyFrameObject *self)
 {
     int lineno = PyFrame_GetLineNumber(self);
     if (lineno < 0) {
+        if (PyErr_Occurred()) {
+            return NULL;
+        }
         Py_RETURN_NONE;
     }
     return PyLong_FromLong(lineno);
@@ -1050,6 +1064,9 @@ frame_lasti_get_impl(PyFrameObject *self)
 /*[clinic end generated code: output=03275b4f0327d1a2 input=0225ed49cb1fbeeb]*/
 {
     int lasti = PyUnstable_InterpreterFrame_GetLasti(self->f_frame);
+    if (PyErr_Occurred()) {
+        return NULL;
+    }
     if (lasti < 0) {
         return PyLong_FromLong(-1);
     }
@@ -1068,6 +1085,9 @@ static PyObject *
 frame_globals_get_impl(PyFrameObject *self)
 /*[clinic end generated code: output=7758788c32885528 input=7fff7241357d314d]*/
 {
+    if (soac_frame_check_inspection(self, "frame globals") < 0) {
+        return NULL;
+    }
     PyObject *globals = self->f_frame->f_globals;
     if (globals == NULL) {
         globals = Py_None;
@@ -1087,6 +1107,9 @@ static PyObject *
 frame_builtins_get_impl(PyFrameObject *self)
 /*[clinic end generated code: output=45362faa6d42c702 input=27c696d6ffcad2c7]*/
 {
+    if (soac_frame_check_inspection(self, "frame builtins") < 0) {
+        return NULL;
+    }
     PyObject *builtins = self->f_frame->f_builtins;
     if (builtins == NULL) {
         builtins = Py_None;
@@ -1122,7 +1145,7 @@ frame_back_get_impl(PyFrameObject *self)
 /*[clinic end generated code: output=3a84c22a55a63c79 input=9e528570d0e1f44a]*/
 {
     PyObject *res = (PyObject *)PyFrame_GetBack(self);
-    if (res == NULL) {
+    if (res == NULL && !PyErr_Occurred()) {
         Py_RETURN_NONE;
     }
     return res;
@@ -1153,6 +1176,9 @@ static int
 frame_trace_opcodes_set_impl(PyFrameObject *self, PyObject *value)
 /*[clinic end generated code: output=92619da2bfccd449 input=7e286eea3c0333ff]*/
 {
+    if (soac_frame_check_inspection(self, "frame mutation/tracing") < 0) {
+        return -1;
+    }
     if (!PyBool_Check(value)) {
         PyErr_SetString(PyExc_TypeError,
                         "attribute value type must be bool");
@@ -1657,6 +1683,9 @@ static int
 frame_lineno_set_impl(PyFrameObject *self, PyObject *value)
 /*[clinic end generated code: output=e64c86ff6be64292 input=36ed3c896b27fb91]*/
 {
+    if (soac_frame_check_inspection(self, "frame mutation/tracing") < 0) {
+        return -1;
+    }
     PyCodeObject *code = _PyFrame_GetCode(self->f_frame);
     if (value == NULL) {
         PyErr_SetString(PyExc_AttributeError, "cannot delete attribute");
@@ -1882,6 +1911,9 @@ static int
 frame_trace_set_impl(PyFrameObject *self, PyObject *value)
 /*[clinic end generated code: output=d6fe08335cf76ae4 input=e57380734815dac5]*/
 {
+    if (soac_frame_check_inspection(self, "frame mutation/tracing") < 0) {
+        return -1;
+    }
     if (value == Py_None) {
         value = NULL;
     }
@@ -1906,6 +1938,9 @@ static PyObject *
 frame_generator_get_impl(PyFrameObject *self)
 /*[clinic end generated code: output=97aeb2392562e55b input=00a2bd008b239ab0]*/
 {
+    if (soac_frame_check_inspection(self, "frame generator") < 0) {
+        return NULL;
+    }
     if (self->f_frame->owner == FRAME_OWNED_BY_GENERATOR) {
         PyObject *gen = (PyObject *)_PyGen_GetGeneratorFromFrame(self->f_frame);
         return Py_NewRef(gen);
@@ -1945,7 +1980,8 @@ frame_dealloc(PyObject *op)
     _PyInterpreterFrame *frame = (_PyInterpreterFrame *)f->_f_frame_data;
 
     /* Kill all local variables including specials, if we own them */
-    if (f->f_frame == frame && frame->owner == FRAME_OWNED_BY_FRAME_OBJECT) {
+    if (f->f_frame == frame &&
+        (frame->owner == FRAME_OWNED_BY_FRAME_OBJECT || _PyFrame_IsSoacLifetime(frame))) {
         frame->soac_dataclass_role = 0;
         Py_CLEAR(frame->soac_dataclass_invocation);
         Py_CLEAR(frame->soac_dataclass_checked_activation);
@@ -1976,7 +2012,8 @@ frame_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(f->f_extra_locals);
     Py_VISIT(f->f_locals_cache);
     Py_VISIT(f->f_overwritten_fast_locals);
-    if (f->f_frame->owner != FRAME_OWNED_BY_FRAME_OBJECT) {
+    if (f->f_frame->owner != FRAME_OWNED_BY_FRAME_OBJECT &&
+        !_PyFrame_IsSoacLifetime(f->f_frame)) {
         return 0;
     }
     assert(f->f_frame->frame_obj == NULL);
@@ -1987,6 +2024,13 @@ static int
 frame_tp_clear(PyObject *op)
 {
     PyFrameObject *f = PyFrameObject_CAST(op);
+    if (f->f_frame->owner == FRAME_OWNED_BY_SOAC_ACTIVE) {
+        /* The source activation must transfer its primaries first. */
+        return 0;
+    }
+    if (_PyFrame_IsSoacLifetime(f->f_frame)) {
+        f->f_frame->owner = FRAME_OWNED_BY_SOAC_CLEARED;
+    }
     f->f_frame->soac_dataclass_role = 0;
     Py_CLEAR(f->f_frame->soac_dataclass_invocation);
     Py_CLEAR(f->f_frame->soac_dataclass_checked_activation);
@@ -2019,6 +2063,15 @@ static PyObject *
 frame_clear_impl(PyFrameObject *self)
 /*[clinic end generated code: output=864c662f16e9bfcc input=c358f9cff5f9b681]*/
 {
+    if (_PyFrame_IsSoacLifetime(self->f_frame)) {
+        if (self->f_frame->owner == FRAME_OWNED_BY_SOAC_ACTIVE) {
+            PyErr_SetString(PyExc_RuntimeError,
+                            "cannot clear an active or suspended source-lifetime frame");
+            return NULL;
+        }
+        (void)frame_tp_clear((PyObject *)self);
+        Py_RETURN_NONE;
+    }
     if (self->f_frame->owner == FRAME_OWNED_BY_GENERATOR) {
         PyGenObject *gen = _PyGen_GetGeneratorFromFrame(self->f_frame);
         if (_PyGen_ClearFrame(gen) < 0) {
@@ -2059,6 +2112,9 @@ static PyObject *
 frame_repr(PyObject *op)
 {
     PyFrameObject *f = PyFrameObject_CAST(op);
+    if (soac_frame_check_inspection(f, "current frame representation") < 0) {
+        return NULL;
+    }
     PyObject *result;
     Py_BEGIN_CRITICAL_SECTION(f);
     int lineno = PyFrame_GetLineNumber(f);
@@ -2095,7 +2151,7 @@ PyTypeObject PyFrame_Type = {
     0,                                          /* tp_call */
     0,                                          /* tp_str */
     PyObject_GenericGetAttr,                    /* tp_getattro */
-    PyObject_GenericSetAttr,                    /* tp_setattro */
+    soac_frame_setattro,                        /* tp_setattro */
     0,                                          /* tp_as_buffer */
     Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,/* tp_flags */
     0,                                          /* tp_doc */
@@ -2285,6 +2341,10 @@ _PyFrame_HasHiddenLocals(_PyInterpreterFrame *frame)
 PyObject *
 _PyFrame_GetLocals(_PyInterpreterFrame *frame)
 {
+    if (_PyFrame_IsSoacLifetime(frame)) {
+        soac_frame_unavailable("frame locals");
+        return NULL;
+    }
     // We should try to avoid creating the FrameObject if possible.
     // So we check if the frame is a module or class level scope
     PyCodeObject *co = _PyFrame_GetCode(frame);
@@ -2311,6 +2371,9 @@ _PyFrame_GetLocals(_PyInterpreterFrame *frame)
 PyObject *
 PyFrame_GetVar(PyFrameObject *frame_obj, PyObject *name)
 {
+    if (soac_frame_check_inspection(frame_obj, "frame variable") < 0) {
+        return NULL;
+    }
     if (!PyUnicode_Check(name)) {
         PyErr_Format(PyExc_TypeError, "name must be str, not %s",
                      Py_TYPE(name)->tp_name);
@@ -2358,6 +2421,9 @@ PyFrame_GetVarString(PyFrameObject *frame, const char *name)
 int
 PyFrame_FastToLocalsWithError(PyFrameObject *f)
 {
+    if (soac_frame_check_inspection(f, "frame locals synchronization") < 0) {
+        return -1;
+    }
     // Nothing to do here, as f_locals is now a write-through proxy in
     // optimized frames. Soft-deprecated, since there's no maintenance hassle.
     return 0;
@@ -2405,6 +2471,9 @@ PyFrameObject*
 PyFrame_GetBack(PyFrameObject *frame)
 {
     assert(frame != NULL);
+    if (soac_frame_check_inspection(frame, "frame ancestry") < 0) {
+        return NULL;
+    }
     assert(!_PyFrame_IsIncomplete(frame->f_frame));
     PyFrameObject *back = frame->f_back;
     if (back == NULL) {
@@ -2441,6 +2510,9 @@ PyFrame_GetBuiltins(PyFrameObject *frame)
 int
 PyFrame_GetLasti(PyFrameObject *frame)
 {
+    if (soac_frame_check_inspection(frame, "current frame offset") < 0) {
+        return -1;
+    }
     int ret;
     Py_BEGIN_CRITICAL_SECTION(frame);
     assert(!_PyFrame_IsIncomplete(frame->f_frame));

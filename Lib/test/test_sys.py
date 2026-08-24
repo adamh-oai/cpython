@@ -1698,7 +1698,8 @@ class SizeofTest(unittest.TestCase):
             check(bar, size('PPBP'))
         # generator
         def get_gen(): yield 1
-        check(get_gen(), size('6P4c') + interpreter_frame_size + self.P)
+        # The common generator header has an explicit SOAC managed-state pointer.
+        check(get_gen(), size('7P4c') + interpreter_frame_size + self.P)
         # iterator
         check(iter('abc'), size('lP'))
         # callable-iterator

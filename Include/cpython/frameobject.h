@@ -33,3 +33,39 @@ typedef struct {
     PyObject_HEAD
     PyFrameObject* frame;
 } PyFrameLocalsProxyObject;
+
+/* Explicit source-lifetime ownership, never native-bytecode permission.
+ * This private prototype is GIL-build-only. */
+#define PySoac_LIFETIME_FRAME_ABI_VERSION 1
+
+/* The caller owns exactly one active reference. No source binding, function,
+ * globals, or closure is copied into this frame while the source runs. */
+PyAPI_FUNC(PyFrameObject *) PyFrame_NewSoacLifetime(PyCodeObject *source_code);
+
+/* Prepend this same active frame to the current raised exception. The caller
+ * supplies the authenticated source site. A known instruction_offset is an
+ * aligned byte offset in source_code and must map to source_lineno. -1 means
+ * unavailable: tb_lineno remains accurate, but tb_lasti inspection refuses.
+ * The pair (-1, -1) denotes an unavailable synthetic source event: both
+ * position getters and traceback formatting explicitly refuse rather than
+ * inventing a line. A known offset may not be paired with an unknown line.
+ * This records a traceback site, not a continuously maintained execution PC. */
+PyAPI_FUNC(int) PyFrame_AddSoacTraceback(
+    PyFrameObject *frame, int instruction_offset, int source_lineno);
+
+/* Validate first, then close the lifetime frame without allocation, Python
+ * callbacks, or decrefs on the valid path. If an external traceback/frame
+ * reference exists, copy the actual source owners in co_localsplus order and
+ * the actual active function; NULL slots are unbound, cell/free slots are the
+ * original cells. Never reread the function's mutable current closure/code.
+ * source_namespace is NULL for optimized function code and the actual owned
+ * mapping for nonoptimized module/class code. It is never inferred from the
+ * function's globals or copied into a dictionary snapshot.
+ * Return 1 if retained, 0 otherwise, -1 on invalid input without changing the
+ * active frame. The compiler subsequently releases its primary owners and
+ * active frame reference. Explicit source del/rebinding must already have
+ * updated those primaries. Finish is required on terminal/deallocation paths,
+ * including an unstarted generator's valid throw, and is one-use. */
+PyAPI_FUNC(int) PyFrame_FinishSoacLifetime(
+    PyFrameObject *frame, PyObject *source_function, PyObject *source_namespace,
+    PyObject *const *source_owners, Py_ssize_t count);

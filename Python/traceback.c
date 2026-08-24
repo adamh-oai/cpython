@@ -156,6 +156,11 @@ tb_get_lineno(PyObject *op)
     PyTracebackObject *tb = _PyTracebackObject_CAST(op);
     _PyInterpreterFrame* frame = tb->tb_frame->f_frame;
     assert(frame != NULL);
+    if (_PyFrame_IsSoacLifetime(frame) && tb->tb_lineno == -1) {
+        PyErr_SetString(PyExc_NotImplementedError,
+                        "optimized source traceback line is unavailable");
+        return -1;
+    }
     return PyCode_Addr2Line(_PyFrame_GetCode(frame), tb->tb_lasti);
 }
 
@@ -167,6 +172,9 @@ tb_lineno_get(PyObject *op, void *Py_UNUSED(_))
     if (lineno == -1) {
         lineno = tb_get_lineno(op);
         if (lineno < 0) {
+            if (PyErr_Occurred()) {
+                return NULL;
+            }
             Py_RETURN_NONE;
         }
     }
@@ -312,6 +320,17 @@ _PyTraceBack_FromFrame(PyObject *tb_next, PyFrameObject *frame)
 {
     assert(tb_next == NULL || PyTraceBack_Check(tb_next));
     assert(frame != NULL);
+    if (_PyFrame_IsSoacLifetime(frame->f_frame)) {
+        if (frame->f_lineno == 0 || frame->f_lineno < -1 ||
+            (frame->f_lineno == -1 && frame->f_frame->instr_ptr != NULL)) {
+            PyErr_SetString(PyExc_NotImplementedError,
+                            "optimized source traceback site is unavailable");
+            return NULL;
+        }
+        int addr = frame->f_frame->instr_ptr == NULL ? -1
+            : _PyInterpreterFrame_LASTI(frame->f_frame) * (int)sizeof(_Py_CODEUNIT);
+        return tb_create_raw((PyTracebackObject *)tb_next, frame, addr, frame->f_lineno);
+    }
     int addr = _PyInterpreterFrame_LASTI(frame->f_frame) * sizeof(_Py_CODEUNIT);
     return tb_create_raw((PyTracebackObject *)tb_next, frame, addr, -1);
 }
@@ -731,6 +750,9 @@ tb_printinternal(PyTracebackObject *tb, PyObject *f, long limit)
         int tb_lineno = tb->tb_lineno;
         if (tb_lineno == -1) {
             tb_lineno = tb_get_lineno((PyObject *)tb);
+            if (tb_lineno < 0 && PyErr_Occurred()) {
+                goto error;
+            }
         }
         if (last_file == NULL ||
             code->co_filename != last_file ||

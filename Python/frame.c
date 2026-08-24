@@ -145,12 +145,22 @@ PyUnstable_InterpreterFrame_GetCode(struct _PyInterpreterFrame *frame)
 int _Py_NO_SANITIZE_THREAD
 PyUnstable_InterpreterFrame_GetLasti(struct _PyInterpreterFrame *frame)
 {
+    if (_PyFrame_IsSoacLifetime(frame)) {
+        PyErr_SetString(PyExc_NotImplementedError,
+                        "current optimized frame position is unavailable");
+        return -1;
+    }
     return _PyInterpreterFrame_LASTI(frame) * sizeof(_Py_CODEUNIT);
 }
 
 int _Py_NO_SANITIZE_THREAD
 PyUnstable_InterpreterFrame_GetLine(_PyInterpreterFrame *frame)
 {
+    if (_PyFrame_IsSoacLifetime(frame)) {
+        PyErr_SetString(PyExc_NotImplementedError,
+                        "current optimized frame position is unavailable");
+        return -1;
+    }
     int addr = _PyInterpreterFrame_LASTI(frame) * sizeof(_Py_CODEUNIT);
     return PyCode_Addr2Line(_PyFrame_GetCode(frame), addr);
 }

@@ -6,6 +6,7 @@
 #include "pycore_critical_section.h"
 #include "pycore_descrobject.h"   // _PyMethodWrapper_Type
 #include "pycore_dict.h"          // DICT_KEYS_UNICODE
+#include "pycore_genobject.h"    // _PyGen_IsSoacManaged()
 #include "pycore_function.h"      // _PyFunction_GetVersionForCurrentState()
 #include "pycore_interpframe.h"   // FRAME_SPECIALS_SIZE
 #include "pycore_list.h"          // _PyListIterObject
@@ -2582,7 +2583,8 @@ _Py_Specialize_ForIter(_PyStackRef iter, _PyStackRef null_or_index, _Py_CODEUNIT
             specialize(instr, FOR_ITER_RANGE);
             return;
         }
-        else if (tp == &PyGen_Type && oparg <= SHRT_MAX) {
+        else if (tp == &PyGen_Type && oparg <= SHRT_MAX &&
+                 !_PyGen_IsSoacManaged((PyGenObject *)iter_o)) {
             assert(instr[oparg + INLINE_CACHE_ENTRIES_FOR_ITER + 1].op.code == END_FOR  ||
                 instr[oparg + INLINE_CACHE_ENTRIES_FOR_ITER + 1].op.code == INSTRUMENTED_END_FOR
             );
@@ -2624,7 +2626,8 @@ _Py_Specialize_Send(_PyStackRef receiver_st, _Py_CODEUNIT *instr)
     assert(ENABLE_SPECIALIZATION);
     assert(_PyOpcode_Caches[SEND] == INLINE_CACHE_ENTRIES_SEND);
     PyTypeObject *tp = Py_TYPE(receiver);
-    if (tp == &PyGen_Type || tp == &PyCoro_Type) {
+    if ((tp == &PyGen_Type || tp == &PyCoro_Type) &&
+        !_PyGen_IsSoacManaged((PyGenObject *)receiver)) {
         /* Don't specialize if PEP 523 is active */
         if (_PyInterpreterState_GET()->eval_frame) {
             SPECIALIZATION_FAIL(SEND, SPEC_FAIL_OTHER);

@@ -647,6 +647,7 @@ NON_ESCAPING_FUNCTIONS = (
     "_PyFrame_StackPush",
     "_PyFunction_SetVersion",
     "_PyGen_GetGeneratorFromFrame",
+    "_PyGen_IsSoacManaged",  # exact native type and immutable metadata pointer only
     "gen_try_set_executing",
     "_PyInterpreterState_GET",
     "_PyList_AppendTakeRef",

@@ -1371,6 +1371,7 @@ dummy_func(
             assert(frame->owner != FRAME_OWNED_BY_INTERPRETER);
             if (!IS_PEP523_HOOKED(tstate) &&
                 (Py_TYPE(receiver_o) == &PyGen_Type || Py_TYPE(receiver_o) == &PyCoro_Type) &&
+                !_PyGen_IsSoacManaged((PyGenObject *)receiver_o) &&
                 gen_try_set_executing((PyGenObject *)receiver_o))
             {
                 PyGenObject *gen = (PyGenObject *)receiver_o;
@@ -1418,6 +1419,7 @@ dummy_func(
         op(_SEND_GEN_FRAME, (receiver, v -- receiver, gen_frame)) {
             PyGenObject *gen = (PyGenObject *)PyStackRef_AsPyObjectBorrow(receiver);
             DEOPT_IF(Py_TYPE(gen) != &PyGen_Type && Py_TYPE(gen) != &PyCoro_Type);
+            DEOPT_IF(_PyGen_IsSoacManaged(gen));
             DEOPT_IF(!gen_try_set_executing((PyGenObject *)gen));
             STAT_INC(SEND, hit);
             _PyInterpreterFrame *pushed_frame = &gen->gi_iframe;
@@ -3490,6 +3492,7 @@ dummy_func(
         op(_FOR_ITER_GEN_FRAME, (iter, null -- iter, null, gen_frame)) {
             PyGenObject *gen = (PyGenObject *)PyStackRef_AsPyObjectBorrow(iter);
             DEOPT_IF(Py_TYPE(gen) != &PyGen_Type);
+            DEOPT_IF(_PyGen_IsSoacManaged(gen));
             DEOPT_IF(!gen_try_set_executing((PyGenObject *)gen));
             STAT_INC(FOR_ITER, hit);
             _PyInterpreterFrame *pushed_frame = &gen->gi_iframe;
@@ -5737,7 +5740,7 @@ dummy_func(
 
         tier2 op(_RECORD_NOS_GEN_FUNC, (nos, tos -- nos, tos)) {
             PyObject *obj = PyStackRef_AsPyObjectBorrow(nos);
-            if (PyGen_Check(obj)) {
+            if (PyGen_Check(obj) && !_PyGen_IsSoacManaged((PyGenObject *)obj)) {
                 PyObject *func = (PyObject *)_PyFrame_GetFunction(&((PyGenObject *)obj)->gi_iframe);
                 RECORD_VALUE(func);
             }
