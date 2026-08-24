@@ -33,6 +33,14 @@ static inline int
 _PyFrame_CheckSoacExecution(_PyInterpreterFrame *frame)
 {
     if (!(_PyFrame_GetCode(frame)->co_flags & CO_FUTURE_STRICT)) {
+        PyObject *function = PyStackRef_AsPyObjectBorrow(frame->f_funcobj);
+        if (frame->soac_dataclass_checked_activation != NULL ||
+            (function != NULL && PyFunction_Check(function) &&
+             ((PyFunctionObject *)function)->func_soac_required_boundary)) {
+            if (_PySOAC_DataclassCheckRequiredFrame(frame) < 0) {
+                return -1;
+            }
+        }
         if (frame->soac_dataclass_invocation != NULL ||
             (frame->previous != NULL &&
              frame->previous->soac_dataclass_invocation != NULL)) {
@@ -168,8 +176,10 @@ static inline void _PyFrame_Copy(_PyInterpreterFrame *src, _PyInterpreterFrame *
     dest->instr_ptr = src->instr_ptr;
     dest->soac_dataclass_role = src->soac_dataclass_role;
     dest->soac_dataclass_invocation = src->soac_dataclass_invocation;
+    dest->soac_dataclass_checked_activation = src->soac_dataclass_checked_activation;
     src->soac_dataclass_role = 0;
     src->soac_dataclass_invocation = NULL;
+    src->soac_dataclass_checked_activation = NULL;
 #ifdef Py_GIL_DISABLED
     dest->tlbc_index = src->tlbc_index;
 #endif
@@ -231,6 +241,7 @@ _PyFrame_Initialize(
     frame->visited = 0;
     frame->soac_dataclass_role = 0;
     frame->soac_dataclass_invocation = NULL;
+    frame->soac_dataclass_checked_activation = NULL;
 #ifdef Py_DEBUG
     frame->lltrace = 0;
 #endif
@@ -414,6 +425,7 @@ _PyFrame_PushTrampolineUnchecked(PyThreadState *tstate, PyCodeObject *code, int 
     frame->visited = 0;
     frame->soac_dataclass_role = 0;
     frame->soac_dataclass_invocation = NULL;
+    frame->soac_dataclass_checked_activation = NULL;
 #ifdef Py_DEBUG
     frame->lltrace = 0;
 #endif

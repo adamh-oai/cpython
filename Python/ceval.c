@@ -1231,6 +1231,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int 
     entry.frame.visited = 0;
     entry.frame.soac_dataclass_role = 0;
     entry.frame.soac_dataclass_invocation = NULL;
+    entry.frame.soac_dataclass_checked_activation = NULL;
     entry.frame.return_offset = 0;
 #ifdef Py_DEBUG
     entry.frame.lltrace = 0;
@@ -1680,7 +1681,7 @@ fail:
 static int
 initialize_locals(PyThreadState *tstate, PyFunctionObject *func,
     _PyStackRef *localsplus, _PyStackRef const *args,
-    Py_ssize_t argcount, PyObject *kwnames)
+    Py_ssize_t argcount, PyObject *kwnames, unsigned char *soac_supplied)
 {
     PyCodeObject *co = (PyCodeObject*)func->func_code;
     const Py_ssize_t total_args = co->co_argcount + co->co_kwonlyargcount;
@@ -1852,6 +1853,15 @@ initialize_locals(PyThreadState *tstate, PyFunctionObject *func,
         goto fail_post_args;
     }
 
+    /* The native binder, not a second name lookup or a sentinel comparison,
+     * decides which actual slots came from this caller. No callback occurs
+     * between this snapshot and beginning ordinary default insertion. */
+    if (soac_supplied != NULL) {
+        for (i = 0; i < total_args; i++) {
+            soac_supplied[i] = !PyStackRef_IsNull(localsplus[i]);
+        }
+    }
+
     /* Add missing positional arguments (copy default values from defs) */
     if (argcount < co->co_argcount) {
         Py_ssize_t defcount = func->func_defaults == NULL ? 0 : PyTuple_GET_SIZE(func->func_defaults);
@@ -1980,10 +1990,11 @@ _PyEval_FrameClearAndPop(PyThreadState *tstate, _PyInterpreterFrame * frame)
 }
 
 /* Consumes references to func, locals and all the args */
-_PyInterpreterFrame *
-_PyEvalFramePushAndInit(PyThreadState *tstate, _PyStackRef func,
+static _PyInterpreterFrame *
+eval_frame_push_and_init(PyThreadState *tstate, _PyStackRef func,
                         PyObject *locals, _PyStackRef const* args,
-                        size_t argcount, PyObject *kwnames, _PyInterpreterFrame *previous)
+                        size_t argcount, PyObject *kwnames, _PyInterpreterFrame *previous,
+                        PyObject *soac_activation)
 {
     PyFunctionObject *func_obj = (PyFunctionObject *)PyStackRef_AsPyObjectBorrow(func);
     PyCodeObject * code = (PyCodeObject *)func_obj->func_code;
@@ -1993,7 +2004,11 @@ _PyEvalFramePushAndInit(PyThreadState *tstate, _PyStackRef func,
         goto fail;
     }
     _PyFrame_Initialize(tstate, frame, func, locals, code, 0, previous);
-    if (initialize_locals(tstate, func_obj, frame->localsplus, args, argcount, kwnames)) {
+    frame->soac_dataclass_checked_activation = Py_XNewRef(soac_activation);
+    unsigned char *supplied = soac_activation == NULL ? NULL
+        : _PySOAC_DataclassSuppliedMask(soac_activation);
+    if (initialize_locals(tstate, func_obj, frame->localsplus, args, argcount, kwnames,
+                          supplied)) {
         assert(frame->owner == FRAME_OWNED_BY_THREAD);
         clear_thread_frame(tstate, frame);
         return NULL;
@@ -2014,6 +2029,16 @@ fail:
     }
     PyErr_NoMemory();
     return NULL;
+}
+
+_PyInterpreterFrame *
+_PyEvalFramePushAndInit(PyThreadState *tstate, _PyStackRef func,
+                        PyObject *locals, _PyStackRef const *args,
+                        size_t argcount, PyObject *kwnames,
+                        _PyInterpreterFrame *previous)
+{
+    return eval_frame_push_and_init(tstate, func, locals, args, argcount,
+                                    kwnames, previous, NULL);
 }
 
 /* Same as _PyEvalFramePushAndInit but takes an args tuple and kwargs dict.
@@ -2090,7 +2115,7 @@ eval_vector_with_dataclass(PyThreadState *tstate, PyFunctionObject *func,
                PyObject *locals,
                PyObject* const* args, size_t argcount,
                PyObject *kwnames, PyObject *invocation, unsigned int stage,
-               _PyInterpreterFrame *parent)
+               _PyInterpreterFrame *parent, PyObject *soac_activation)
 {
     size_t total_args = argcount;
     if (kwnames) {
@@ -2119,13 +2144,17 @@ eval_vector_with_dataclass(PyThreadState *tstate, PyFunctionObject *func,
             arguments[i+argcount] = PyStackRef_FromPyObjectNew(args[i+argcount]);
         }
     }
-    _PyInterpreterFrame *frame = _PyEvalFramePushAndInit(
+    _PyInterpreterFrame *frame = eval_frame_push_and_init(
         tstate, PyStackRef_FromPyObjectNew(func), locals,
-        arguments, argcount, kwnames, NULL);
+        arguments, argcount, kwnames, NULL, soac_activation);
     if (total_args > 8) {
         PyMem_Free(arguments);
     }
     if (frame == NULL) {
+        return NULL;
+    }
+    if (soac_activation != NULL && _PySOAC_DataclassCheckBound(frame) < 0) {
+        _PyEval_FrameClearAndPop(tstate, frame);
         return NULL;
     }
     if (invocation != NULL &&
@@ -2143,7 +2172,7 @@ _PyEval_Vector(PyThreadState *tstate, PyFunctionObject *func,
                PyObject *kwnames)
 {
     return eval_vector_with_dataclass(tstate, func, locals, args, argcount,
-                                     kwnames, NULL, 0, NULL);
+                                     kwnames, NULL, 0, NULL, NULL);
 }
 
 PyObject *
@@ -2153,7 +2182,16 @@ _PySOAC_DataclassEvalVector(PyThreadState *tstate, PyFunctionObject *func,
                _PyInterpreterFrame *parent)
 {
     return eval_vector_with_dataclass(tstate, func, locals, args, argcount,
-                                     kwnames, invocation, stage, parent);
+                                     kwnames, invocation, stage, parent, NULL);
+}
+
+PyObject *
+_PySOAC_DataclassEvalCheckedVector(PyThreadState *tstate, PyFunctionObject *func,
+               PyObject *const *args, size_t argcount, PyObject *kwnames,
+               PyObject *activation)
+{
+    return eval_vector_with_dataclass(tstate, func, NULL, args, argcount,
+                                     kwnames, NULL, 0, NULL, activation);
 }
 
 /* Legacy API */

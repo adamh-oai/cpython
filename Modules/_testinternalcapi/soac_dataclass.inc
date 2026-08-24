@@ -64,8 +64,15 @@ soac_dc_test_enter(PyObject *owner, unsigned int stage,
                    const PySoacDataclassFrameView *parent,
                    const PySoacDataclassFrameView *child, unsigned int *role)
 {
-    if (!PyTuple_CheckExact(owner) || PyTuple_GET_SIZE(owner) != 6) {
+    if (!PyTuple_CheckExact(owner) || PyTuple_GET_SIZE(owner) != 8) {
         PyErr_SetString(PyExc_TypeError, "invalid native dataclass fixture owner");
+        return -1;
+    }
+    PyObject *invocation = PySoac_DataclassFrameInvocation(child);
+    if (invocation == NULL ||
+        (parent != NULL && PySoac_DataclassFrameInvocation(parent) != invocation)) {
+        PyErr_SetString(PySoac_GetStrictRuntimeUnavailableError(),
+                        "fixture did not receive one explicit invocation");
         return -1;
     }
     int generated = soac_dc_test_generated_enter(owner, stage, parent, child, role);
@@ -105,6 +112,11 @@ static int
 soac_dc_test_create(PyObject *owner, const PySoacDataclassFrameView *producer,
                     PyObject *code, unsigned int *role)
 {
+    if (PySoac_DataclassFrameInvocation(producer) == NULL) {
+        PyErr_SetString(PySoac_GetStrictRuntimeUnavailableError(),
+                        "fixture creation has no explicit invocation");
+        return -1;
+    }
     PyObject *sites = PyTuple_GET_ITEM(owner, 3);
     for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(sites); i++) {
         PyObject *site = PyTuple_GET_ITEM(sites, i);
@@ -269,12 +281,15 @@ error:
 }
 
 #include "soac_dataclass_bridges.inc"
+#include "soac_dataclass_boundary.inc"
 
 static PyObject *
 soac_dataclass_fixture(PyObject *self, PyObject *args)
 {
     PyObject *root, *bindings, *edges, *sites, *payload, *members = NULL;
-    if (!PyArg_ParseTuple(args, "OOOOO|O", &root, &bindings, &edges, &sites, &payload, &members) ||
+    PyObject *boundaries = NULL, *components = NULL;
+    if (!PyArg_ParseTuple(args, "OOOOO|OOO", &root, &bindings, &edges, &sites, &payload,
+                          &members, &boundaries, &components) ||
         soac_dc_test_check_bindings(bindings) < 0 ||
         soac_dc_test_check_bridge_payload(payload) < 0) {
         return NULL;
@@ -286,6 +301,11 @@ soac_dataclass_fixture(PyObject *self, PyObject *args)
         .validate_member = soac_dc_test_member,
         .bridge = soac_dc_test_bridge,
         .compiled = soac_dc_test_compiled,
+        .created = soac_dc_test_created,
+        .bound = soac_dc_test_bound,
+        .value = soac_dc_test_checked_value,
+        .validate_component = soac_dc_test_component,
+        .init_value = soac_dc_test_init_value,
     };
     if (PySoac_SetDataclassCallbacks(&callbacks) < 0) {
         return NULL;
@@ -314,13 +334,19 @@ soac_dataclass_fixture(PyObject *self, PyObject *args)
         Py_DECREF(normalized_sites);
         return NULL;
     }
-    PyObject *owner = PyTuple_Pack(6, snapshot, bindings,
+    PyObject *normalized_boundaries = soac_dc_test_boundaries(boundaries);
+    PyObject *normalized_components = normalized_boundaries == NULL ? NULL
+        : soac_dc_test_components(components);
+    PyObject *owner = normalized_components == NULL ? NULL : PyTuple_Pack(8, snapshot, bindings,
                                   normalized_edges, normalized_sites, payload,
-                                  normalized_members);
+                                  normalized_members, normalized_boundaries,
+                                  normalized_components);
     Py_DECREF(snapshot);
     Py_DECREF(normalized_edges);
     Py_DECREF(normalized_sites);
     Py_DECREF(normalized_members);
+    Py_XDECREF(normalized_boundaries);
+    Py_XDECREF(normalized_components);
     if (owner == NULL) {
         return NULL;
     }
@@ -371,10 +397,11 @@ soac_dataclass_fixture_c_proxy(PyObject *self, PyObject *function)
 static PyObject *
 soac_dataclass_frame_offsets(PyObject *self, PyObject *unused)
 {
-    return Py_BuildValue("{s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n}",
+    return Py_BuildValue("{s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n}",
                          "frame_size", sizeof(_PyInterpreterFrame),
                          "role", offsetof(_PyInterpreterFrame, soac_dataclass_role),
                          "invocation", offsetof(_PyInterpreterFrame, soac_dataclass_invocation),
+                         "checked_activation", offsetof(_PyInterpreterFrame, soac_dataclass_checked_activation),
                          "localsplus", offsetof(_PyInterpreterFrame, localsplus),
                          "thread_base_frame_pointer", offsetof(PyThreadState, base_frame),
                          "thread_soft_limit", offsetof(_PyThreadStateImpl, c_stack_soft_limit),

@@ -2296,9 +2296,11 @@ Python/pydtrace.o: $(srcdir)/Include/pydtrace.d $(DTRACE_DEPS)
 Objects/typeobject.o: Objects/typeslots.inc
 Objects/typeobject.o: $(srcdir)/Objects/soac_type.inc $(srcdir)/Include/internal/pycore_soac_type.h
 Objects/funcobject.o: $(srcdir)/Objects/soac_dataclass.inc $(srcdir)/Objects/soac_dataclass_bridge.inc $(srcdir)/Include/internal/pycore_soac_dataclass.h
+Objects/funcobject.o: $(srcdir)/Objects/soac_dataclass_boundary.inc
 Objects/funcobject.o: $(srcdir)/Objects/soac_descriptor.inc $(srcdir)/Include/internal/pycore_soac_descriptor.h
 Objects/descrobject.o: $(srcdir)/Include/internal/pycore_soac_descriptor.h
 Modules/_testinternalcapi.o: $(srcdir)/Modules/_testinternalcapi/soac_dataclass.inc $(srcdir)/Modules/_testinternalcapi/soac_dataclass_bridges.inc
+Modules/_testinternalcapi.o: $(srcdir)/Modules/_testinternalcapi/soac_dataclass_boundary.inc
 
 .PHONY: regen-typeslots
 regen-typeslots:

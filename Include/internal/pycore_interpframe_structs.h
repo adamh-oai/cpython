@@ -53,6 +53,7 @@ struct _PyInterpreterFrame {
      * when execution ends, even if a Python traceback retains the frame. */
     unsigned int soac_dataclass_role;
     PyObject *soac_dataclass_invocation;
+    PyObject *soac_dataclass_checked_activation;
     /* Locals and stack */
     _PyStackRef localsplus[1];
 };

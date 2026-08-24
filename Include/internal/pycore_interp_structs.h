@@ -892,7 +892,7 @@ struct _is {
         int annotation_replay_closed;
         PySoacDataclassCallbacks dataclass_callbacks;
         uint64_t dataclass_creation_counter;
-        PyObject *dataclass_builtins[5];  /* Callback-free weak references. */
+        PyObject *dataclass_builtins[7];  /* Callback-free weak references. */
         unsigned int dataclass_builtin_seen;
         int dataclass_installing;
         int dataclass_closed;

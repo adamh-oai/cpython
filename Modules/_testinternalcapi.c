@@ -3313,6 +3313,10 @@ soac_descriptor_birth_foreign(PyObject *self, PyObject *const *args,
 }
 
 static PyMethodDef module_functions[] = {
+    {"soac_dataclass_boundary_owner", soac_dataclass_boundary_owner, METH_VARARGS},
+    {"soac_dataclass_boundary_state", soac_dataclass_boundary_state, METH_O},
+    {"soac_dataclass_configure_boundary", soac_dataclass_configure_boundary, METH_VARARGS},
+    {"soac_dataclass_forward_checked_entry", soac_dataclass_forward_checked_entry, METH_O},
     {"soac_new_builtin_descriptor", _PyCFunction_CAST(soac_new_builtin_descriptor), METH_FASTCALL},
     {"soac_descriptor_birth_exhaustion", _PyCFunction_CAST(soac_descriptor_birth_exhaustion), METH_FASTCALL},
     {"soac_descriptor_birth_foreign", _PyCFunction_CAST(soac_descriptor_birth_foreign), METH_FASTCALL},

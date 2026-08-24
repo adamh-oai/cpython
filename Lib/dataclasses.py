@@ -8,7 +8,8 @@ import itertools
 import annotationlib
 import abc
 from reprlib import recursive_repr
-from _types import _dataclass_record_source, _dataclass_exec, _dataclass_set_member
+from _types import (_dataclass_record_source, _dataclass_exec,
+                    _dataclass_set_member, _dataclass_init_value)
 
 
 __all__ = ['dataclass',
@@ -647,6 +648,7 @@ def _field_init(f, frozen, globals, self_name, slots):
         return None
 
     # Now, actually generate the field assignment.
+    value = _dataclass_init_value(f, value, globals)
     return _field_assign(frozen, f.name, value, self_name)
 
 

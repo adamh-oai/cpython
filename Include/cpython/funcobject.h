@@ -127,16 +127,20 @@ PyAPI_FUNC(int) PyFunction_MatchesSoacDataclassCreation(
  * Callbacks must not execute Python; successful validation must not allocate.
  * Enter runs after ordinary argument binding and returns 1 for an explicit
  * privileged edge, 0 for an ordinary child, or -1 on an invalid transition.
- * Create has the same return convention and precedes CREATE watchers.
+ * Create has the same return convention and precedes CREATE watchers. It is
+ * pure/idempotent and may run repeatedly across native allocations; any
+ * one-way per-function birth consumption belongs in Created instead.
  * ValidateMember returns 0 for success and -1 for failure.
  * Bridge also returns 0/-1. SOURCE publishes one reached fragment; EXEC and
  * MEMBER must support repeated validation across native allocation/audit
  * boundaries. Compiled receives the exact native compiler result and a
  * C-allocated weak-only tree: (weakref(code), ((const_index, child_tree), ...)).
  * It publishes this one compilation without retaining a code/co_consts tree.
+ * Native code materializes every code's ordinary bytecode cache before this
+ * callback, then revalidates the exact compile edge after those allocations.
  * The owner must authenticate source fragments/call edges, never accept a
  * public tuple or a helper name as production authority. */
-#define Py_SOAC_DATACLASS_ABI 1
+#define Py_SOAC_DATACLASS_ABI 2
 #define Py_SOAC_DATACLASS_ROOT_FACTORY 1
 #define Py_SOAC_DATACLASS_ROOT_APPLY 2
 /* Callback-only stage; never accepted by the public root vectorcall. */
@@ -146,12 +150,17 @@ PyAPI_FUNC(int) PyFunction_MatchesSoacDataclassCreation(
 #define Py_SOAC_DATACLASS_BRIDGE_MEMBER 3
 #define Py_SOAC_DATACLASS_BUILTIN_EXEC 4
 #define Py_SOAC_DATACLASS_BUILTIN_SETATTR 5
+#define Py_SOAC_DATACLASS_BRIDGE_VALUE 6
+#define Py_SOAC_DATACLASS_BRIDGE_INIT_VALUE 7
 #define Py_SOAC_DATACLASS_MEMBER 1
 #define Py_SOAC_DATACLASS_FROZEN_SETATTR 2
 #define Py_SOAC_DATACLASS_FROZEN_DELATTR 3
 #define Py_SOAC_DATACLASS_DECORATOR 256
 #define Py_SOAC_DATACLASS_GENERATED_FACTORY 257
 #define Py_SOAC_DATACLASS_ANNOTATION_PROVIDER 258
+#define Py_SOAC_DATACLASS_REPR_IMPLEMENTATION 259
+#define Py_SOAC_DATACLASS_COMPONENT_ANNOTATE 1
+#define Py_SOAC_DATACLASS_COMPONENT_REPR 2
 typedef struct _PySoacDataclassFrameView PySoacDataclassFrameView;
 typedef struct {
     unsigned int abi_version;
@@ -166,7 +175,63 @@ typedef struct {
                   unsigned int, PyObject *const *, Py_ssize_t);
     int (*compiled)(PyObject *, const PySoacDataclassFrameView *, PyObject *,
                     PyObject *, PyObject *);
+    /* The actual record is attached but the function is not yet tracked or
+     * published to CREATE watchers. Unlike validation callbacks, Created may
+     * allocate a prebuilt check delegate/spec through Configure. Configure
+     * must precede any GC-visible weak function witness. It must not execute
+     * Python or deliberately publish a strong function reference. Native
+     * revalidation and safe terminal disposal on failure follow. */
+    int (*created)(PyObject *, PyObject *, const PySoacDataclassFrameView *,
+                   PyObject *, unsigned int);
+    /* One byte per native positional/keyword-only parameter, including self.
+     * Supplied was captured after caller binding, BEFORE default insertion.
+     * Bound may mark only omitted factory slots deferred. These bits then
+     * remain immutable for the entire activation, including repeated lines. */
+    int (*bound)(PyObject *, const PySoacDataclassFrameView *,
+                 const unsigned char *, unsigned char *, Py_ssize_t);
+    int (*value)(PyObject *, Py_ssize_t, PyObject *);
+    int (*validate_component)(PyObject *, PyObject *, PyObject *,
+                              unsigned int, Py_ssize_t);
+    /* Return 1 for a selected required factory expression, 0 unchanged, -1
+     * on error. A selected name is borrowed exact Unicode owned by the
+     * prepared compiler plan, collision-free against its parameter names.
+     * Repeated validation across native allocations must be idempotent. */
+    int (*init_value)(PyObject *, const PySoacDataclassFrameView *,
+                      PyObject *, PyObject *, PyObject *, PyObject **);
 } PySoacDataclassCallbacks;
+
+#define Py_SOAC_DATACLASS_BOUNDARY_ABI 1
+typedef struct {
+    Py_ssize_t instruction;  /* Native code units, including inline caches. */
+    Py_ssize_t parameter_index;
+} PySoacDataclassValueSite;
+typedef struct {
+    unsigned int abi_version;
+    Py_ssize_t parameter_count;
+    const unsigned char *factory_mask;
+    Py_ssize_t value_site_count;
+    const PySoacDataclassValueSite *value_sites;
+} PySoacDataclassBoundarySpec;
+
+/* Configure only during this exact record's unpublished Created callback.
+ * Copies all arrays; owns the GC-visible delegate, never a function/class
+ * backedge. The actual code must be an ordinary synchronous fixed-signature
+ * function. Its required entry is armed before CREATE watchers, while normal
+ * SET_FUNCTION_ATTRIBUTE still supplies defaults/closure afterward. */
+PyAPI_FUNC(int) PyFunction_ConfigureSoacDataclassBoundary(
+    PyObject *invocation, PyObject *function, PyObject *verified_code,
+    PyObject *check_owner, const PySoacDataclassBoundarySpec *, size_t spec_size);
+/* 1 for the exact installed delegate, 0 unrelated/different delegate, -1 for
+ * a recognized invalid/terminal record. No vectorcall equality requirement:
+ * forwarding preserves the boundary; stock entry still fails its frame guard. */
+PyAPI_FUNC(int) PyFunction_MatchesSoacDataclassBoundary(
+    PyObject *function, PyObject *expected_check_owner);
+/* Fresh owned components only. ANNOTATE uses closure_index=-1 and the actual
+ * func_annotate edge; REPR uses the explicit actual closure-cell projection.
+ * Native roles and the fixed component-policy callback are both required. */
+PyAPI_FUNC(int) PyFunction_AdoptSoacDataclassComponent(
+    PyObject *invocation, PyObject *method, PyObject *component,
+    unsigned int kind, Py_ssize_t closure_index);
 
 /* One immutable callback table per interpreter, closed before teardown. */
 PyAPI_FUNC(int) PySoac_SetDataclassCallbacks(const PySoacDataclassCallbacks *);
@@ -203,7 +268,11 @@ PyAPI_FUNC(PyObject *) PySoac_GetDataclassRecipe(unsigned int kind);
 PyAPI_FUNC(int) PySoac_MatchesBuiltinFunction(
     PyObject *actual, const char *name, Py_ssize_t name_length);
 
-/* Borrowed results. Local returns NULL/no error for an unbound slot; a bound
+/* Borrowed results. Enter and Bound precede MAKE_CELL/COPY_FREE_VARS: bound
+ * parameter slots are raw values, and free variables still belong to the
+ * authenticated actual function closure. Later views use the executed
+ * code's explicit local/cell layout. Never infer a slot kind from its value.
+ * Local returns NULL/no error for an unbound slot; a bound
  * Python None is Py_None. CellValue distinguishes an empty actual cell
  * (NULL/no error) from a non-cell slot (NULL/TypeError). Invalid indices
  * raise IndexError. No accessor materializes f_locals or calls Python. */
@@ -211,6 +280,11 @@ PyAPI_FUNC(PyObject *) PySoac_DataclassFrameFunction(const PySoacDataclassFrameV
 PyAPI_FUNC(PyObject *) PySoac_DataclassFrameCode(const PySoacDataclassFrameView *);
 PyAPI_FUNC(PyObject *) PySoac_DataclassFrameGlobals(const PySoacDataclassFrameView *);
 PyAPI_FUNC(PyObject *) PySoac_DataclassFrameBuiltins(const PySoacDataclassFrameView *);
+/* The exact invocation carried by this explicit callback view, including a
+ * root/child Enter view before its frame is attached. NULL for no view or for
+ * a generated required-boundary call (which has no construction authority).
+ * Borrowed only for the callback's duration; never consults ambient frames. */
+PyAPI_FUNC(PyObject *) PySoac_DataclassFrameInvocation(const PySoacDataclassFrameView *);
 PyAPI_FUNC(PyObject *) PySoac_DataclassFrameLocal(
     const PySoacDataclassFrameView *, Py_ssize_t);
 PyAPI_FUNC(PyObject *) PySoac_DataclassFrameCellValue(

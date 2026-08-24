@@ -265,7 +265,7 @@ SOAC Dataclass Invocations
 
 The private dataclass protocol authorizes one explicit adapter invocation,
 not arbitrary execution of strict code. The trusted runtime installs one
-``PySoacDataclassCallbacks`` table by value in the current interpreter.
+``PySoacDataclassCallbacks`` ABI-2 table by value in the current interpreter.
 Registration is single assignment; only the identical callback values can
 be registered again. Interpreter teardown closes the table before clearing
 references. Free-threaded builds do not support this protocol.
@@ -330,14 +330,36 @@ Callbacks receive borrowed, callback-duration frame views. Instruction
 offsets count code units including inline caches, not byte offsets or
 instruction ordinals. Local and cell accessors do not materialize locals or
 invoke Python. Callbacks must not call Python; successful validation must not
-allocate. Entry runs after binding, with exact executed code and actual
-callee/environment operands. Only a direct opcode-dispatched Python edge
+allocate, except for the explicitly allocating ``created`` callback below.
+Entry runs after binding, with exact executed code and actual
+callee/environment operands. Entry and generated-boundary views precede
+``MAKE_CELL``/``COPY_FREE_VARS``: parameters are raw bound values and captured
+free variables still reside in the authenticated function's actual closure.
+Later views use the executed code's explicit local/cell projection, never a
+slot kind guessed from the value's type. ``PySoac_DataclassFrameInvocation``
+returns the exact invocation carried by that view, including an Enter view
+whose frame is not yet attached. It does not consult ambient interpreter
+frames. Generated checked-call views return NULL: they carry no construction
+authority. Only a direct opcode-dispatched Python edge
 can carry an immediate parent's context. Public C call APIs, C proxies,
 ordinary callbacks, and type-call trampolines do not inherit that context.
 Monitoring and specialized call paths preserve this boundary explicitly.
 
-Native ``MAKE_FUNCTION`` publishes a creation record before GC tracking and
-CREATE watchers. It uses the existing single-assignment function owner slot.
+Native ``MAKE_FUNCTION`` attaches a creation record before GC tracking and
+CREATE watchers. The ``create`` role validator is pure/idempotent and can run
+more than once around native allocations. The subsequent ``created`` callback
+receives the actual unpublished function and explicit invocation. It may
+configure a prebuilt generated-boundary delegate, but must not execute Python
+or deliberately publish a strong function reference. Configuration must
+precede allocating any GC-visible weak function witness, because observers
+can acquire that weak referent before CREATE. Any one-way per-function
+birth-slot consumption belongs here, not in ``create``. Native revalidation of the producer, code,
+role, invocation, and installed boundary precedes publication. Failure marks
+the native owner terminal before releasing the captured callback owner or
+constructor reference. Normal function destruction clears weakrefs and its
+actual current fields; an escaped reference remains a valid terminal object,
+never a freed allocation or an unchecked required body.
+The record uses the existing single-assignment function owner slot.
 The record has a callback-free weak code witness and no strong edge back to
 its function. Deallocation tombstones the nonowning function identity before
 weak-reference callbacks and reference releases. ``PyFunction_HasSoacDataclassCreation``
@@ -346,15 +368,19 @@ identifies that exact attached role, even after ordinary decline;
 invocation, unchanged original code, and expected creation role. Public
 constructors and function/code copies do not copy these records.
 
-The three ``_types`` bridges record reached source fragments, execute the
-exact verified generated text, and install one generated member. Their
+Three ``_types`` construction bridges record reached source fragments, execute
+the exact verified generated text, and install one generated member. Their
 ordinary C entries delegate normally and grant no context. Opcode dispatch
 requires the exact canonical helper object and its implementation. Canonical
 helpers and the original ``exec``/``setattr`` objects have weak witnesses
 captured at native creation; late Python bindings cannot register replacements,
 and dead witnesses are never regranted. The compiled callback receives a
 C-allocated recursive weak-code tree rather than retaining the compiled root
-or its ``co_consts`` graph. The generated factory keeps its ordinary direct
+or its ``co_consts`` graph. Before this callback, native code materializes
+each code object's ordinary bytecode cache and revalidates the compile edge
+after those allocations. The callback can resolve code-unit call sites
+without allocating or performing a second Python compilation. The generated
+factory keeps its ordinary direct
 ``CALL_FUNCTION_EX``; no extra C factory wrapper changes argument lifetimes.
 
 Generated-member installation consumes one fresh record, freezes function
@@ -363,10 +389,79 @@ normal type/dictionary transaction. Only an exact frozen-setter/deleter role
 can install its corresponding protected hook. Final members, field
 descriptors, sealed classes, and terminal owners remain protected. Operation
 completion precedes displaced-reference finalizers. A generated method still
-has ordinary bytecode and no source/JIT or checked-entry capability. Admission
-must decline if it requires a generated checked-signature policy that the
-runtime has not implemented. Original ``CO_FUTURE_STRICT`` code remains denied
-at every frame entry; no dataclass context relaxes that guard.
+has ordinary bytecode and no source/JIT capability. A required signature
+policy uses the distinct checked-entry protocol below; a metadata seal alone
+does not install checks. Admission must decline if it needs a generated
+policy that the runtime has not implemented. Original ``CO_FUTURE_STRICT``
+code remains denied at every frame entry; no dataclass context relaxes that
+guard.
+
+Required generated calls and components
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``PyFunction_ConfigureSoacDataclassBoundary`` accepts only the exact
+invocation-owned, unpublished member during ``created``. It copies an ABI-1
+``PySoacDataclassBoundarySpec`` and captures the GC-visible check owner.
+The code must be an ordinary synchronous optimized function with a fixed
+positional/keyword-only signature; variadic arguments, generators, coroutines,
+and strict-source code are unsupported. The parameter count includes self.
+The native specification has one byte per parameter, with a zero/one factory
+mask, and sorted unique CALL code-unit offsets paired with distinct factory
+parameter indices. Every selected factory parameter has one required value
+site. This immutable specification is not recovered from mutable Python
+attributes, defaults, names, or a code object's shared specialization state.
+
+Configuration installs a dedicated native checked vectorcall and permanent
+required-entry marker before CREATE watchers. Constructors still supply
+defaults and closure through normal ``SET_FUNCTION_ATTRIBUTE`` operations;
+an early watcher call with an incomplete closure fails explicitly. Each call
+captures its immutable delegate before callback-capable binding, runs the
+ordinary CPython binder, and records which parameters the caller supplied
+before inserting defaults. The ``bound`` callback sees those supplied bits
+and actual bound values. It can defer only an omitted selected factory slot
+whose bound value is the attested placeholder. Passing that placeholder
+explicitly still undergoes the normal entry predicate.
+
+The additional ``_types._dataclass_init_value`` bridge selects only an
+individually authenticated factory-expression edge. The ``init_value``
+callback validates the actual Field, complete expression, locals dictionary,
+and immutable generation plan and returns a prebuilt collision-free helper
+name. Native code wraps the entire conditional initialization value with the
+canonical ``_types._dataclass_check_value`` helper and captures that object in
+the actual builder locals. It revalidates after allocation, lookups, and
+dictionary watchers. Completed dictionary writes are not rolled back on a
+later failure, but no invalid generated text is returned. Unselected or
+ordinary indirect calls return the original expression unchanged.
+
+At the recorded CALL site, the actual frame's checked activation requires
+the exact canonical value-helper object, even if another callable or C proxy
+has been substituted. Warmed and instrumented calls preserve this check.
+The ``value`` callback runs only for deferred parameters, once per dynamic
+evaluation of their whole conditional, before the generated assignment. A
+trace jump that repeats the expression checks the new result again; the
+deferred classification remains immutable for the activation. Supplied values
+already checked at entry are not rechecked after ordinary body/tracing
+changes. This bounded cohort has no required return predicate.
+
+``PyFunction_MatchesSoacDataclassBoundary`` proves the exact installed check
+owner, not merely a required bit. Forwarding C vectorcalls to the captured
+checked entry remain valid. Restoring ``_PyFunction_Vectorcall`` through the
+supported setter cannot bypass checks: a required generated body's actual
+frame must own the matching completed activation. No code-wide flag or
+thread-local permit is involved. Function copies stay ordinary, record-free,
+and incapable of acquiring source/JIT or check authority from shared code.
+Failed or completed construction invocations do not revoke already installed
+required boundaries; their active catalogs and class edges are released.
+
+``PyFunction_AdoptSoacDataclassComponent`` separately seals only the exact
+fresh annotation provider or repr implementation of a fresh member. The
+native creation roles, original code, active invocation, actual
+``func_annotate`` or explicit closure-cell relationship, and fixed
+``validate_component`` policy callback must all agree. Sealing is one-way and
+grants only metadata protection, not a source/JIT or required-call capability.
+Shared helpers, user factories, and other closure values are not adopted.
+The component's record has no strong method/class backedge; retaining a
+component does not extend the parent method or class lifetime.
 
 
 SOAC Annotation Replay

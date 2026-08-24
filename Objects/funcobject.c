@@ -516,10 +516,20 @@ func_new_with_qualname(PyObject *code, PyObject *globals, PyObject *qualname,
     op->func_soac_strict_owner_state = FUNC_SOAC_OWNER_NONE;
     op->func_soac_required_boundary = 0;
     if (record != NULL && soac_dataclass_attach_record(op, record, producer) < 0) {
-        /* The object was never tracked or published to CREATE watchers.
-         * Its component references are still the locals released at error. */
-        PyObject_GC_Del(op);
-        goto error;
+        /* Created may have allocated a weak witness whose observer acquired
+         * a reference, or changed ordinary constructor metadata. Tombstone
+         * before callbacks and release only our reference through normal
+         * destruction; never free an observed object or release stale local
+         * aliases to fields whose ownership was already transferred. */
+        PyObject *exception = PyErr_GetRaisedException();
+        record->function = NULL;
+        record->phase = SOAC_DC_RECORD_TERMINAL;
+        op->func_soac_strict_owner_state = FUNC_SOAC_OWNER_TERMINAL;
+        _PyObject_GC_TRACK(op);
+        Py_DECREF(op);
+        Py_DECREF(record);
+        PyErr_SetRaisedException(exception);
+        return NULL;
     }
     Py_XDECREF(record);
     record = NULL;

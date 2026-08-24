@@ -3741,7 +3741,8 @@ dummy_func(
 
         specializing op(_SPECIALIZE_CALL, (counter/1, callable, self_or_null, unused[oparg] -- callable, self_or_null, unused[oparg])) {
             #if ENABLE_SPECIALIZATION
-            if (ADAPTIVE_COUNTER_TRIGGERS(counter)) {
+            if (ADAPTIVE_COUNTER_TRIGGERS(counter) &&
+                frame->soac_dataclass_checked_activation == NULL) {
                 next_instr = this_instr;
                 _Py_Specialize_Call(callable, self_or_null, next_instr, oparg + !PyStackRef_IsNull(self_or_null));
                 DISPATCH_SAME_OPARG();
@@ -3749,6 +3750,13 @@ dummy_func(
             OPCODE_DEFERRED_INC(CALL);
             ADVANCE_ADAPTIVE_COUNTER(this_instr[1].counter);
             #endif  /* ENABLE_SPECIALIZATION */
+        }
+
+        op(_CHECK_NO_SOAC_GENERATED_ACTIVATION, (--)) {
+            /* An ordinary FunctionType copy can warm this shared code first.
+             * Checked generated frames must still reach explicit call-site
+             * dispatch; never inherit a copy's specialized builtin call. */
+            DEOPT_IF(frame->soac_dataclass_checked_activation != NULL);
         }
 
         op(_MAYBE_EXPAND_METHOD, (callable, self_or_null, unused[oparg] -- callable, self_or_null, unused[oparg])) {
@@ -3776,6 +3784,8 @@ dummy_func(
             }
             // Check if the call can be inlined or not
             if (Py_TYPE(callable_o) == &PyFunction_Type &&
+                (frame->soac_dataclass_checked_activation == NULL ||
+                 !_PySOAC_DataclassHasValueSite(frame)) &&
                 !IS_PEP523_HOOKED(tstate) &&
                 ((PyFunctionObject *)callable_o)->vectorcall == _PyFunction_Vectorcall)
             {
@@ -3878,6 +3888,7 @@ dummy_func(
 
         macro(CALL_PY_GENERAL) =
             _RECORD_CALLABLE +
+            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
             unused/1 + // Skip over the counter
             _CHECK_PEP_523 +
             _CHECK_FUNCTION_VERSION +
@@ -3909,6 +3920,7 @@ dummy_func(
 
         macro(CALL_BOUND_METHOD_GENERAL) =
             _RECORD_BOUND_METHOD +
+            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
             unused/1 + // Skip over the counter
             _CHECK_PEP_523 +
             _CHECK_METHOD_VERSION +
@@ -3950,6 +3962,7 @@ dummy_func(
 
         macro(CALL_NON_PY_GENERAL) =
             _RECORD_CALLABLE +
+            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
             unused/1 + // Skip over the counter
             unused/2 +
             _CHECK_IS_NOT_PY_CALLABLE +
@@ -4026,6 +4039,7 @@ dummy_func(
 
         macro(CALL_BOUND_METHOD_EXACT_ARGS) =
             _RECORD_BOUND_METHOD +
+            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
             unused/1 + // Skip over the counter
             _CHECK_PEP_523 +
             _CHECK_CALL_BOUND_METHOD_EXACT_ARGS +
@@ -4041,6 +4055,7 @@ dummy_func(
 
         macro(CALL_PY_EXACT_ARGS) =
             _RECORD_CALLABLE +
+            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
             unused/1 + // Skip over the counter
             _CHECK_PEP_523 +
             _CHECK_FUNCTION_VERSION +
@@ -4080,6 +4095,7 @@ dummy_func(
         }
 
         macro(CALL_TYPE_1) =
+            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
             unused/1 +
             unused/2 +
             _GUARD_NOS_NULL +
@@ -4107,6 +4123,7 @@ dummy_func(
         }
 
         macro(CALL_STR_1) =
+            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
             unused/1 +
             unused/2 +
             _GUARD_NOS_NULL +
@@ -4135,6 +4152,7 @@ dummy_func(
         }
 
         macro(CALL_TUPLE_1) =
+            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
             unused/1 +
             unused/2 +
             _GUARD_NOS_NULL +
@@ -4197,6 +4215,7 @@ dummy_func(
 
         macro(CALL_ALLOC_AND_ENTER_INIT) =
             _RECORD_CALLABLE +
+            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
             unused/1 +
             _CHECK_PEP_523 +
             _CHECK_AND_ALLOCATE_OBJECT +
@@ -4238,6 +4257,7 @@ dummy_func(
 
         macro(CALL_BUILTIN_CLASS) =
             _RECORD_CALLABLE +
+            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
             unused/1 +
             unused/2 +
             _CALL_BUILTIN_CLASS +
@@ -4274,6 +4294,7 @@ dummy_func(
 
         macro(CALL_BUILTIN_O) =
             _RECORD_CALLABLE +
+            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
             unused/1 +
             unused/2 +
             _CALL_BUILTIN_O +
@@ -4310,6 +4331,7 @@ dummy_func(
 
         macro(CALL_BUILTIN_FAST) =
             _RECORD_CALLABLE +
+            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
             unused/1 +
             unused/2 +
             _CALL_BUILTIN_FAST +
@@ -4338,12 +4360,14 @@ dummy_func(
 
         macro(CALL_BUILTIN_FAST_WITH_KEYWORDS) =
             _RECORD_CALLABLE +
+            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
             unused/1 +
             unused/2 +
             _CALL_BUILTIN_FAST_WITH_KEYWORDS +
             _CHECK_PERIODIC_AT_END;
 
         macro(CALL_LEN) =
+            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
             unused/1 +
             unused/2 +
             _GUARD_NOS_NULL +
@@ -4402,6 +4426,7 @@ dummy_func(
         }
 
         macro(CALL_ISINSTANCE) =
+            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
             unused/1 +
             unused/2 +
             _GUARD_THIRD_NULL +
@@ -4409,6 +4434,7 @@ dummy_func(
             _CALL_ISINSTANCE;
 
         macro(CALL_LIST_APPEND) =
+            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
             unused/1 +
             unused/2 +
             _GUARD_CALLABLE_LIST_APPEND +
@@ -4482,6 +4508,7 @@ dummy_func(
 
         macro(CALL_METHOD_DESCRIPTOR_O) =
             _RECORD_CALLABLE +
+            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
             unused/1 +
             unused/2 +
             _CALL_METHOD_DESCRIPTOR_O +
@@ -4525,6 +4552,7 @@ dummy_func(
 
         macro(CALL_METHOD_DESCRIPTOR_FAST_WITH_KEYWORDS) =
             _RECORD_CALLABLE +
+            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
             unused/1 +
             unused/2 +
             _CALL_METHOD_DESCRIPTOR_FAST_WITH_KEYWORDS +
@@ -4564,6 +4592,7 @@ dummy_func(
 
         macro(CALL_METHOD_DESCRIPTOR_NOARGS) =
             _RECORD_CALLABLE +
+            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
             unused/1 +
             unused/2 +
             _CALL_METHOD_DESCRIPTOR_NOARGS +
@@ -4603,6 +4632,7 @@ dummy_func(
         }
 
         macro(CALL_METHOD_DESCRIPTOR_FAST) =
+            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
             unused/1 +
             unused/2 +
             _CALL_METHOD_DESCRIPTOR_FAST +
@@ -4660,6 +4690,8 @@ dummy_func(
             int positional_args = total_args - (int)PyTuple_GET_SIZE(kwnames_o);
             // Check if the call can be inlined or not
             if (Py_TYPE(callable_o) == &PyFunction_Type &&
+                (frame->soac_dataclass_checked_activation == NULL ||
+                 !_PySOAC_DataclassHasValueSite(frame)) &&
                 !IS_PEP523_HOOKED(tstate) &&
                 ((PyFunctionObject *)callable_o)->vectorcall == _PyFunction_Vectorcall)
             {
@@ -4739,6 +4771,7 @@ dummy_func(
         }
 
         macro(CALL_KW_PY) =
+            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
             unused/1 + // Skip over the counter
             _CHECK_PEP_523 +
             _CHECK_FUNCTION_VERSION_KW +
@@ -4769,6 +4802,7 @@ dummy_func(
         }
 
         macro(CALL_KW_BOUND_METHOD) =
+            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
             unused/1 + // Skip over the counter
             _CHECK_PEP_523 +
             _CHECK_METHOD_VERSION_KW +
@@ -4780,7 +4814,8 @@ dummy_func(
 
         specializing op(_SPECIALIZE_CALL_KW, (counter/1, callable, self_or_null, unused[oparg], unused -- callable, self_or_null, unused[oparg], unused)) {
             #if ENABLE_SPECIALIZATION
-            if (ADAPTIVE_COUNTER_TRIGGERS(counter)) {
+            if (ADAPTIVE_COUNTER_TRIGGERS(counter) &&
+                frame->soac_dataclass_checked_activation == NULL) {
                 next_instr = this_instr;
                 _Py_Specialize_CallKw(callable, next_instr, oparg + !PyStackRef_IsNull(self_or_null));
                 DISPATCH_SAME_OPARG();
@@ -4835,6 +4870,7 @@ dummy_func(
         }
 
         macro(CALL_KW_NON_PY) =
+            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
             unused/1 + // Skip over the counter
             unused/2 +
             _CHECK_IS_NOT_PY_CALLABLE_KW +
@@ -4946,7 +4982,8 @@ dummy_func(
 
         specializing op(_SPECIALIZE_CALL_FUNCTION_EX, (counter/1, func, unused, unused, unused -- func, unused, unused, unused)) {
         #if ENABLE_SPECIALIZATION
-            if (ADAPTIVE_COUNTER_TRIGGERS(counter)) {
+            if (ADAPTIVE_COUNTER_TRIGGERS(counter) &&
+                frame->soac_dataclass_checked_activation == NULL) {
                 next_instr = this_instr;
                 _Py_Specialize_CallFunctionEx(func, next_instr);
                 DISPATCH_SAME_OPARG();
