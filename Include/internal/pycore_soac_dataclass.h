@@ -91,7 +91,10 @@ extern int _PySOAC_DataclassCheckMember(
  * its last equality/watcher callback, immediately before physical effect.
  * incoming_exact_name is the original native member name, NOT a canonical
  * stored key. Returns 1 pending, 0 legacy, -1 refusal. Success is callback- and
- * allocation-free. A first check is never a reusable mutation permit. */
+ * allocation/reference-free. The registered validate_member callback is
+ * confined to BeginMember/the initial type write, before native dictionary
+ * resolution; neither call here invokes it. A first check is never a reusable
+ * mutation permit. Failure may set an error/terminalize, but never commits. */
 extern int _PySOAC_DataclassPendingMemberCheck(
     PyObject *operation, PyObject *actual_dict, PyObject *incoming_exact_name,
     PyObject *value, PyObject *expected_class_owner);

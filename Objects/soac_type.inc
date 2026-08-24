@@ -691,7 +691,10 @@ soac_names_contains(PyObject *names, PyObject *name)
     if (!PyUnicode_Check(name)) {
         return 0;
     }
-    PyObject *exact = PyUnicode_CheckExact(name) ? Py_NewRef(name) : _PyUnicode_Copy(name);
+    /* Native commit rechecks already carry an exact name. Keep that path
+     * reference- and callback-free; the immutable set contains exact strings. */
+    if (PyUnicode_CheckExact(name)) return PySet_Contains(names, name);
+    PyObject *exact = _PyUnicode_Copy(name);
     if (exact == NULL) {
         return -1;
     }

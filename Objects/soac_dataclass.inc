@@ -1038,7 +1038,7 @@ static PyTypeObject SoacDataclassMember_Type = {
 };
 
 static int
-soac_dataclass_validate_member(SoacDataclassInvocation *invocation,
+soac_dataclass_validate_member_native(SoacDataclassInvocation *invocation,
                               PyObject *actual_type, PyObject *class_owner,
                               PyObject *name, PyObject *function,
                               SoacDataclassRecord *record)
@@ -1065,6 +1065,19 @@ soac_dataclass_validate_member(SoacDataclassInvocation *invocation,
             _PyUnicode_Equal(name, &_Py_ID(__delattr__))) {
         return soac_dataclass_fail(invocation, "dataclass generated hook name does not match its role");
     }
+    return 0;
+}
+
+/* Registered validation belongs before dictionary resolution. The commit
+ * kernel must not call this callback-capable path after selecting storage. */
+static int
+soac_dataclass_validate_member(SoacDataclassInvocation *invocation,
+                              PyObject *actual_type, PyObject *class_owner,
+                              PyObject *name, PyObject *function,
+                              SoacDataclassRecord *record)
+{
+    if (soac_dataclass_validate_member_native(invocation, actual_type,
+            class_owner, name, function, record) < 0) return -1;
     int status = _PyInterpreterState_GET()->soac.dataclass_callbacks.validate_member(
         invocation->owner, actual_type, class_owner, name, function, record->role);
     if (status != 0 || PyErr_Occurred() || invocation->phase != SOAC_DC_APPLY_ACTIVE) {
@@ -1125,8 +1138,8 @@ _PySOAC_DataclassBeginMember(PyObject *object, PyObject *actual_type,
     return (PyObject *)member;
 }
 
-int
-_PySOAC_DataclassCheckMember(PyObject *object, PyObject *actual_type,
+static int
+soac_dataclass_check_member_native(PyObject *object, PyObject *actual_type,
                             PyObject *class_owner, PyObject *name,
                             PyObject *function)
 {
@@ -1137,7 +1150,8 @@ _PySOAC_DataclassCheckMember(PyObject *object, PyObject *actual_type,
     if (member->invocation == NULL) {
         return soac_dataclass_error("dataclass member operation is terminal");
     }
-    if (member->finished || !member->invocation->member_pending ||
+    if (member->finished || member->record == NULL || member->function == NULL ||
+        member->name == NULL || !member->invocation->member_pending ||
         member->actual_type != actual_type || member->class_owner != class_owner ||
         name == NULL || !PyUnicode_CheckExact(name) ||
         !_PyUnicode_Equal(member->name, name) || member->function != function ||
@@ -1145,6 +1159,18 @@ _PySOAC_DataclassCheckMember(PyObject *object, PyObject *actual_type,
         ((PyFunctionObject *)function)->func_soac_strict_id != member->record->identity) {
         return soac_dataclass_fail(member->invocation, "dataclass member operation was replayed or changed");
     }
+    return soac_dataclass_validate_member_native(member->invocation, actual_type,
+                                          class_owner, name, function, member->record);
+}
+
+int
+_PySOAC_DataclassCheckMember(PyObject *object, PyObject *actual_type,
+                            PyObject *class_owner, PyObject *name,
+                            PyObject *function)
+{
+    if (soac_dataclass_check_member_native(object, actual_type, class_owner,
+                                            name, function) < 0) return -1;
+    SoacDataclassMember *member = (SoacDataclassMember *)object;
     return soac_dataclass_validate_member(member->invocation, actual_type,
                                           class_owner, name, function, member->record);
 }
@@ -1161,8 +1187,12 @@ _PySOAC_DataclassPendingMemberCheck(PyObject *object, PyObject *dict,
     /* Never dereference a target saved before an equality/watcher callback. */
     member->pending_birth = NULL;
     member->pending_identity = 0;
-    if (_PySOAC_DataclassCheckMember(object, member->actual_type,
-                                     owner, name, function) < 0) return -1;
+    /* Initial registered validation already authenticated this same consuming
+     * operation. Recheck only native immutable birth/operands and live phase:
+     * no registered callback, Python, allocation, or reference traffic on
+     * success after the dictionary has selected its actual storage. */
+    if (soac_dataclass_check_member_native(object, member->actual_type,
+                                           owner, name, function) < 0) return -1;
     uint64_t *target = NULL;
     int selected = _PySOAC_PendingTypeMemberTarget(
         member->actual_type, owner, member->invocation->pending_type_root,
