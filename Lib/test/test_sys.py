@@ -1684,9 +1684,10 @@ class SizeofTest(unittest.TestCase):
         def func(): pass
         # The SOAC tail includes two JIT metadata pointers and a uint64 id
         # before func_version, then the permanent strict id, GC owner, and
-        # two one-byte state flags. Keep this in PyFunctionObject order.
+        # two one-byte state flags, the native source-entry pointer, and the
+        # uint64 source-owner id. Keep this in PyFunctionObject order.
         # Retain uint64_t alignment even when it exceeds pointer alignment.
-        check(func, size('18PQIQP2B0Q'))
+        check(func, size('18PQIQP2BPQ'))
         class c():
             @staticmethod
             def foo():
@@ -1701,7 +1702,7 @@ class SizeofTest(unittest.TestCase):
         # generator
         def get_gen(): yield 1
         # The common generator header has an explicit SOAC managed-state pointer.
-        check(get_gen(), size('7P4c') + interpreter_frame_size + self.P)
+        check(get_gen(), size('7P4c') + frame_layout['frame_size'] + self.P)
         # iterator
         check(iter('abc'), size('lP'))
         # callable-iterator
