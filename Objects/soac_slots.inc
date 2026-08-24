@@ -26,14 +26,18 @@ soac_inherited_dictionary_field(PyTypeObject *type, PyObject *name)
         for (Py_ssize_t j = 0; mro != NULL && j < PyTuple_GET_SIZE(mro); ++j) {
             PyTypeObject *ancestor = (PyTypeObject *)PyTuple_GET_ITEM(mro, j);
             SoacTypeContract *inherited = soac_type_contract(ancestor);
-            if (inherited == NULL || inherited->new_instance_dict == NULL) {
+            if (inherited == NULL) {
                 continue;
             }
             if (soac_contract_live(inherited) < 0) {
                 return -1;
             }
-            if (ancestor->tp_dictoffset == 0 &&
-                !(ancestor->tp_flags & Py_TPFLAGS_MANAGED_DICT)) {
+            /* The inherited field catalog is independent of optional value
+             * checks or indexed allocation. ORDINARY and unchecked NONE
+             * dictionaries deliberately have no new_instance_dict factory. */
+            if (inherited->fields == NULL ||
+                (ancestor->tp_dictoffset == 0 &&
+                 !(ancestor->tp_flags & Py_TPFLAGS_MANAGED_DICT))) {
                 continue;
             }
             for (Py_ssize_t k = 0; k < PyTuple_GET_SIZE(inherited->fields); ++k) {
@@ -78,9 +82,9 @@ soac_build_object_slot_catalog(SoacTypeContract *state, PyTypeObject *type)
                     }
                     return -1;
                 }
-                /* Keep the inherited indexed prefix intact. The native
-                 * descriptor is active attribute storage; its writes never
-                 * populate or mirror the separate hidden dictionary slot. */
+                /* Keep the inherited dictionary field catalog intact. The
+                 * native descriptor is active attribute storage; its writes
+                 * never populate or mirror the separate hidden dictionary entry. */
             }
         }
         const PyMemberDef *selected = NULL;
