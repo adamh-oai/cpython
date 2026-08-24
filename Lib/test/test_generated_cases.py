@@ -301,6 +301,11 @@ class TestOrdinaryInstancePolicyGuard(unittest.TestCase):
                         parts.index(guard.name),
                         parts.index("_GUARD_TYPE_VERSION_AND_LOCK"),
                     )
+                if instruction == "STORE_ATTR_WITH_HINT":
+                    self.assertEqual(parts[0], "_RECORD_TOS_TYPE")
+                    self.assertLess(
+                        parts.index(guard.name), parts.index("_GUARD_TYPE_VERSION"),
+                    )
 
     def test_policy_query_is_pure_but_selected_validator_can_escape(self):
         query = analyzer.analyze_forest(parse_src("""
