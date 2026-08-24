@@ -138,10 +138,9 @@ class TestDefaultEvalFrameSelection(unittest.TestCase):
         # instruction argument. Changing this property changes assigned opcode
         # IDs and the physical base-code contract consumed by native receipts.
         self.assertFalse(analysis.uops["_DO_CALL_FUNCTION_EX"].properties.oparg)
-        for name in (
-            "CALL_FUNCTION_EX", "CALL_EX_PY", "CALL_EX_NON_PY_GENERAL",
-            "INSTRUMENTED_CALL_FUNCTION_EX",
-        ):
+        # CALL_EX_PY separately carries a tier-two return offset through
+        # _SAVE_RETURN_OFFSET; it is not the public no-argument opcode.
+        for name in ("CALL_FUNCTION_EX", "INSTRUMENTED_CALL_FUNCTION_EX"):
             with self.subTest(instruction=name):
                 self.assertFalse(analysis.instructions[name].properties.oparg)
 
