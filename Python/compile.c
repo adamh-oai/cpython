@@ -540,6 +540,51 @@ soac_register_code_unit(compiler *c, struct compiler_unit *u)
     return SUCCESS;
 }
 
+/* Some native annotation helpers append implicit FREE entries while emitting
+ * their bodies.  The scope-entry dictionary is not yet the final layout.
+ * Complete only the metadata from the finished native maps, before the CFG
+ * inserts COPY_FREE_VARS/MAKE_CELL and fixes their actual operands. */
+static int
+soac_complete_binding_layout(_PyCompile_CodeUnitMetadata *umd)
+{
+    soac_code_bindings *unit = umd->u_soac_bindings;
+    if (unit == NULL) {
+        return SUCCESS;
+    }
+    Py_ssize_t ncellvars = PyDict_GET_SIZE(umd->u_cellvars);
+    Py_ssize_t nfreevars = PyDict_GET_SIZE(umd->u_freevars);
+    if (ncellvars != unit->cell_count || nfreevars < unit->free_count ||
+        nfreevars > INT_MAX - unit->cell_count) {
+        return soac_binding_error("final native cell/free layout changed its existing prefix");
+    }
+    if (nfreevars == unit->free_count) {
+        return SUCCESS;
+    }
+
+    /* Native FREE indices follow the unchanged CELL prefix.  Do not renumber
+     * native operands, merge same-spelling CELL/FREE rows, or infer new slots
+     * from source names.  Existing symbolic slots and owners stay untouched. */
+    Py_ssize_t pos = 0;
+    PyObject *value;
+    int next_index = unit->cell_count;
+    while (PyDict_Next(umd->u_freevars, &pos, NULL, &value)) {
+        int index = PyLong_AsInt(value);
+        if (index == -1 && PyErr_Occurred()) {
+            return ERROR;
+        }
+        if (index != next_index++) {
+            return soac_binding_error("final native FREE indices are not contiguous");
+        }
+    }
+    int first_new = unit->cell_count + unit->free_count;
+    unit->free_count = (int)nfreevars;
+    for (int index = first_new; index < next_index; index++) {
+        Py_ssize_t slot;
+        RETURN_IF_ERROR(soac_binding_slot_for(unit, 1, index, &slot));
+    }
+    return SUCCESS;
+}
+
 static soac_code_bindings *
 soac_current_class(compiler *c)
 {
@@ -5331,6 +5376,9 @@ static PyCodeObject *
 optimize_and_assemble_code_unit(struct compiler_unit *u, PyObject *const_cache,
                                 int code_flags, PyObject *filename)
 {
+    if (soac_complete_binding_layout(&u->u_metadata) < 0) {
+        return NULL;
+    }
     cfg_builder *g = NULL;
     instr_sequence optimized_instrs;
     memset(&optimized_instrs, 0, sizeof(instr_sequence));
