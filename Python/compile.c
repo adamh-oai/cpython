@@ -4249,7 +4249,7 @@ soac_validate_scope_regions(soac_code_bindings *unit)
     for (Py_ssize_t i = 0; i < unit->regions.count; i++) {
         soac_binding_region *region = &unit->regions.items[i];
         Py_ssize_t saved = 0, entries = 0, normal = 0, exceptional = 0;
-        int phase_steps[6] = {0}, kinds[16] = {0};
+        int phase_steps[6] = {0}, kinds[Py_SOAC_SCOPE_ITERATOR_ADVANCE + 1] = {0};
         for (Py_ssize_t j = 0; j < region->entry_ops.count; j++) {
             saved += region->entry_ops.items[j].role == Py_SOAC_CLASS_OP_SAVE_CLEAR;
         }
@@ -4264,7 +4264,7 @@ soac_validate_scope_regions(soac_code_bindings *unit)
                 continue;
             }
             if (event->phase < 1 || event->phase > 5 ||
-                event->step != phase_steps[event->phase]++ || event->kind < 0 || event->kind >= 16) {
+                event->step != phase_steps[event->phase]++ || event->kind < 0 || event->kind > Py_SOAC_SCOPE_ITERATOR_ADVANCE) {
                 return soac_binding_error("native comprehension events lost their actual phase order");
             }
             kinds[event->kind]++;
