@@ -3967,7 +3967,10 @@ dummy_func(
                         _PySOAC_InterpreterCallFailed(&soac_call);
                         ERROR_NO_POP();
                     }
-                    if (_PySOAC_InterpreterCallCommit(&soac_call, new_frame) < 0) {
+                    SAVE_STACK();
+                    int soac_committed = _PySOAC_InterpreterCallCommit(&soac_call, new_frame);
+                    RELOAD_STACK();
+                    if (soac_committed < 0) {
                         _PyEval_FrameClearAndPop(tstate, new_frame);
                         _PySOAC_InterpreterCallFailed(&soac_call);
                         ERROR_NO_POP();
@@ -4927,7 +4930,10 @@ dummy_func(
                         _PySOAC_InterpreterCallFailed(&soac_call);
                         ERROR_NO_POP();
                     }
-                    if (_PySOAC_InterpreterCallCommit(&soac_call, new_frame) < 0) {
+                    SAVE_STACK();
+                    int soac_committed = _PySOAC_InterpreterCallCommit(&soac_call, new_frame);
+                    RELOAD_STACK();
+                    if (soac_committed < 0) {
                         _PyEval_FrameClearAndPop(tstate, new_frame);
                         _PySOAC_InterpreterCallFailed(&soac_call);
                         ERROR_NO_POP();
@@ -5238,7 +5244,10 @@ dummy_func(
                             _PySOAC_InterpreterCallFailed(&soac_call);
                             ERROR_NO_POP();
                         }
-                        if (_PySOAC_InterpreterCallCommit(&soac_call, new_frame) < 0) {
+                        SAVE_STACK();
+                        int soac_committed = _PySOAC_InterpreterCallCommit(&soac_call, new_frame);
+                        RELOAD_STACK();
+                        if (soac_committed < 0) {
                             _PyEval_FrameClearAndPop(tstate, new_frame);
                             _PySOAC_InterpreterCallFailed(&soac_call);
                             ERROR_NO_POP();
