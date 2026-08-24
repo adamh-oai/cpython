@@ -1354,6 +1354,10 @@ dummy_func(
                 PyObject *primary = PyErr_GetRaisedException();
                 PyStackRef_CLOSE(temp);
                 PyErr_SetRaisedException(primary);
+                /* Match exit_unwind's caller coordinates after the callee
+                 * has gone. Never search the caller with its child's IP. */
+                frame->return_offset = 0;
+                next_instr = frame->instr_ptr;
                 ERROR_NO_POP();
             }
             LOAD_IP(frame->return_offset);
