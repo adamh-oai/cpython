@@ -5136,7 +5136,7 @@ dummy_func(
                 SAVE_STACK();
                 int soac_selected = _PySOAC_InterpreterSelectCall(
                     frame, this_instr, Py_SOAC_INTERPRETER_CALL_EXPANDED,
-                    oparg, &soac_call);
+                    0, &soac_call);
                 RELOAD_STACK();
                 if (soac_selected < 0) {
                     ERROR_NO_POP();
@@ -5191,7 +5191,7 @@ dummy_func(
                     SAVE_STACK();
                     int soac_selected = _PySOAC_InterpreterSelectCall(
                         frame, this_instr, Py_SOAC_INTERPRETER_CALL_EXPANDED,
-                        oparg, &soac_call);
+                        0, &soac_call);
                     RELOAD_STACK();
                     if (soac_selected < 0) {
                         ERROR_NO_POP();
