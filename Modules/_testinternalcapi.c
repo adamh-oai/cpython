@@ -2174,6 +2174,163 @@ dict_new_soac_type(PyObject *self, PyObject *args)
     return type;
 }
 
+
+/* Ordinary-storage field fixture. This is native policy authority only; it
+ * never constructs a source/function/checker execution record. The actual
+ * pending constructor keeps its ordinary Ready layout until final admission. */
+static int
+soac_test_ordinary_field(PyObject *owner, PyObject *name, PyObject *value)
+{
+    PyObject *fields = PyTuple_GET_ITEM(owner, 0);
+    if (value == NULL || !PyUnicode_Check(name)) {
+        return 0;
+    }
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(fields); ++i) {
+        int equal = PyUnicode_Compare(name, PyTuple_GET_ITEM(fields, i));
+        if (equal == -1 && PyErr_Occurred()) {
+            return -1;
+        }
+        if (equal == 0 && !PyLong_CheckExact(value)) {
+            PyErr_SetString(PyExc_TypeError, "test declared field requires an exact int");
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int
+soac_test_ordinary_instance_policy(PyObject *owner, PyObject *dict, PyObject *key,
+                                   PyObject *value, int operation, PyObject *provenance)
+{
+    if (operation == PyDict_SOAC_TERMINAL_TEARDOWN ||
+        operation == PyDict_SOAC_DELETE || operation == PyDict_SOAC_CLEAR) {
+        return 0;
+    }
+    int attribute = operation == PyDict_SOAC_ATTRIBUTE_SET ||
+                    operation == PyDict_SOAC_ATTRIBUTE_SET_EXISTING;
+    if ((!attribute && provenance != NULL) ||
+        (attribute && (provenance == NULL || !PyUnicode_Check(provenance)))) {
+        PyErr_SetString(PyExc_TypeError, "ordinary instance has no namespace permit");
+        return -1;
+    }
+    if (PyUnicode_CheckExact(key) &&
+        soac_test_ordinary_field(owner, key, value) < 0) {
+        return -1;
+    }
+    /* The original incoming attribute name is not the canonical stored key.
+     * Inspect Unicode data, never repeat arbitrary hash/equality or str(). */
+    return attribute ? soac_test_ordinary_field(owner, provenance, value) : 0;
+}
+
+static int
+soac_test_ordinary_inline_write(PyObject *owner, PyObject *instance,
+                                PyObject *name, PyObject *value)
+{
+    return soac_test_ordinary_field(owner, name, value);
+}
+
+static int
+soac_test_ordinary_prepare_dictionary(PyObject *owner, PyObject *instance,
+                                      PyObject *dictionary,
+                                      const PySoacInstanceDictPolicy *existing,
+                                      PySoacInstanceDictPolicy *out)
+{
+    out->owner = NULL;
+    out->validate = NULL;
+    if (existing != NULL &&
+        (existing->owner != owner ||
+         existing->validate != soac_test_ordinary_instance_policy)) {
+        PyErr_SetString(PyExc_TypeError, "incompatible actual instance dictionary policy");
+        return -1;
+    }
+    out->owner = Py_NewRef(owner);
+    out->validate = soac_test_ordinary_instance_policy;
+    return 0;
+}
+
+static int
+soac_test_ordinary_final_commit(PyObject *owner, PyObject *type,
+                                const PySoacTypeContractSpecV4 *contract)
+{
+    PySoacTypeConstructionInfoV1 info;
+    if (PyType_GetSoacConstructionInfoV1(type, &info, sizeof(info)) != 1 ||
+        info.phase != Py_SOAC_TYPE_STATE_ADMITTING || info.owner != owner ||
+        contract->dictionary_mode != Py_SOAC_INSTANCE_DICT_ORDINARY ||
+        contract->fields != PyTuple_GET_ITEM(owner, 0) ||
+        contract->protected_names != PyTuple_GET_ITEM(owner, 1) ||
+        contract->final_methods != PyTuple_GET_ITEM(owner, 1) ||
+        contract->object_slot_fields != PyTuple_GET_ITEM(owner, 1) ||
+        contract->check_instance_write != soac_test_ordinary_inline_write ||
+        contract->new_instance_dict != NULL ||
+        contract->prepare_instance_dictionary_policy != soac_test_ordinary_prepare_dictionary) {
+        if (!PyErr_Occurred()) {
+            PyErr_SetString(PyExc_TypeError, "ordinary fixture final policy identity changed");
+        }
+        return -1;
+    }
+    return 0;
+}
+
+static PyObject *
+dict_new_soac_ordinary_type(PyObject *self, PyObject *args)
+{
+    PyObject *name, *bases, *namespace, *fields, *namespace_function;
+    if (!PyArg_ParseTuple(args, "OOOOO:dict_new_soac_ordinary_type",
+                          &name, &bases, &namespace, &fields, &namespace_function)) {
+        return NULL;
+    }
+    if (!PyTuple_CheckExact(fields)) {
+        PyErr_SetString(PyExc_TypeError, "ordinary fixture fields must be an exact tuple");
+        return NULL;
+    }
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(fields); ++i) {
+        if (!PyUnicode_CheckExact(PyTuple_GET_ITEM(fields, i))) {
+            PyErr_SetString(PyExc_TypeError, "ordinary fixture field names must be exact strings");
+            return NULL;
+        }
+    }
+    PyObject *empty = PyTuple_New(0);
+    PyObject *keywords = PyDict_New();
+    PyObject *owner = empty == NULL ? NULL : PyTuple_Pack(2, fields, empty);
+    if (empty == NULL || keywords == NULL || owner == NULL) {
+        Py_XDECREF(empty);
+        Py_XDECREF(keywords);
+        Py_XDECREF(owner);
+        return NULL;
+    }
+    PySoacTypeConstructionSpec spec = {
+        .abi_version = Py_SOAC_TYPE_CONTRACT_ABI,
+        .struct_size = sizeof(spec),
+        .construction_mode = Py_SOAC_TYPE_CONSTRUCT_PENDING,
+        .owner = owner, .namespace_function = namespace_function,
+        .name = name, .bases = bases, .namespace_dict = namespace,
+        .keywords = keywords, .commit_final = soac_test_ordinary_final_commit,
+    };
+    PyObject *handle = PyType_NewSoacConstructionHandle(&spec);
+    PyObject *type = handle == NULL ? NULL
+        : PyType_FromSoacConstructionHandle(handle, namespace_function);
+    PySoacTypeContractSpecV4 contract = {
+        .dictionary_mode = Py_SOAC_INSTANCE_DICT_ORDINARY,
+        .fields = fields, .protected_names = empty, .final_methods = empty,
+        .object_slot_fields = empty,
+        .check_instance_write = soac_test_ordinary_inline_write,
+        .prepare_instance_dictionary_policy = soac_test_ordinary_prepare_dictionary,
+    };
+    if (type != NULL &&
+        PyType_AdmitSoacPendingV1(type, owner, handle, &contract, sizeof(contract),
+                                 soac_test_ordinary_final_commit) < 0) {
+        Py_CLEAR(type);
+    }
+    if (type != NULL && PyType_SealSoacContract(type, owner) < 0) {
+        Py_CLEAR(type);
+    }
+    Py_XDECREF(handle);
+    Py_DECREF(owner);
+    Py_DECREF(keywords);
+    Py_DECREF(empty);
+    return type;
+}
+
 static PyObject *
 dict_get_indexed_item(PyObject *self, PyObject *args)
 {
@@ -3448,6 +3605,7 @@ static PyMethodDef module_functions[] = {
     {"dict_reserve_soac_namespace_keys", dict_reserve_soac_namespace_keys, METH_VARARGS},
     {"dict_setitem_and_delete_for_module", dict_setitem_and_delete_for_module, METH_VARARGS},
     {"dict_new_soac_type", dict_new_soac_type, METH_VARARGS},
+    {"dict_new_soac_ordinary_type", dict_new_soac_ordinary_type, METH_VARARGS},
     {"soac_function_create_watch", soac_function_create_watch, METH_VARARGS},
     {"soac_function_create_unwatch", soac_function_create_unwatch, METH_O},
     {"soac_interpreter_fixture", soac_interpreter_fixture, METH_VARARGS},
