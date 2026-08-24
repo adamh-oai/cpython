@@ -543,6 +543,16 @@ capability.  Those require separately verified native owners.
    setter/deleter roles may pass the corresponding pre-seal hook restriction;
    sealed, terminal, final-method, and field-descriptor barriers still apply.
 
+   ``PyDict_SOAC_SLOT_DESCRIPTOR_INSERT`` (``12``) and
+   ``PyDict_SOAC_SLOT_DESCRIPTOR_REPLACE`` (``13``) are private native
+   readiness operations. Their provenance is the exact just-created member
+   descriptor for the actual type's installed physical slot catalog. Only
+   the indexed class namespace accepts them, before readiness completes;
+   the descriptor's native member pointer and declaring type are rechecked
+   before and after the last watcher. This remains a distinct operation from
+   generated-method installation and grants no ordinary or reentrant mapping
+   write permission.
+
    ``PyDict_SOAC_TERMINAL_TEARDOWN`` is a non-rejectable, irreversible
    notification before unreachable-GC or terminal module cleanup invalidates
    contents.  The owner must prevent dependent execution before returning.

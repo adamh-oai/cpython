@@ -28,6 +28,7 @@
 #include "pycore_range.h"         // _PyRangeIterObject
 #include "pycore_setobject.h"     // _PySet_NextEntry()
 #include "pycore_sliceobject.h"   // _PyBuildSlice_ConsumeRefs
+#include "pycore_soac_type.h"    // physical member policy guards
 #include "pycore_stackref.h"
 #include "pycore_template.h"      // _PyTemplate_Build()
 #include "pycore_tuple.h"         // _PyTuple_ITEMS()
@@ -2519,6 +2520,8 @@ dummy_func(
         op(_LOAD_ATTR_SLOT, (index/1, owner -- attr, o)) {
             PyObject *owner_o = PyStackRef_AsPyObjectBorrow(owner);
 
+            DEOPT_IF(_PySOAC_UsesObjectSlotPolicy(Py_TYPE(owner_o)));
+
             PyObject **addr = (PyObject **)((char *)owner_o + index);
             PyObject *attr_o = FT_ATOMIC_LOAD_PTR(*addr);
             DEOPT_IF(attr_o == NULL);
@@ -2712,6 +2715,8 @@ dummy_func(
 
         op(_STORE_ATTR_SLOT, (index/1, value, owner -- o)) {
             PyObject *owner_o = PyStackRef_AsPyObjectBorrow(owner);
+
+            DEOPT_IF(_PySOAC_UsesObjectSlotPolicy(Py_TYPE(owner_o)));
 
             DEOPT_IF(!LOCK_OBJECT(owner_o));
             char *addr = (char *)owner_o + index;

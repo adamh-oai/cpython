@@ -7,6 +7,7 @@
 #include "pycore_long.h"          // _PyLong_IsNegative()
 #include "pycore_object.h"        // _Py_TryIncrefCompare(), FT_ATOMIC_*()
 #include "pycore_critical_section.h"
+#include "pycore_soac_type.h"    // native physical member policies
 
 
 static inline PyObject *
@@ -43,6 +44,9 @@ PyMember_GetOne(const char *obj_addr, PyMemberDef *l)
         return NULL;
     }
 
+    if (_PySOAC_CheckObjectSlotAccess((PyObject *)obj_addr, l) < 0) {
+        return NULL;
+    }
     const void *addr = _PyMember_GetOffset((PyObject *)obj_addr, l);
     switch (l->type) {
     case Py_T_BOOL:
@@ -164,13 +168,16 @@ PyMember_SetOne(char *addr, PyMemberDef *l, PyObject *v)
     }
 
     PyObject *obj = (PyObject *)addr;
-    addr = _PyMember_GetOffset(obj, l);
 
     if ((l->flags & Py_READONLY))
     {
         PyErr_SetString(PyExc_AttributeError, "readonly attribute");
         return -1;
     }
+    if (_PySOAC_CheckObjectSlotAccess(obj, l) < 0) {
+        return -1;
+    }
+    addr = _PyMember_GetOffset(obj, l);
     if (v == NULL) {
         if (l->type == Py_T_OBJECT_EX) {
             /* Check if the attribute is set. */
@@ -330,6 +337,9 @@ PyMember_SetOne(char *addr, PyMemberDef *l, PyObject *v)
     }
     case _Py_T_OBJECT:
     case Py_T_OBJECT_EX:
+        if (_PySOAC_CheckObjectSlotWrite(obj, (char *)addr - (char *)obj, v) < 0) {
+            return -1;
+        }
         Py_BEGIN_CRITICAL_SECTION(obj);
         oldv = *(PyObject **)addr;
         FT_ATOMIC_STORE_PTR_RELEASE(*(PyObject **)addr, Py_XNewRef(v));

@@ -140,7 +140,7 @@ PyAPI_FUNC(int) PyFunction_MatchesSoacDataclassCreation(
  * callback, then revalidates the exact compile edge after those allocations.
  * The owner must authenticate source fragments/call edges, never accept a
  * public tuple or a helper name as production authority. */
-#define Py_SOAC_DATACLASS_ABI 2
+#define Py_SOAC_DATACLASS_ABI 3
 #define Py_SOAC_DATACLASS_ROOT_FACTORY 1
 #define Py_SOAC_DATACLASS_ROOT_APPLY 2
 /* Callback-only stage; never accepted by the public root vectorcall. */
@@ -152,6 +152,7 @@ PyAPI_FUNC(int) PyFunction_MatchesSoacDataclassCreation(
 #define Py_SOAC_DATACLASS_BUILTIN_SETATTR 5
 #define Py_SOAC_DATACLASS_BRIDGE_VALUE 6
 #define Py_SOAC_DATACLASS_BRIDGE_INIT_VALUE 7
+#define Py_SOAC_DATACLASS_BRIDGE_NEW_SLOTS 8
 #define Py_SOAC_DATACLASS_MEMBER 1
 #define Py_SOAC_DATACLASS_FROZEN_SETATTR 2
 #define Py_SOAC_DATACLASS_FROZEN_DELATTR 3
@@ -198,6 +199,16 @@ typedef struct {
      * Repeated validation across native allocations must be idempotent. */
     int (*init_value)(PyObject *, const PySoacDataclassFrameView *,
                       PyObject *, PyObject *, PyObject *, PyObject **);
+    /* One-way preparation after pure bridge validation. The five arguments
+     * are already evaluated metaclass/name/bases/namespace/original, in that
+     * order. Return zero with ONE owned replacement handle minted by
+     * PyType_NewSoacDataclassSlotsHandle using this exact callback view, or
+     * -1. May allocate native/Rust state, but must not execute Python. The
+     * ordinary bridge callback revalidates after allocations and before Ready.
+     * No decline is legal after the original class has been bound. */
+    int (*prepare_slots)(PyObject *, const PySoacDataclassFrameView *,
+                         PyObject *, PyObject *, PyObject *, PyObject *,
+                         PyObject *, PyObject **);
 } PySoacDataclassCallbacks;
 
 #define Py_SOAC_DATACLASS_BOUNDARY_ABI 1
@@ -242,6 +253,12 @@ PyAPI_FUNC(PyObject *) PySoac_DataclassVectorcall(
 /* Called exactly once after the native class contract is installed, before
  * PyType_Ready callbacks. No allocation or Python call on success. */
 PyAPI_FUNC(int) PySoac_DataclassBindClass(
+    PyObject *invocation, PyObject *actual_type, PyObject *expected_class_owner);
+/* Callback-free proof of this active invocation's distinct replacement. The
+ * native association and callback-free weak witness precede spec.bind_type;
+ * no original binding is transferred. 1 exact, 0 unrelated/mismatched, -1
+ * expired/terminal/invalid. The caller independently pins actual_type. */
+PyAPI_FUNC(int) PySoac_DataclassMatchesSlotsClass(
     PyObject *invocation, PyObject *actual_type, PyObject *expected_class_owner);
 PyAPI_FUNC(int) PySoac_CompleteDataclassInvocation(PyObject *invocation);
 PyAPI_FUNC(int) PySoac_FailDataclassInvocation(PyObject *invocation);

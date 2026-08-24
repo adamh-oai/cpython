@@ -32,6 +32,11 @@ extern int _PyDict_SetItemForRuntimeCache(
 extern int _PyDict_SetItemForSoacDataclassMember(
     PyObject *dict, PyObject *key, PyObject *value, PyObject *operation,
     PyObject *expected_class_owner);
+/* type_ready only: insert the descriptor for an already installed native
+   object-slot catalog. No ambient construction or ordinary-dict fallback. */
+extern int _PyDict_SetItemForSoacSlotDescriptor(
+    PyObject *dict, PyObject *key, PyObject *descriptor,
+    PyObject *expected_class_owner);
 /* Attribute provenance belongs to this one lookup/validation/commit, not a
    precheck or ambient permit.  Mapping writes never emit ATTRIBUTE_SET. */
 PyAPI_FUNC(int) _PyDict_SetItemForAttribute(

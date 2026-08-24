@@ -35,6 +35,24 @@ extern int _PySOAC_DataclassCaptureBuiltin(
 PyAPI_FUNC(int) _PySOAC_DataclassAddHelpers(PyObject *module);
 PyAPI_FUNC(int) _PySOAC_DataclassIsBridgeImplementation(PyObject *callable);
 
+/* A single opcode-owned stack context, valid only throughout this replacement
+ * construction. It is never stored in a Python object or thread state. */
+typedef struct _PySoacDataclassSlotsContext _PySoacDataclassSlotsContext;
+extern _PySoacDataclassSlotsContext *_PySOAC_DataclassBeginSlotsHandle(
+    const PySoacDataclassFrameView *, const PySoacTypeConstructionSpec *);
+extern int _PySOAC_DataclassRecordSlotsHandle(
+    _PySoacDataclassSlotsContext *, PyObject *, const PySoacTypeConstructionSpec *);
+extern int _PySOAC_DataclassValidateSlotsHandle(
+    _PySoacDataclassSlotsContext *, PyObject *, const PySoacTypeConstructionSpec *);
+extern int _PySOAC_DataclassBindSlotsType(
+    _PySoacDataclassSlotsContext *, PyObject *, PyObject *);
+extern int _PySOAC_DataclassValidateCopiedHook(
+    _PySoacDataclassSlotsContext *, PyObject *, PyObject *);
+extern int _PySOAC_DataclassFailSlots(_PySoacDataclassSlotsContext *, const char *);
+extern PyObject *_PySOAC_TypeFromDataclassSlotsHandle(
+    _PySoacDataclassSlotsContext *, PyObject *);
+extern void _PySOAC_ClearDataclassSlotsHandle(PyObject *);
+
 /* Generated checks are owned by an actual frame activation, not an ambient
  * invocation or a permission on shared code. A C forwarding vectorcall may
  * call this captured entry; restoring stock entry cannot create activation. */

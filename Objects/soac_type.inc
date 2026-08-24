@@ -6,13 +6,24 @@ typedef struct {
     PyInterpreterState *interpreter;
     PySoacTypeConstructionSpec spec;
     int consumed;
+    int dataclass_slots;
 } SoacConstructionHandle;
+
+typedef struct {
+    /* Comparison-only native definition. The live type/base chain owns it. */
+    const PyMemberDef *member;
+    PyTypeObject *declaring_type;
+    Py_ssize_t offset;
+} SoacObjectSlot;
 
 typedef struct {
     PyObject_HEAD
     PyInterpreterState *interpreter;
     PyObject *owner;
     PyObject *fields;
+    PyObject *object_slot_fields;
+    SoacObjectSlot *object_slots;
+    Py_ssize_t object_slot_count;
     PyObject *protected_names;
     PyObject *final_methods;
     /* Non-owning: the type owns this contract. Escaping its dictionary must
@@ -21,6 +32,11 @@ typedef struct {
      * release; terminal contracts never dereference it. */
     PyTypeObject *type;
     PyObject *annotation_provider;
+    /* Comparison-only during initial dictionary validation. The explicit
+     * replacement call independently pins the original class, whose installed
+     * frozen hooks cannot change. Cleared before Ready or any failure release. */
+    PyObject *initial_frozen_setattr;
+    PyObject *initial_frozen_delattr;
     uint32_t flags;
     int sealed;
     int terminal;
@@ -32,6 +48,7 @@ static PyTypeObject SoacConstructionHandle_Type;
 static PyTypeObject SoacTypeContract_Type;
 static PyObject *type_new_impl(type_new_ctx *ctx);
 static int type_new_get_bases(type_new_ctx *ctx, PyObject **type);
+static int soac_final_override(PyTypeObject *, PyObject *);
 
 static PyObject *
 soac_type_mutation_error(void)
@@ -130,6 +147,8 @@ soac_contract_live(SoacTypeContract *state)
     return 0;
 }
 
+#include "soac_slots.inc"
+
 static int
 soac_handle_traverse(SoacConstructionHandle *handle, visitproc visit, void *arg)
 {
@@ -140,6 +159,7 @@ soac_handle_traverse(SoacConstructionHandle *handle, visitproc visit, void *arg)
     Py_VISIT(handle->spec.namespace);
     Py_VISIT(handle->spec.keywords);
     Py_VISIT(handle->spec.fields);
+    Py_VISIT(handle->spec.object_slot_fields);
     Py_VISIT(handle->spec.protected_names);
     Py_VISIT(handle->spec.final_methods);
     return 0;
@@ -156,6 +176,7 @@ soac_handle_clear(SoacConstructionHandle *handle)
     Py_CLEAR(handle->spec.namespace);
     Py_CLEAR(handle->spec.keywords);
     Py_CLEAR(handle->spec.fields);
+    Py_CLEAR(handle->spec.object_slot_fields);
     Py_CLEAR(handle->spec.protected_names);
     Py_CLEAR(handle->spec.final_methods);
     return 0;
@@ -184,6 +205,7 @@ soac_state_traverse(SoacTypeContract *state, visitproc visit, void *arg)
 {
     Py_VISIT(state->owner);
     Py_VISIT(state->fields);
+    Py_VISIT(state->object_slot_fields);
     Py_VISIT(state->protected_names);
     Py_VISIT(state->final_methods);
     Py_VISIT(state->annotation_provider);
@@ -197,9 +219,12 @@ soac_state_clear(SoacTypeContract *state)
      * permanent terminal marker and cannot resume optimized or ordinary use. */
     state->terminal = 1;
     state->type = NULL;
+    state->initial_frozen_setattr = NULL;
+    state->initial_frozen_delattr = NULL;
     Py_CLEAR(state->owner);
     Py_CLEAR(state->annotation_provider);
     Py_CLEAR(state->fields);
+    Py_CLEAR(state->object_slot_fields);
     Py_CLEAR(state->protected_names);
     Py_CLEAR(state->final_methods);
     return 0;
@@ -210,6 +235,7 @@ soac_state_dealloc(SoacTypeContract *state)
 {
     PyObject_GC_UnTrack(state);
     soac_state_clear(state);
+    PyMem_Free(state->object_slots);
     PyObject_GC_Del(state);
 }
 
@@ -242,21 +268,26 @@ soac_valid_names(PyObject *names)
     return 1;
 }
 
-PyObject *
-PyType_NewSoacConstructionHandle(const PySoacTypeConstructionSpec *spec)
+static PyObject *
+soac_new_construction_handle(const PySoacTypeConstructionSpec *spec,
+                             _PySoacDataclassSlotsContext *slots_context)
 {
 #ifdef Py_GIL_DISABLED
     PyErr_SetString(PyExc_RuntimeError, "strict type construction does not yet support free-threaded CPython");
     return NULL;
 #else
+    int dataclass_slots = slots_context != NULL;
     if (spec == NULL || spec->abi_version != Py_SOAC_TYPE_CONTRACT_ABI ||
         (spec->flags & ~Py_SOAC_TYPE_FINAL) != 0 || spec->owner == NULL ||
-        spec->namespace_function == NULL || !PyFunction_Check(spec->namespace_function) ||
+        (dataclass_slots ? spec->namespace_function != NULL
+                         : (spec->namespace_function == NULL ||
+                            !PyFunction_Check(spec->namespace_function))) ||
         spec->name == NULL || !PyUnicode_CheckExact(spec->name) ||
         spec->bases == NULL || !PyTuple_CheckExact(spec->bases) ||
         spec->namespace == NULL || !PyDict_CheckExact(spec->namespace) ||
         spec->keywords == NULL || !PyDict_CheckExact(spec->keywords) ||
         spec->fields == NULL || !soac_valid_names(spec->fields) ||
+        (spec->object_slot_fields != NULL && !soac_valid_names(spec->object_slot_fields)) ||
         spec->protected_names == NULL || !soac_valid_names(spec->protected_names) ||
         spec->final_methods == NULL || !soac_valid_names(spec->final_methods)) {
         PyErr_SetString(soac_type_mutation_error(), "invalid native strict class construction plan");
@@ -275,12 +306,20 @@ PyType_NewSoacConstructionHandle(const PySoacTypeConstructionSpec *spec)
             return NULL;
         }
     }
-    const char *unsupported_hooks[] = {"__getattribute__", "__getattr__", "__setattr__", "__delattr__", NULL};
-    for (const char **hook = unsupported_hooks; *hook != NULL; ++hook) {
-        PyObject *value = PyDict_GetItemString(spec->namespace, *hook);
+    PyObject *unsupported_hooks[] = {
+        &_Py_ID(__getattribute__), &_Py_ID(__getattr__),
+        &_Py_ID(__setattr__), &_Py_ID(__delattr__), NULL,
+    };
+    for (PyObject **hook = unsupported_hooks; *hook != NULL; ++hook) {
+        PyObject *value = PyDict_GetItemWithError(spec->namespace, *hook);
         if (value != NULL) {
-            PyErr_SetString(soac_type_mutation_error(), "custom attribute hooks require a verified adapter or dynamic construction");
-            return NULL;
+            if (slots_context == NULL) {
+                PyErr_SetString(soac_type_mutation_error(), "custom attribute hooks require a verified adapter or dynamic construction");
+                return NULL;
+            }
+            if (_PySOAC_DataclassValidateCopiedHook(slots_context, *hook, value) < 0) {
+                return NULL;
+            }
         }
         if (PyErr_Occurred()) {
             return NULL;
@@ -297,18 +336,49 @@ PyType_NewSoacConstructionHandle(const PySoacTypeConstructionSpec *spec)
     handle->interpreter = _PyInterpreterState_GET();
     handle->spec = *spec;
     handle->consumed = 0;
+    handle->dataclass_slots = dataclass_slots;
     Py_INCREF(spec->owner);
-    Py_INCREF(spec->namespace_function);
+    Py_XINCREF(spec->namespace_function);
     Py_INCREF(spec->name);
     Py_INCREF(spec->bases);
     Py_INCREF(spec->namespace);
     Py_INCREF(spec->keywords);
     Py_INCREF(spec->fields);
+    Py_XINCREF(spec->object_slot_fields);
     Py_INCREF(spec->protected_names);
     Py_INCREF(spec->final_methods);
     PyObject_GC_Track(handle);
     return (PyObject *)handle;
 #endif
+}
+
+PyObject *
+PyType_NewSoacConstructionHandle(const PySoacTypeConstructionSpec *spec)
+{
+    return soac_new_construction_handle(spec, NULL);
+}
+
+PyObject *
+PyType_NewSoacDataclassSlotsHandle(const PySoacDataclassFrameView *producer,
+                                   const PySoacTypeConstructionSpec *spec)
+{
+    _PySoacDataclassSlotsContext *context =
+        _PySOAC_DataclassBeginSlotsHandle(producer, spec);
+    if (context == NULL) {
+        return NULL;
+    }
+    PyObject *handle = soac_new_construction_handle(spec, context);
+    if (handle == NULL ||
+        _PySOAC_DataclassRecordSlotsHandle(context, handle,
+                                          &((SoacConstructionHandle *)handle)->spec) < 0) {
+        _PySOAC_DataclassFailSlots(context, "replacement handle preparation failed");
+        if (handle != NULL) {
+            _PySOAC_ClearDataclassSlotsHandle(handle);
+        }
+        Py_XDECREF(handle);
+        return NULL;
+    }
+    return handle;
 }
 
 static int
@@ -375,6 +445,11 @@ soac_check_class_write(PyTypeObject *type, PyObject *name, PyObject *value,
             PyErr_Format(soac_type_mutation_error(), "cannot mutate sealed strict class %.200s", type->tp_name);
             return -1;
         }
+        if (soac_object_slot_name_index(state, name) >= 0) {
+            PyErr_SetString(soac_type_mutation_error(),
+                            "cannot change an installed strict object-slot descriptor");
+            return -1;
+        }
         if (PyUnicode_Check(name) &&
             (_PyUnicode_EqualToASCIIString(name, "__bases__") ||
              _PyUnicode_EqualToASCIIString(name, "__class__") ||
@@ -421,15 +496,35 @@ soac_class_dictionary_policy(PyObject *owner, PyObject *dict, PyObject *key,
     if (operation == PyDict_SOAC_TERMINAL_TEARDOWN) {
         state->terminal = 1;
         state->type = NULL;
+        state->initial_frozen_setattr = NULL;
+        state->initial_frozen_delattr = NULL;
         return 0;
     }
     if (operation == PyDict_SOAC_VALIDATE_INITIAL) {
         /* Recheck the actual copied namespace at installation, not just the
          * earlier input dict: allocations may have run unrelated GC callbacks. */
+        if (soac_object_slot_name_index(state, key) >= 0) {
+            return soac_validate_existing_slot_descriptor(state, key, value);
+        }
+        if (!state->sealed && value != NULL && key != NULL &&
+            PyUnicode_CheckExact(key) &&
+            ((value == state->initial_frozen_setattr &&
+              _PyUnicode_Equal(key, &_Py_ID(__setattr__))) ||
+             (value == state->initial_frozen_delattr &&
+              _PyUnicode_Equal(key, &_Py_ID(__delattr__))))) {
+            if (soac_contract_live(state) < 0) {
+                return -1;
+            }
+            return soac_final_override(state->type, key);
+        }
         return _PySOAC_CheckClassWrite((PyTypeObject *)state->type, key, value);
     }
     if (soac_contract_live(state) < 0) {
         return -1;
+    }
+    if (operation == PyDict_SOAC_SLOT_DESCRIPTOR_INSERT ||
+        operation == PyDict_SOAC_SLOT_DESCRIPTOR_REPLACE) {
+        return soac_validate_slot_publication(state, dict, key, value, provenance);
     }
     if (operation == PyDict_SOAC_CLASS_MEMBER_INSERT ||
         operation == PyDict_SOAC_CLASS_MEMBER_REPLACE) {
@@ -517,7 +612,8 @@ _PySOAC_MatchesClassNamespacePolicy(PyObject *policy_owner,
 }
 
 static int
-soac_install_type_contract(PyTypeObject *type, SoacConstructionHandle *handle)
+soac_install_type_contract(PyTypeObject *type, SoacConstructionHandle *handle,
+                           _PySoacDataclassSlotsContext *slots_context)
 {
     PySoacTypeConstructionSpec *spec = &handle->spec;
     SoacTypeContract *state = PyObject_GC_New(SoacTypeContract, &SoacTypeContract_Type);
@@ -528,7 +624,12 @@ soac_install_type_contract(PyTypeObject *type, SoacConstructionHandle *handle)
     state->owner = Py_NewRef(spec->owner);
     state->type = NULL;
     state->annotation_provider = NULL;
+    state->initial_frozen_setattr = NULL;
+    state->initial_frozen_delattr = NULL;
     state->fields = Py_NewRef(spec->fields);
+    state->object_slot_fields = Py_XNewRef(spec->object_slot_fields);
+    state->object_slots = NULL;
+    state->object_slot_count = 0;
     state->protected_names = PySet_New(spec->protected_names);
     state->final_methods = PySet_New(spec->final_methods);
     state->flags = spec->flags;
@@ -537,6 +638,10 @@ soac_install_type_contract(PyTypeObject *type, SoacConstructionHandle *handle)
     state->check_instance_write = spec->check_instance_write;
     state->new_instance_dict = spec->new_instance_dict;
     if (state->protected_names == NULL || state->final_methods == NULL) {
+        Py_DECREF(state);
+        return -1;
+    }
+    if (soac_build_object_slot_catalog(state, type) < 0) {
         Py_DECREF(state);
         return -1;
     }
@@ -570,6 +675,19 @@ soac_install_type_contract(PyTypeObject *type, SoacConstructionHandle *handle)
             return -1;
         }
     }
+    for (Py_ssize_t i = 0; i < state->object_slot_count; ++i) {
+        PyObject *name = PyTuple_GET_ITEM(state->object_slot_fields, i);
+        if (PySet_Contains(state->final_methods, name) > 0) {
+            PyErr_Format(soac_type_mutation_error(),
+                         "object slot cannot replace strict final method %R", name);
+            Py_DECREF(state);
+            return -1;
+        }
+        if (PySet_Discard(state->protected_names, name) < 0) {
+            Py_DECREF(state);
+            return -1;
+        }
+    }
     /* GC introspection may expose referents. Published policy catalogs must
      * themselves be immutable, not merely hidden behind an opaque C owner. */
     PyObject *protected_names = PyFrozenSet_New(state->protected_names);
@@ -586,37 +704,63 @@ soac_install_type_contract(PyTypeObject *type, SoacConstructionHandle *handle)
     ((PyHeapTypeObject *)type)->ht_soac_contract = (PyObject *)state;
     type->tp_flags |= Py_TPFLAGS_SOAC_CONTRACT;
     PyObject_GC_Track(state);
+    if (slots_context != NULL &&
+        _PySOAC_DataclassBindSlotsType(slots_context, (PyObject *)type, spec->owner) < 0) {
+        goto failed_binding;
+    }
     if (spec->bind_type != NULL && spec->bind_type(spec->owner, (PyObject *)type) < 0) {
-        state->terminal = 1;
         if (!PyErr_Occurred()) {
             PyObject *error = PySoac_GetStrictRuntimeUnavailableError();
             if (error != NULL) {
                 PyErr_SetString(error, "strict type owner rejected actual type binding");
             }
         }
-        return -1;
+        goto failed_binding;
     }
-    if (PyDict_SetSoacPolicy(type->tp_dict, (PyObject *)state,
-                             soac_class_dictionary_policy, 0) < 0) {
-        state->terminal = 1;
-        return -1;
+    if (slots_context != NULL &&
+        _PySOAC_DataclassBindSlotsType(slots_context, (PyObject *)type, spec->owner) < 0) {
+        goto failed_binding;
+    }
+    if (slots_context != NULL) {
+        PyObject *hooks[] = {&_Py_ID(__setattr__), &_Py_ID(__delattr__)};
+        PyObject **slots[] = {&state->initial_frozen_setattr,
+                             &state->initial_frozen_delattr};
+        for (size_t i = 0; i < Py_ARRAY_LENGTH(hooks); ++i) {
+            PyObject *value = PyDict_GetItemWithError(type->tp_dict, hooks[i]);
+            if ((value == NULL && PyErr_Occurred()) ||
+                (value != NULL &&
+                 _PySOAC_DataclassValidateCopiedHook(slots_context, hooks[i], value) < 0)) {
+                goto failed_binding;
+            }
+            *slots[i] = value;
+        }
+    }
+    int policy_status = PyDict_SetSoacPolicy(type->tp_dict, (PyObject *)state,
+                                            soac_class_dictionary_policy, 0);
+    state->initial_frozen_setattr = NULL;
+    state->initial_frozen_delattr = NULL;
+    if (policy_status < 0 ||
+        (slots_context != NULL &&
+         _PySOAC_DataclassBindSlotsType(slots_context, (PyObject *)type, spec->owner) < 0)) {
+        goto failed_binding;
     }
     return 0;
+
+failed_binding:
+    state->terminal = 1;
+    state->initial_frozen_setattr = NULL;
+    state->initial_frozen_delattr = NULL;
+    if (slots_context != NULL) {
+        _PySOAC_DataclassFailSlots(slots_context,
+                                   "replacement contract failed before Ready");
+    }
+    return -1;
 }
 
-PyObject *
-PyType_FromSoacConstructionHandle(PyObject *object, PyObject *namespace_function)
+static PyObject *
+soac_type_from_handle(SoacConstructionHandle *handle,
+                      _PySoacDataclassSlotsContext *slots_context)
 {
-    if (!Py_IS_TYPE(object, &SoacConstructionHandle_Type)) {
-        PyErr_SetString(soac_type_mutation_error(), "expected an interpreter-owned strict construction handle");
-        return NULL;
-    }
-    SoacConstructionHandle *handle = (SoacConstructionHandle *)object;
-    if (handle->consumed || handle->interpreter != _PyInterpreterState_GET() ||
-        handle->spec.namespace_function != namespace_function) {
-        PyErr_SetString(soac_type_mutation_error(), "strict construction handle was consumed, transferred, or used by the wrong namespace function");
-        return NULL;
-    }
     /* Consume before allocation or a callback can observe the class/owner. */
     handle->consumed = 1;
     PySoacTypeConstructionSpec *spec = &handle->spec;
@@ -627,7 +771,8 @@ PyType_FromSoacConstructionHandle(PyObject *object, PyObject *namespace_function
     type_new_ctx ctx = {
         .metatype = &PyType_Type, .args = args, .kwds = spec->keywords,
         .orig_dict = spec->namespace, .name = spec->name, .bases = spec->bases,
-        .soac_handle = object,
+        .soac_handle = (PyObject *)handle,
+        .soac_dataclass_slots = slots_context,
     };
     PyObject *result = NULL;
     int status = type_new_get_bases(&ctx, &result);
@@ -644,6 +789,52 @@ PyType_FromSoacConstructionHandle(PyObject *object, PyObject *namespace_function
     }
     Py_DECREF(args);
     return result;
+}
+
+PyObject *
+PyType_FromSoacConstructionHandle(PyObject *object, PyObject *namespace_function)
+{
+    if (!Py_IS_TYPE(object, &SoacConstructionHandle_Type)) {
+        PyErr_SetString(soac_type_mutation_error(), "expected an interpreter-owned strict construction handle");
+        return NULL;
+    }
+    SoacConstructionHandle *handle = (SoacConstructionHandle *)object;
+    if (handle->dataclass_slots || handle->consumed ||
+        handle->interpreter != _PyInterpreterState_GET() ||
+        handle->spec.namespace_function != namespace_function) {
+        PyErr_SetString(soac_type_mutation_error(), "strict construction handle was consumed, transferred, or used by the wrong namespace function");
+        return NULL;
+    }
+    return soac_type_from_handle(handle, NULL);
+}
+
+PyObject *
+_PySOAC_TypeFromDataclassSlotsHandle(_PySoacDataclassSlotsContext *context,
+                                     PyObject *object)
+{
+    if (object == NULL || !Py_IS_TYPE(object, &SoacConstructionHandle_Type)) {
+        _PySOAC_DataclassFailSlots(context, "replacement needs its native construction handle");
+        return NULL;
+    }
+    SoacConstructionHandle *handle = (SoacConstructionHandle *)object;
+    if (!handle->dataclass_slots || handle->consumed ||
+        handle->interpreter != _PyInterpreterState_GET() ||
+        _PySOAC_DataclassValidateSlotsHandle(context, object, &handle->spec) < 0) {
+        _PySOAC_DataclassFailSlots(context, "replacement construction handle is unavailable");
+        return NULL;
+    }
+    return soac_type_from_handle(handle, context);
+}
+
+void
+_PySOAC_ClearDataclassSlotsHandle(PyObject *object)
+{
+    assert(Py_IS_TYPE(object, &SoacConstructionHandle_Type));
+    SoacConstructionHandle *handle = (SoacConstructionHandle *)object;
+    assert(handle->dataclass_slots);
+    PyObject *exception = PyErr_GetRaisedException();
+    soac_handle_clear(handle);
+    PyErr_SetRaisedException(exception);
 }
 
 int
@@ -780,7 +971,10 @@ _PySOAC_CheckInstanceWrite(PyObject *object, PyObject *name, PyObject *value)
         }
         return -1;
     }
-    if (state->check_instance_write != NULL) {
+    /* A selected native slot is validated by actual physical member offset at
+     * the final PyMember_SetOne commit, not twice by its lookup spelling. */
+    if (state->check_instance_write != NULL &&
+        soac_object_slot_name_index(state, name) < 0) {
         return state->check_instance_write(state->owner, object, name, value);
     }
     return 0;
@@ -982,6 +1176,8 @@ _PySOAC_TypeContractBeginTeardown(PyTypeObject *type)
          * all decrefs so this does not reorder user-visible finalizers. */
         state->terminal = 1;
         state->type = NULL;
+        state->initial_frozen_setattr = NULL;
+        state->initial_frozen_delattr = NULL;
     }
 }
 

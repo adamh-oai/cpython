@@ -734,3 +734,54 @@ first. An ordinary initial custom MRO may include a strict ancestor without
 gaining its own strict authority, but its inherited constraints are enforced
 before type readiness completes. Custom MROs containing only ordinary classes
 retain their normal behavior, including reordered MROs.
+
+
+SOAC physical object slots
+-------------------------
+
+``PySoacTypeConstructionSpec`` ABI 3 appends ``object_slot_fields``, an exact
+tuple of unique canonical names or ``NULL`` for no native-member plan.
+``fields`` continues to describe the independent indexed dictionary prefix.
+The native constructor resolves each object field against the actual solid
+base chain's ``tp_members`` before owner binding or ``PyType_Ready``. This
+bounded plan supports aligned, fixed-size ``Py_T_OBJECT_EX`` members with
+ordinary flags; a missing, incompatible, or variable-size member fails
+construction. Public names and user-created descriptors do not supply offsets.
+
+``PyMember_GetOne`` and ``PyMember_SetOne`` validate the actual receiver's
+physical catalog, including inherited contracts. A copied member definition
+with the same offset and an object-pointer kind preserves its normal API
+behavior, including a different diagnostic name or legacy ``T_OBJECT`` null
+semantics. Its name and flags cannot bypass the canonical field predicate.
+Overlapping numeric, string, unaligned, or after-items views are rejected
+before touching protected memory. Read-only, missing-attribute, and reference
+release behavior otherwise remains native. Warmed slot bytecodes deoptimize
+to the same guarded member path. Unsupported direct memory writes are not a
+public member operation.
+
+An ordinary descendant gains no own strict capability. Its independent slots
+and dictionary remain ordinary except for actual inherited physical
+invariants. A selected native member may shadow an inherited dictionary field
+only when the live inherited contract owns that immutable dictionary prefix.
+The prefix position remains present but initially unset; member stores do not
+mirror values into it. Explicit dictionary writes may hold a separate hidden
+value under the same name and still obey the inherited dictionary policy.
+The trusted runtime composes required value predicates for the active member.
+Two newly selected storage locations for one field are rejected.
+
+``PyType_GetSoacObjectSlotOffset(actual_type, expected_owner, index, out)``
+checks the actual MRO owner and solid-base member identity without callbacks
+or allocation. It works during ``bind_type`` before readiness. It returns one
+with the offset, zero for an unrelated type or owner, and minus one for an
+invalid index or terminal contract. An inherited match grants no own class
+authority. ``PyType_MatchesSoacObjectSlotDescriptor`` uses the same proof and
+then compares the exact member descriptor, native member definition, and
+declaring type. The caller supplies its observed first-MRO descriptor; the
+matcher performs no Python lookup. Copied or same-name descriptors do not
+authenticate optimized reads.
+
+Only the native readiness producer can publish a selected member descriptor
+through the protected class dictionary. The operation carries the exact newly
+created descriptor through the common dictionary commit and revalidates after
+watchers. It grants no reentrant mapping permission. A selected descriptor
+cannot subsequently be replaced, including before class sealing.

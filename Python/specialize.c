@@ -18,6 +18,7 @@
 #include "pycore_opcode_utils.h"  // RESUME_AT_FUNC_START
 #include "pycore_pylifecycle.h"   // _PyOS_URandomNonblock()
 #include "pycore_runtime.h"       // _Py_ID()
+#include "pycore_soac_type.h"    // physical slot write/read policy
 #include "pycore_unicodeobject.h" // _PyUnicodeASCIIIter_Type
 
 #include <stdlib.h> // rand()
@@ -819,6 +820,10 @@ do_specialize_instance_load_attr(PyObject* owner, _Py_CODEUNIT* instr, PyObject*
         }
         case OBJECT_SLOT:
         {
+            if (_PySOAC_UsesObjectSlotPolicy(Py_TYPE(owner))) {
+                SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_ATTR_OBJECT_SLOT);
+                return -1;
+            }
             PyMemberDescrObject *member = (PyMemberDescrObject *)descr;
             struct PyMemberDef *dmem = member->d_member;
             Py_ssize_t offset = dmem->offset;
@@ -1025,6 +1030,10 @@ _Py_Specialize_StoreAttr(_PyStackRef owner_st, _Py_CODEUNIT *instr, PyObject *na
             goto fail;
         case OBJECT_SLOT:
         {
+            if (_PySOAC_UsesObjectSlotPolicy(Py_TYPE(owner))) {
+                SPECIALIZATION_FAIL(STORE_ATTR, SPEC_FAIL_ATTR_OBJECT_SLOT);
+                goto fail;
+            }
             PyMemberDescrObject *member = (PyMemberDescrObject *)descr;
             struct PyMemberDef *dmem = member->d_member;
             Py_ssize_t offset = dmem->offset;

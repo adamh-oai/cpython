@@ -33,6 +33,7 @@
 #include "pycore_range.h"         // _PyRangeIterObject
 #include "pycore_setobject.h"     // _PySet_Update()
 #include "pycore_sliceobject.h"   // _PyBuildSlice_ConsumeRefs
+#include "pycore_soac_type.h"    // physical member policy guards
 #include "pycore_sysmodule.h"     // _PySys_GetOptionalAttrString()
 #include "pycore_template.h"      // _PyTemplate_Build()
 #include "pycore_traceback.h"     // _PyTraceBack_FromFrame

@@ -19,6 +19,10 @@ extern void _PySOAC_TypeContractClear(PyTypeObject *);
 extern void _PySOAC_TypeContractDealloc(PyTypeObject *);
 extern PyObject *_PySOAC_NewInstanceDictionary(PyObject *);
 extern int _PySOAC_UsesInstanceDictionaryPolicy(PyTypeObject *);
+/* Also consumed by the generated _testinternalcapi executor. */
+PyAPI_FUNC(int) _PySOAC_UsesObjectSlotPolicy(PyTypeObject *);
+extern int _PySOAC_CheckObjectSlotAccess(PyObject *, const PyMemberDef *);
+extern int _PySOAC_CheckObjectSlotWrite(PyObject *, Py_ssize_t, PyObject *);
 extern int _PySOAC_PublishAnnotationCache(PyTypeObject *, PyObject *, PyObject *);
 extern int _PySOAC_MatchesClassNamespacePolicy(
     PyObject *policy_owner, PyDict_SoacPolicyCallback validate,

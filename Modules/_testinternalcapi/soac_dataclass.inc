@@ -64,7 +64,7 @@ soac_dc_test_enter(PyObject *owner, unsigned int stage,
                    const PySoacDataclassFrameView *parent,
                    const PySoacDataclassFrameView *child, unsigned int *role)
 {
-    if (!PyTuple_CheckExact(owner) || PyTuple_GET_SIZE(owner) != 8) {
+    if (!PyTuple_CheckExact(owner) || PyTuple_GET_SIZE(owner) != 9) {
         PyErr_SetString(PyExc_TypeError, "invalid native dataclass fixture owner");
         return -1;
     }
@@ -288,10 +288,12 @@ soac_dataclass_fixture(PyObject *self, PyObject *args)
 {
     PyObject *root, *bindings, *edges, *sites, *payload, *members = NULL;
     PyObject *boundaries = NULL, *components = NULL;
-    if (!PyArg_ParseTuple(args, "OOOOO|OOO", &root, &bindings, &edges, &sites, &payload,
-                          &members, &boundaries, &components) ||
+    PyObject *slots = Py_None;
+    if (!PyArg_ParseTuple(args, "OOOOO|OOOO", &root, &bindings, &edges, &sites, &payload,
+                          &members, &boundaries, &components, &slots) ||
         soac_dc_test_check_bindings(bindings) < 0 ||
-        soac_dc_test_check_bridge_payload(payload) < 0) {
+        soac_dc_test_check_bridge_payload(payload) < 0 ||
+        soac_slot_test_check_plan(slots) < 0) {
         return NULL;
     }
     PySoacDataclassCallbacks callbacks = {
@@ -306,6 +308,7 @@ soac_dataclass_fixture(PyObject *self, PyObject *args)
         .value = soac_dc_test_checked_value,
         .validate_component = soac_dc_test_component,
         .init_value = soac_dc_test_init_value,
+        .prepare_slots = soac_dc_test_prepare_slots,
     };
     if (PySoac_SetDataclassCallbacks(&callbacks) < 0) {
         return NULL;
@@ -337,10 +340,10 @@ soac_dataclass_fixture(PyObject *self, PyObject *args)
     PyObject *normalized_boundaries = soac_dc_test_boundaries(boundaries);
     PyObject *normalized_components = normalized_boundaries == NULL ? NULL
         : soac_dc_test_components(components);
-    PyObject *owner = normalized_components == NULL ? NULL : PyTuple_Pack(8, snapshot, bindings,
+    PyObject *owner = normalized_components == NULL ? NULL : PyTuple_Pack(9, snapshot, bindings,
                                   normalized_edges, normalized_sites, payload,
                                   normalized_members, normalized_boundaries,
-                                  normalized_components);
+                                  normalized_components, slots);
     Py_DECREF(snapshot);
     Py_DECREF(normalized_edges);
     Py_DECREF(normalized_sites);

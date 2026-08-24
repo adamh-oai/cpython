@@ -307,7 +307,7 @@ PyAPI_FUNC(uint64_t) PyType_GetSoacFunctionId(PyObject *);
 
 /* The C-only caller must authenticate the source plan. Ordinary Python cannot
  * construct these interpreter-owned handles or install type capabilities. */
-#define Py_SOAC_TYPE_CONTRACT_ABI 2
+#define Py_SOAC_TYPE_CONTRACT_ABI 3
 #define Py_SOAC_TYPE_FINAL 1u
 typedef struct {
     uint32_t abi_version;
@@ -326,9 +326,21 @@ typedef struct {
     /* Bind the actual type into an already-reserved owner edge. Must not
      * allocate or call Python; runs before PyType_Ready and user callbacks. */
     int (*bind_type)(PyObject *, PyObject *);
+    /* Exact, unique canonical field names backed by fixed native object
+     * members. NULL is an absent slot plan; fields above remains the separate
+     * dictionary plan. Native construction resolves and owns the offsets. */
+    PyObject *object_slot_fields;
 } PySoacTypeConstructionSpec;
 
 PyAPI_FUNC(PyObject *) PyType_NewSoacConstructionHandle(const PySoacTypeConstructionSpec *);
+struct _PySoacDataclassFrameView;
+/* Only the explicit native prepare_slots callback's borrowed producer view
+ * can mint this distinct handle mode. namespace_function MUST be NULL. The
+ * active invocation/original owner/actual evaluated operands are validated;
+ * only its same opcode-dispatched bridge can consume the one reserved handle.
+ * No original namespace-function lifetime or source/JIT authority is added. */
+PyAPI_FUNC(PyObject *) PyType_NewSoacDataclassSlotsHandle(
+    const struct _PySoacDataclassFrameView *, const PySoacTypeConstructionSpec *);
 PyAPI_FUNC(PyObject *) PyType_FromSoacConstructionHandle(PyObject *, PyObject *);
 PyAPI_FUNC(int) PyType_SealSoacContract(PyObject *, PyObject *);
 PyAPI_FUNC(int) PyType_HasSoacContract(PyObject *);
@@ -336,6 +348,20 @@ PyAPI_FUNC(int) PyType_IsSoacSealed(PyObject *);
 /* Borrowed owner; NULL/no error for ordinary types, runtime-unavailable error
  * for an irreversibly terminal or foreign-interpreter contract. */
 PyAPI_FUNC(PyObject *) PyType_GetSoacContractOwner(PyObject *);
+/* Callback-free physical projection through the actual native MRO and solid
+ * base layout, including bind_type before Ready. An inherited match grants
+ * no own class/dispatch authority. The owner is compared, never dereferenced.
+ * Returns 1 with offset, 0 for an unrelated type/owner, -1 on terminal/invalid
+ * state. A matching owner with an invalid field index raises IndexError. */
+PyAPI_FUNC(int) PyType_GetSoacObjectSlotOffset(
+    PyObject *actual_type, PyObject *expected_owner,
+    Py_ssize_t field_index, Py_ssize_t *offset);
+/* Same live-owner/physical-layout proof, then exact native member/declaring
+ * type identity. The caller supplies its observed first-MRO descriptor; this
+ * does not perform attribute lookup or confer a class capability. */
+PyAPI_FUNC(int) PyType_MatchesSoacObjectSlotDescriptor(
+    PyObject *actual_type, PyObject *expected_owner,
+    Py_ssize_t field_index, PyObject *descriptor);
 /* Consume one authenticated dataclass-generated member installation. This
  * does not unseal a class or authorize unrelated namespace writes. */
 PyAPI_FUNC(int) PyType_SetSoacDataclassMember(

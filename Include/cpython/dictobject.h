@@ -66,7 +66,11 @@ enum {
     PyDict_SOAC_ATTRIBUTE_SET = 8,
     PyDict_SOAC_ATTRIBUTE_SET_EXISTING = 9,
     PyDict_SOAC_CLASS_MEMBER_INSERT = 10,
-    PyDict_SOAC_CLASS_MEMBER_REPLACE = 11
+    PyDict_SOAC_CLASS_MEMBER_REPLACE = 11,
+    /* Only type_ready's explicit canonical physical-member publication.
+     * Provenance is that exact native descriptor, checked after watchers. */
+    PyDict_SOAC_SLOT_DESCRIPTOR_INSERT = 12,
+    PyDict_SOAC_SLOT_DESCRIPTOR_REPLACE = 13
 };
 #define PyDict_SOAC_ALLOW_NONSTRING_KEYS 1u
 #define PyDict_SOAC_READ_ONLY 2u

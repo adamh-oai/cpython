@@ -82,6 +82,9 @@ soac_dataclass_bridge_default(PyObject *self, PyObject *const *args,
     if (kind == Py_SOAC_DATACLASS_BRIDGE_INIT_VALUE && nargs == 3) {
         return Py_NewRef(args[1]);
     }
+    if (kind == Py_SOAC_DATACLASS_BRIDGE_NEW_SLOTS && nargs == 5) {
+        return PyObject_Vectorcall(args[0], args + 1, 3, NULL);
+    }
     if ((kind == Py_SOAC_DATACLASS_BRIDGE_EXEC ||
          kind == Py_SOAC_DATACLASS_BRIDGE_MEMBER) && nargs == 4) {
         return PyObject_Vectorcall(args[0], args + 1, 3, NULL);
@@ -103,6 +106,8 @@ static PyMethodDef soac_dataclass_bridge_methods[] = {
      METH_FASTCALL, NULL},
     {"_dataclass_init_value", _PyCFunction_CAST(soac_dataclass_bridge_default),
      METH_FASTCALL, NULL},
+    {"_dataclass_new_slots", _PyCFunction_CAST(soac_dataclass_bridge_default),
+     METH_FASTCALL, NULL},
 };
 
 static const unsigned int soac_dataclass_bridge_kinds[] = {
@@ -111,6 +116,7 @@ static const unsigned int soac_dataclass_bridge_kinds[] = {
     Py_SOAC_DATACLASS_BRIDGE_MEMBER,
     Py_SOAC_DATACLASS_BRIDGE_VALUE,
     Py_SOAC_DATACLASS_BRIDGE_INIT_VALUE,
+    Py_SOAC_DATACLASS_BRIDGE_NEW_SLOTS,
 };
 
 int
@@ -209,7 +215,15 @@ soac_dataclass_validate_bridge(_PyInterpreterFrame *parent, PyObject *builtin,
          (nargs != 4 || args[0] != soac_dataclass_builtin(
               interp, Py_SOAC_DATACLASS_BUILTIN_SETATTR) ||
           !PyType_Check(args[1]) || !PyUnicode_CheckExact(args[2]) ||
-          args[1] != (PyObject *)invocation->actual_type))) {
+          args[1] != (PyObject *)invocation->actual_type)) ||
+        (kind == Py_SOAC_DATACLASS_BRIDGE_NEW_SLOTS &&
+         (nargs != 5 || invocation->phase != SOAC_DC_APPLY_ACTIVE ||
+          args[0] != (PyObject *)&PyType_Type ||
+          !PyUnicode_CheckExact(args[1]) || !PyTuple_CheckExact(args[2]) ||
+          !PyDict_CheckExact(args[3]) || !PyType_Check(args[4]) ||
+          args[4] != (PyObject *)invocation->actual_type ||
+          invocation->class_owner == NULL ||
+          PyType_GetSoacContractOwner(args[4]) != invocation->class_owner))) {
         return soac_dataclass_fail(invocation, "dataclass bridge operands are not authentic");
     }
     PySoacDataclassFrameView view = {
@@ -508,6 +522,8 @@ error:
     return NULL;
 }
 
+#include "soac_dataclass_slots.inc"
+
 static PyObject *
 soac_dataclass_dispatch_bridge(_PyInterpreterFrame *parent, PyObject *builtin,
                                unsigned int kind, PyObject *const *args,
@@ -521,6 +537,9 @@ soac_dataclass_dispatch_bridge(_PyInterpreterFrame *parent, PyObject *builtin,
     }
     if (kind == Py_SOAC_DATACLASS_BRIDGE_INIT_VALUE) {
         return soac_dataclass_init_value_bridge(parent, builtin, args, nargs);
+    }
+    if (kind == Py_SOAC_DATACLASS_BRIDGE_NEW_SLOTS) {
+        return soac_dataclass_new_slots_bridge(parent, builtin, args, nargs);
     }
     if (soac_dataclass_validate_bridge(parent, builtin, kind, args, nargs) < 0) {
         return NULL;

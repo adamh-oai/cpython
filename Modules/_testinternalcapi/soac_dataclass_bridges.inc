@@ -67,7 +67,8 @@ soac_dc_test_check_bridge_payload(PyObject *payload)
         unsigned long kind = PyLong_AsUnsignedLong(PyTuple_GET_ITEM(edge, 1));
         if (PyLong_AsSsize_t(PyTuple_GET_ITEM(edge, 0)) < 0 ||
             kind < Py_SOAC_DATACLASS_BRIDGE_SOURCE ||
-            kind > Py_SOAC_DATACLASS_BRIDGE_MEMBER) {
+            (kind > Py_SOAC_DATACLASS_BRIDGE_MEMBER &&
+             kind != Py_SOAC_DATACLASS_BRIDGE_NEW_SLOTS)) {
             goto bad;
         }
     }

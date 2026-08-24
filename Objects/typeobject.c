@@ -4259,6 +4259,7 @@ typedef struct {
     int may_add_dict;
     int may_add_weak;
     PyObject *soac_handle;
+    _PySoacDataclassSlotsContext *soac_dataclass_slots;
 } type_new_ctx;
 
 #include "soac_type.inc"
@@ -5006,7 +5007,8 @@ type_new_impl(type_new_ctx *ctx)
     }
 
     if (ctx->soac_handle != NULL &&
-        soac_install_type_contract(type, (SoacConstructionHandle *)ctx->soac_handle) < 0) {
+        soac_install_type_contract(type, (SoacConstructionHandle *)ctx->soac_handle,
+                                    ctx->soac_dataclass_slots) < 0) {
         goto error;
     }
 
@@ -8723,7 +8725,10 @@ type_add_members(PyTypeObject *type)
         if (descr == NULL)
             return -1;
 
-        if (PyDict_SetDefaultRef(dict, PyDescr_NAME(descr), descr, NULL) < 0) {
+        int published = soac_publish_object_slot_descriptor(type, descr);
+        if (published < 0 ||
+            (published == 0 &&
+             PyDict_SetDefaultRef(dict, PyDescr_NAME(descr), descr, NULL) < 0)) {
             Py_DECREF(descr);
             return -1;
         }
@@ -9515,7 +9520,8 @@ type_ready_post_checks(PyTypeObject *type)
     /* Inherited physical contracts apply to ordinary subclasses too. An
      * unverified custom allocator cannot bypass pre-publication initialization
      * or supply a different allocation/free pair. Reject before callbacks. */
-    if (_PySOAC_UsesInstanceDictionaryPolicy(type) &&
+    if ((_PySOAC_UsesInstanceDictionaryPolicy(type) ||
+         _PySOAC_UsesObjectSlotPolicy(type)) &&
         (type->tp_alloc != PyType_GenericAlloc ||
          type->tp_free != (_PyType_IS_GC(type) ? PyObject_GC_Del : PyObject_Free))) {
         PyErr_SetString(soac_type_mutation_error(),

@@ -9,7 +9,8 @@ import annotationlib
 import abc
 from reprlib import recursive_repr
 from _types import (_dataclass_record_source, _dataclass_exec,
-                    _dataclass_set_member, _dataclass_init_value)
+                    _dataclass_set_member, _dataclass_init_value,
+                    _dataclass_new_slots)
 
 
 __all__ = ['dataclass',
@@ -1363,7 +1364,7 @@ def _add_slots(cls, is_frozen, weakref_slot, defined_fields):
 
     # And finally create the class.
     qualname = getattr(cls, '__qualname__', None)
-    newcls = type(cls)(cls.__name__, cls.__bases__, cls_dict)
+    newcls = _dataclass_new_slots(type(cls), cls.__name__, cls.__bases__, cls_dict, cls)
     if qualname is not None:
         newcls.__qualname__ = qualname
 

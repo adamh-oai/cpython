@@ -22,6 +22,10 @@ typedef struct {
     PyObject *owner;              /* Active GC-visible compiler/catalog owner. */
     PyObject *class_owner;        /* Active contract owner, not the type. */
     PyTypeObject *actual_type;    /* Comparison only; never dereference it. */
+    PyObject *replacement_owner; /* Separate active owner, no type backedge. */
+    PyTypeObject *replacement_type; /* Comparison only; guarded by its caller. */
+    PyObject *replacement_weakref; /* Callback-free, prevents raw-address ABA. */
+    int slots_started;
     int member_pending;
 } SoacDataclassInvocation;
 
@@ -60,6 +64,7 @@ struct _PySoacDataclassFrameView {
     _PyInterpreterFrame *frame;
     unsigned int role;
     PyObject *invocation;  /* Explicit borrowed callback context, not ambient. */
+    _PySoacDataclassSlotsContext *slots_context; /* Only prepare_slots view. */
 };
 
 static PyTypeObject SoacDataclassInvocation_Type;
@@ -101,14 +106,22 @@ soac_dataclass_expire(SoacDataclassInvocation *invocation,
      * generated function may retain this now-inert invocation indefinitely. */
     invocation->phase = phase;
     invocation->actual_type = NULL;
+    invocation->replacement_type = NULL;
+    invocation->slots_started = 0;
     invocation->member_pending = 0;
     PyObject *owner = invocation->owner;
     PyObject *class_owner = invocation->class_owner;
+    PyObject *replacement_owner = invocation->replacement_owner;
+    PyObject *replacement_weakref = invocation->replacement_weakref;
     invocation->owner = NULL;
     invocation->class_owner = NULL;
+    invocation->replacement_owner = NULL;
+    invocation->replacement_weakref = NULL;
     PyObject *exception = PyErr_GetRaisedException();
     Py_XDECREF(owner);
     Py_XDECREF(class_owner);
+    Py_XDECREF(replacement_owner);
+    Py_XDECREF(replacement_weakref);
     PyErr_SetRaisedException(exception);
 }
 
@@ -157,6 +170,8 @@ soac_dataclass_traverse(SoacDataclassInvocation *invocation,
 {
     Py_VISIT(invocation->owner);
     Py_VISIT(invocation->class_owner);
+    Py_VISIT(invocation->replacement_owner);
+    Py_VISIT(invocation->replacement_weakref);
     return 0;
 }
 
@@ -252,7 +267,8 @@ PySoac_SetDataclassCallbacks(const PySoacDataclassCallbacks *callbacks)
         callbacks->validate_member == NULL || callbacks->bridge == NULL ||
         callbacks->compiled == NULL || callbacks->created == NULL ||
         callbacks->bound == NULL || callbacks->value == NULL ||
-        callbacks->validate_component == NULL || callbacks->init_value == NULL) {
+        callbacks->validate_component == NULL || callbacks->init_value == NULL ||
+        callbacks->prepare_slots == NULL) {
         PyErr_SetString(PyExc_TypeError, "invalid native dataclass callback table");
         return -1;
     }
@@ -271,7 +287,8 @@ PySoac_SetDataclassCallbacks(const PySoacDataclassCallbacks *callbacks)
             installed->bound == callbacks->bound &&
             installed->value == callbacks->value &&
             installed->validate_component == callbacks->validate_component &&
-            installed->init_value == callbacks->init_value) {
+            installed->init_value == callbacks->init_value &&
+            installed->prepare_slots == callbacks->prepare_slots) {
             return 0;
         }
         return soac_dataclass_error("native dataclass callbacks are already installed");
@@ -314,6 +331,10 @@ PySoac_NewDataclassInvocation(PyObject *owner)
     invocation->owner = Py_NewRef(owner);
     invocation->class_owner = NULL;
     invocation->actual_type = NULL;
+    invocation->replacement_owner = NULL;
+    invocation->replacement_type = NULL;
+    invocation->replacement_weakref = NULL;
+    invocation->slots_started = 0;
     invocation->member_pending = 0;
     PyObject_GC_Track(invocation);
     return (PyObject *)invocation;
@@ -661,7 +682,10 @@ PySoac_DataclassVectorcall(PyObject *object, unsigned int stage,
     if (result == NULL || !soac_dataclass_is_running(invocation) ||
         invocation->member_pending ||
         (stage == Py_SOAC_DATACLASS_ROOT_APPLY &&
-         result != (PyObject *)invocation->actual_type)) {
+         (invocation->slots_started
+             ? PySoac_DataclassMatchesSlotsClass(object, result,
+                                                 invocation->replacement_owner) != 1
+             : result != (PyObject *)invocation->actual_type))) {
         soac_dataclass_fail(invocation, "dataclass root did not finish its exact application");
         Py_XDECREF(result);
         return NULL;

@@ -84,7 +84,14 @@ _get_current_module(void)
 
 typedef struct {
     PyObject *record_list;
+    PyObject *soac_create_globals;
+    PyObject *soac_create_name;
+    PyObject *soac_create_captures;
+    int soac_create_watcher_plus_one;
 } module_state;
+
+static struct PyModuleDef _testcapimodule;
+static void clear_soac_function_create_watch(module_state *);
 
 static inline module_state *
 get_module_state(PyObject *mod)
@@ -99,12 +106,16 @@ static int
 traverse_module_state(module_state *state, visitproc visit, void *arg)
 {
     Py_VISIT(state->record_list);
+    Py_VISIT(state->soac_create_globals);
+    Py_VISIT(state->soac_create_name);
+    Py_VISIT(state->soac_create_captures);
     return 0;
 }
 
 static int
 clear_module_state(module_state *state)
 {
+    clear_soac_function_create_watch(state);
     Py_CLEAR(state->record_list);
     return 0;
 }
@@ -3223,6 +3234,8 @@ test_threadstate_set_stack_protection(PyObject *self, PyObject *Py_UNUSED(args))
 }
 
 
+#include "_testinternalcapi/soac_function_watch.inc"
+#include "_testinternalcapi/soac_slots.inc"
 #include "_testinternalcapi/soac_dataclass.inc"
 
 /* A direct, allocation-free argument bridge for descriptor fault injection.
@@ -3313,6 +3326,11 @@ soac_descriptor_birth_foreign(PyObject *self, PyObject *const *args,
 }
 
 static PyMethodDef module_functions[] = {
+    {"soac_slot_type", soac_slot_type, METH_VARARGS},
+    {"soac_slot_definition", soac_slot_definition, METH_O},
+    {"soac_slot_view_get", _PyCFunction_CAST(soac_slot_view_get), METH_VARARGS | METH_KEYWORDS},
+    {"soac_slot_view_set", _PyCFunction_CAST(soac_slot_view_set), METH_VARARGS | METH_KEYWORDS},
+    {"soac_type_construction_layout", soac_type_construction_layout, METH_NOARGS},
     {"soac_dataclass_boundary_owner", soac_dataclass_boundary_owner, METH_VARARGS},
     {"soac_dataclass_boundary_state", soac_dataclass_boundary_state, METH_O},
     {"soac_dataclass_configure_boundary", soac_dataclass_configure_boundary, METH_VARARGS},
@@ -3398,6 +3416,8 @@ static PyMethodDef module_functions[] = {
     {"dict_reserve_soac_namespace_keys", dict_reserve_soac_namespace_keys, METH_VARARGS},
     {"dict_setitem_and_delete_for_module", dict_setitem_and_delete_for_module, METH_VARARGS},
     {"dict_new_soac_type", dict_new_soac_type, METH_VARARGS},
+    {"soac_function_create_watch", soac_function_create_watch, METH_VARARGS},
+    {"soac_function_create_unwatch", soac_function_create_unwatch, METH_O},
     {"dict_new_from_indexed_schema", dict_new_from_indexed_schema, METH_O},
     {"dict_setitem_knownhash", dict_setitem_knownhash, METH_VARARGS},
     {"dict_delitem_knownhash", dict_delitem_knownhash, METH_VARARGS},

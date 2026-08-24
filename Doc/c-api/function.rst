@@ -265,7 +265,7 @@ SOAC Dataclass Invocations
 
 The private dataclass protocol authorizes one explicit adapter invocation,
 not arbitrary execution of strict code. The trusted runtime installs one
-``PySoacDataclassCallbacks`` ABI-2 table by value in the current interpreter.
+``PySoacDataclassCallbacks`` ABI-3 table by value in the current interpreter.
 Registration is single assignment; only the identical callback values can
 be registered again. Interpreter teardown closes the table before clearing
 references. Free-threaded builds do not support this protocol.
@@ -395,6 +395,58 @@ does not install checks. Admission must decline if it needs a generated
 policy that the runtime has not implemented. Original ``CO_FUTURE_STRICT``
 code remains denied at every frame entry; no dataclass context relaxes that
 guard.
+
+Dataclass slot replacements
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The exact opcode-dispatched ``_types._dataclass_new_slots`` bridge receives
+already-evaluated metaclass, name, bases, copied namespace, and original class
+operands from ``_add_slots``. Its ordinary public/C entry simply performs the
+ordinary metaclass call and grants no invocation context. The active path
+requires the exact authenticated parent frame and call site, canonical helper,
+original native class and owner, and current operand plan. Unknown or changed
+operands after original binding fail; there is no fallback or revocation.
+
+ABI 3 appends the ``prepare_slots`` callback. It receives the five operands
+and an explicit callback-duration producer view, and returns one owned handle
+from ``PyType_NewSoacDataclassSlotsHandle`` using that exact view. The handle
+has a distinct mode, a distinct owner, and ``namespace_function=NULL``. No
+dead original namespace function is retained or recreated. Only the same
+opcode-owned stack context can consume it, once; public source-handle
+consumption rejects it. Pure bridge validation repeats after allocations.
+
+After installing the replacement's actual contract and physical catalog,
+native code binds a callback-free weak type witness and separate active owner
+before calling ``bind_type``. ``PySoac_DataclassMatchesSlotsClass`` proves that
+exact association without allocating or dereferencing a stale raw type
+address. The caller pins the actual type. It returns one for an exact live
+binding, zero for an unrelated or different binding, and minus one for an
+expired or terminal association. Revalidation follows the Rust bind callback
+and class-dictionary policy installation, before readiness callbacks. The
+original binding is unchanged. A failed replacement cannot remove either
+class's already-installed restrictions.
+
+On this GIL-only native build, allocating the exact callback-less weakref
+uses the builtin generic allocator. Its GC tracking only schedules collection
+at the interpreter evaluation boundary; it cannot synchronously call Python
+before owner binding. The type remains pinned and the context is revalidated
+after allocation. No weakref subclass allocator or callback is selected.
+
+Only the original class's exact, already-installed frozen setter/deleter from
+the same invocation may be copied through initial namespace validation. Its
+native birth role, function, original code, and permanent metadata seal must
+match. Ordinary, cloned, foreign-invocation, or other attribute hooks receive
+no exception. The temporary comparison coordinates disappear before Ready;
+they never grant later mapping or type writes.
+
+The root application must return the actual weak-witnessed replacement.
+Completion releases both active owners and the weak witness. Consumed handles
+clear their construction operands even if they escaped, so replacement
+provenance adds no permanent original-class or namespace-function lifetime
+edge. Existing Python method closure references retain their ordinary
+lifetimes. Declaring-function/check snapshots are not retargeted by this API;
+the trusted runtime must decline a graph before original binding if it cannot
+support that graph's original/replacement semantics.
 
 Required generated calls and components
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
