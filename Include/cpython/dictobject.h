@@ -78,6 +78,13 @@ PyAPI_FUNC(int) _PyDict_HasLiveSoacReadOnlyPolicy(PyObject *dict);
 PyAPI_FUNC(int) PyDict_MatchesSoacPolicy(
     PyObject *dict, PyObject *owner, PyDict_SoacPolicyCallback validate,
     unsigned int flags);
+/* Authenticate the actual class namespace against its private native policy
+ * and expected interpreter-owned contract owner. The expected pointer is
+ * compared, never dereferenced. Returns 1 for a match, 0 for an unrelated
+ * dictionary/owner, and -1 with an exception for a terminal or unavailable
+ * native class contract. */
+PyAPI_FUNC(int) PyDict_MatchesSoacClassNamespace(
+    PyObject *dict, PyObject *expected_owner);
 
 PyAPI_FUNC(PyObject *) _PyDict_GetItem_KnownHash(PyObject *mp, PyObject *key,
                                                  Py_hash_t hash);

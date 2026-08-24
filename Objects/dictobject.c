@@ -227,6 +227,20 @@ PyDict_MatchesSoacPolicy(PyObject *dict, PyObject *owner,
         policy->flags == flags;
 }
 
+int
+PyDict_MatchesSoacClassNamespace(PyObject *dict, PyObject *expected_owner)
+{
+    if (expected_owner == NULL || !PyDict_HasSoacPolicy(dict)) {
+        return 0;
+    }
+    SoacDictPolicy *policy = soac_policy((PyDictObject *)dict);
+    if (policy->flags != 0 || (!policy->terminal && policy->mutating)) {
+        return 0;
+    }
+    return _PySOAC_MatchesClassNamespacePolicy(policy->owner, policy->validate,
+                                              dict, expected_owner);
+}
+
 static int
 soac_check_key(PyDictObject *dict, PyObject *key)
 {

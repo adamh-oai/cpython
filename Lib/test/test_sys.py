@@ -1680,7 +1680,11 @@ class SizeofTest(unittest.TestCase):
         check(x, size('3PiccPPP' + INTERPRETER_FRAME + 'P'))
         # function
         def func(): pass
-        check(func, size('16Pi'))
+        # The SOAC tail includes two JIT metadata pointers and a uint64 id
+        # before func_version, then the permanent strict id, GC owner, and
+        # two one-byte state flags. Keep this in PyFunctionObject order.
+        # Retain uint64_t alignment even when it exceeds pointer alignment.
+        check(func, size('18PQIQP2B0Q'))
         class c():
             @staticmethod
             def foo():
@@ -1798,8 +1802,10 @@ class SizeofTest(unittest.TestCase):
                   '10P'                 # PySequenceMethods
                   '2P'                  # PyBufferProcs
                   '7P'
+                  '2PQ'                 # SOAC JIT metadata and function id
                   '1PIP'                # Specializer cache
                   + typeid              # heap type id (free-threaded only)
+                  + 'P0Q'               # permanent SOAC type contract/alignment
                   )
         class newstyleclass(object): pass
         # Separate block for PyDictKeysObject with 8 keys and 5 entries

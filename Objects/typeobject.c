@@ -6948,6 +6948,7 @@ type_dealloc(PyObject *self)
     _PyObject_ASSERT((PyObject *)type, type->tp_flags & Py_TPFLAGS_HEAPTYPE);
 
     _PyObject_GC_UNTRACK(type);
+    _PySOAC_TypeContractBeginTeardown(type);
     type_dealloc_common(type);
 
     // PyObject_ClearWeakRefs() raises an exception if Py_REFCNT() != 0
@@ -7206,6 +7207,7 @@ type_clear(PyObject *self)
            A tuple of strings can't be part of a cycle.
     */
 
+    _PySOAC_TypeContractBeginTeardown(type);
     PyType_Modified(type);
     _PySOAC_TypeContractClear(type);
     PyObject *dict = lookup_tp_dict(type);

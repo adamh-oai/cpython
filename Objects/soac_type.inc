@@ -15,7 +15,11 @@ typedef struct {
     PyObject *fields;
     PyObject *protected_names;
     PyObject *final_methods;
-    PyObject *type;
+    /* Non-owning: the type owns this contract. Escaping its dictionary must
+     * not create a reverse lifetime edge through the dictionary policy. The
+     * type clears this address before its deallocation callbacks or reference
+     * release; terminal contracts never dereference it. */
+    PyTypeObject *type;
     PyObject *annotation_provider;
     uint32_t flags;
     int sealed;
@@ -138,7 +142,6 @@ soac_state_traverse(SoacTypeContract *state, visitproc visit, void *arg)
     Py_VISIT(state->fields);
     Py_VISIT(state->protected_names);
     Py_VISIT(state->final_methods);
-    Py_VISIT(state->type);
     Py_VISIT(state->annotation_provider);
     return 0;
 }
@@ -149,8 +152,8 @@ soac_state_clear(SoacTypeContract *state)
     /* Terminal GC cleanup is not unsealing. Any resurrection still sees the
      * permanent terminal marker and cannot resume optimized or ordinary use. */
     state->terminal = 1;
+    state->type = NULL;
     Py_CLEAR(state->owner);
-    Py_CLEAR(state->type);
     Py_CLEAR(state->annotation_provider);
     Py_CLEAR(state->fields);
     Py_CLEAR(state->protected_names);
@@ -354,6 +357,7 @@ soac_class_dictionary_policy(PyObject *owner, PyObject *dict, PyObject *key,
     SoacTypeContract *state = (SoacTypeContract *)owner;
     if (operation == PyDict_SOAC_TERMINAL_TEARDOWN) {
         state->terminal = 1;
+        state->type = NULL;
         return 0;
     }
     if (operation == PyDict_SOAC_VALIDATE_INITIAL) {
@@ -391,6 +395,50 @@ soac_class_dictionary_policy(PyObject *owner, PyObject *dict, PyObject *key,
         return -1;
     }
     return _PySOAC_CheckClassWrite((PyTypeObject *)state->type, key, value);
+}
+
+int
+_PySOAC_MatchesClassNamespacePolicy(PyObject *policy_owner,
+                                   PyDict_SoacPolicyCallback validate,
+                                   PyObject *dict, PyObject *expected_owner)
+{
+    /* The dictionary kernel pins policy_owner; expected_owner is only an
+     * identity comparison operand and may be a stale/arbitrary address. */
+    if (validate != soac_class_dictionary_policy) {
+        return 0;
+    }
+    /* Teardown keeps the immutable sidecar role/terminal marker but releases
+     * its GC owner edge. Do not inspect a released owner or turn that terminal
+     * class namespace into an unrelated ordinary dictionary. */
+    if (policy_owner == NULL) {
+        PyObject *error = PySoac_GetStrictRuntimeUnavailableError();
+        if (error != NULL) {
+            PyErr_SetString(error, "strict class namespace binding is unavailable");
+        }
+        return -1;
+    }
+    if (!Py_IS_TYPE(policy_owner, &SoacTypeContract_Type)) {
+        return 0;
+    }
+    SoacTypeContract *state = (SoacTypeContract *)policy_owner;
+    if (state->terminal || state->type == NULL || state->owner == NULL ||
+        state->interpreter != _PyInterpreterState_GET()) {
+        PyObject *error = PySoac_GetStrictRuntimeUnavailableError();
+        if (error != NULL) {
+            PyErr_SetString(error, "strict class namespace binding is unavailable");
+        }
+        return -1;
+    }
+    if (state->owner != expected_owner) {
+        return 0;
+    }
+    /* BeginTeardown nulls the non-owning type address before type deallocation
+     * callbacks or reference release. No allocation or Python effect occurs between
+     * checking that live binding and inspecting its actual dictionary. */
+    PyTypeObject *type = state->type;
+    return type->tp_dict == dict && soac_type_contract(type) == state &&
+        PyDict_MatchesSoacPolicy(dict, policy_owner,
+                                soac_class_dictionary_policy, 0);
 }
 
 static int
@@ -459,7 +507,7 @@ soac_install_type_contract(PyTypeObject *type, SoacConstructionHandle *handle)
     }
     Py_SETREF(state->protected_names, protected_names);
     Py_SETREF(state->final_methods, final_methods);
-    state->type = Py_NewRef(type);
+    state->type = type;
     ((PyHeapTypeObject *)type)->ht_soac_contract = (PyObject *)state;
     type->tp_flags |= Py_TPFLAGS_SOAC_CONTRACT;
     PyObject_GC_Track(state);
@@ -803,6 +851,18 @@ _PySOAC_TypeContractTraverse(PyTypeObject *type, visitproc visit, void *arg)
 }
 
 void
+_PySOAC_TypeContractBeginTeardown(PyTypeObject *type)
+{
+    SoacTypeContract *state = soac_type_contract(type);
+    if (state != NULL) {
+        /* Invalidate before callbacks; preserve the existing positions of
+         * all decrefs so this does not reorder user-visible finalizers. */
+        state->terminal = 1;
+        state->type = NULL;
+    }
+}
+
+void
 _PySOAC_TypeContractClear(PyTypeObject *type)
 {
     SoacTypeContract *state = soac_type_contract(type);
@@ -814,10 +874,7 @@ _PySOAC_TypeContractClear(PyTypeObject *type)
 void
 _PySOAC_TypeContractDealloc(PyTypeObject *type)
 {
-    SoacTypeContract *state = soac_type_contract(type);
-    if (state != NULL) {
-        state->terminal = 1;
-    }
+    _PySOAC_TypeContractBeginTeardown(type);
     Py_CLEAR(((PyHeapTypeObject *)type)->ht_soac_contract);
 }
 

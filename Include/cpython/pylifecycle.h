@@ -32,6 +32,10 @@ PyAPI_FUNC(int) Py_RunMain(void);
  * JSON/schema/signature validation belongs to the trusted native loader. */
 PyAPI_FUNC(int) PySoac_GetStrictConfig(
     const char **bytes, Py_ssize_t *length, const wchar_t **path);
+/* Borrowed current-interpreter launch configuration, not the mutable
+ * sys.prefix/PyConfig_Get view or Py_GetPrefix's process-global state.
+ * Copy while attached. NULL means the native prefix is unavailable. */
+PyAPI_FUNC(const wchar_t *) PySoac_GetInterpreterPrefix(void);
 /* Borrowed, interpreter-owned exact exception classes. NULL on error. */
 PyAPI_FUNC(PyObject *) PySoac_GetStrictMutationError(void);
 PyAPI_FUNC(PyObject *) PySoac_GetStrictRuntimeUnavailableError(void);

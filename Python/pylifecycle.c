@@ -737,6 +737,13 @@ PySoac_GetStrictConfig(const char **bytes, Py_ssize_t *length,
     return *bytes != NULL;
 }
 
+const wchar_t *
+PySoac_GetInterpreterPrefix(void)
+{
+    const wchar_t *prefix = _PyInterpreterState_GET()->config.prefix;
+    return prefix != NULL && prefix[0] != L'\0' ? prefix : NULL;
+}
+
 int
 PySoac_SetAnnotationReplayResolver(PySoacAnnotationReplayResolver resolver)
 {

@@ -13,10 +13,14 @@ extern int _PySOAC_CheckClassAssignment(PyTypeObject *, PyTypeObject *);
 extern int _PySOAC_CheckDictionaryReplacement(PyObject *);
 extern int _PySOAC_ReadyTypeInheritance(PyTypeObject *);
 extern int _PySOAC_TypeContractTraverse(PyTypeObject *, visitproc, void *);
+extern void _PySOAC_TypeContractBeginTeardown(PyTypeObject *);
 extern void _PySOAC_TypeContractClear(PyTypeObject *);
 extern void _PySOAC_TypeContractDealloc(PyTypeObject *);
 extern PyObject *_PySOAC_NewInstanceDictionary(PyObject *);
 extern int _PySOAC_UsesInstanceDictionaryPolicy(PyTypeObject *);
 extern int _PySOAC_PublishAnnotationCache(PyTypeObject *, PyObject *, PyObject *);
+extern int _PySOAC_MatchesClassNamespacePolicy(
+    PyObject *policy_owner, PyDict_SoacPolicyCallback validate,
+    PyObject *dict, PyObject *expected_owner);
 
 #endif
