@@ -856,7 +856,10 @@ soac_ip_stack_contains(const PySoacInterpreterFrameViewV1 *view, PyObject *value
         return 0;
     }
     for (_PyStackRef *slot = bottom; slot < top; slot++) {
+        /* Tuple/list iteration keeps a native tagged index on this stack.
+         * It is not a Python object or an alternative owner of value. */
         if (!PyStackRef_IsNull(*slot) &&
+            !PyStackRef_IsTaggedInt(*slot) &&
             PyStackRef_AsPyObjectBorrow(*slot) == value) return 1;
     }
     return 0;
