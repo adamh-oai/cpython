@@ -2407,3 +2407,165 @@ _Py_set_typeparam_default(PyThreadState *ts, PyObject *typeparam, PyObject *eval
         return NULL;
     }
 }
+
+/* Compiler-only mechanical factories. Source identity, capture layout and
+ * immutable capability admission remain the caller's responsibility. In
+ * particular, constructing an alias around strict code never authorizes the
+ * native frame evaluator to execute that code. */
+static int
+soac_type_expression_function(PyObject *evaluator)
+{
+    if (evaluator == NULL || !PyFunction_Check(evaluator) ||
+        PyFunction_GET_CODE(evaluator) == NULL ||
+        !PyCode_Check(PyFunction_GET_CODE(evaluator))) {
+        PyErr_SetString(PyExc_TypeError,
+                        "type expression evaluator must be an exact Python function");
+        return -1;
+    }
+    return 0;
+}
+
+static int
+soac_type_parameter_check(PyInterpreterState *interp, PyObject *parameter)
+{
+    return parameter != NULL &&
+        (Py_IS_TYPE(parameter, interp->cached_objects.typevar_type) ||
+         Py_IS_TYPE(parameter, interp->cached_objects.paramspec_type) ||
+         Py_IS_TYPE(parameter, interp->cached_objects.typevartuple_type));
+}
+
+PyObject *
+PySoac_NewTypeAlias(PyObject *name, PyObject *type_params, PyObject *evaluator)
+{
+    if (name == NULL || !PyUnicode_CheckExact(name) || type_params == NULL ||
+        (!Py_IsNone(type_params) && !PyTuple_CheckExact(type_params))) {
+        PyErr_SetString(PyExc_TypeError,
+                        "type alias requires an exact name and type-parameter tuple or None");
+        return NULL;
+    }
+    if (soac_type_expression_function(evaluator) < 0) {
+        return NULL;
+    }
+    PyThreadState *tstate = _PyThreadState_GET();
+    if (!Py_IsNone(type_params)) {
+        for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(type_params); i++) {
+            if (!soac_type_parameter_check(tstate->interp, PyTuple_GET_ITEM(type_params, i))) {
+                PyErr_SetString(PyExc_TypeError,
+                                "type alias parameter is not a native type parameter");
+                return NULL;
+            }
+        }
+    }
+    PyObject *arguments = PyTuple_Pack(3, name, type_params, evaluator);
+    if (arguments == NULL) {
+        return NULL;
+    }
+    PyObject *alias = _Py_make_typealias(tstate, arguments);
+    Py_DECREF(arguments);
+    return alias;
+}
+
+PyObject *
+PySoac_NewTypeParameter(int kind, PyObject *name, PyObject *evaluator)
+{
+    if (kind < Py_SOAC_TYPE_PARAM_TYPEVAR || kind > Py_SOAC_TYPE_PARAM_TYPEVARTUPLE) {
+        PyErr_SetString(PyExc_ValueError, "unknown native type-parameter operation");
+        return NULL;
+    }
+    if (name == NULL || !PyUnicode_CheckExact(name)) {
+        PyErr_SetString(PyExc_TypeError, "type parameter requires an exact name");
+        return NULL;
+    }
+    if (kind == Py_SOAC_TYPE_PARAM_BOUND || kind == Py_SOAC_TYPE_PARAM_CONSTRAINTS) {
+        if (soac_type_expression_function(evaluator) < 0) {
+            return NULL;
+        }
+    }
+    else if (evaluator != NULL) {
+        PyErr_SetString(PyExc_TypeError, "this type parameter has no bound evaluator");
+        return NULL;
+    }
+    PyThreadState *tstate = _PyThreadState_GET();
+    switch (kind) {
+        case Py_SOAC_TYPE_PARAM_TYPEVAR:
+            return _Py_make_typevar(name, NULL, NULL);
+        case Py_SOAC_TYPE_PARAM_BOUND:
+            return _Py_make_typevar(name, evaluator, NULL);
+        case Py_SOAC_TYPE_PARAM_CONSTRAINTS:
+            return _Py_make_typevar(name, NULL, evaluator);
+        case Py_SOAC_TYPE_PARAM_PARAMSPEC:
+            return _Py_make_paramspec(tstate, name);
+        case Py_SOAC_TYPE_PARAM_TYPEVARTUPLE:
+            return _Py_make_typevartuple(tstate, name);
+    }
+    Py_UNREACHABLE();
+}
+
+PyObject *
+PySoac_SetTypeParameterDefault(PyObject *parameter, PyObject *evaluator)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    if (!soac_type_parameter_check(tstate->interp, parameter)) {
+        PyErr_SetString(PyExc_TypeError, "default requires an actual native type parameter");
+        return NULL;
+    }
+    if (soac_type_expression_function(evaluator) < 0) {
+        return NULL;
+    }
+    int has_default;
+    if (Py_IS_TYPE(parameter, tstate->interp->cached_objects.typevar_type)) {
+        typevarobject *value = (typevarobject *)parameter;
+        has_default = value->default_value != NULL || value->evaluate_default != NULL;
+    }
+    else if (Py_IS_TYPE(parameter, tstate->interp->cached_objects.paramspec_type)) {
+        paramspecobject *value = (paramspecobject *)parameter;
+        has_default = value->default_value != NULL || value->evaluate_default != NULL;
+    }
+    else {
+        typevartupleobject *value = (typevartupleobject *)parameter;
+        has_default = value->default_value != NULL || value->evaluate_default != NULL;
+    }
+    if (has_default) {
+        PyErr_SetString(PyExc_TypeError, "type parameter already has a default");
+        return NULL;
+    }
+    return _Py_set_typeparam_default(tstate, parameter, evaluator);
+}
+
+int
+PySoac_MatchesTypeExpression(PyObject *target, int kind, PyObject *evaluator)
+{
+    if (target == NULL || evaluator == NULL ||
+        kind < Py_SOAC_TYPE_EXPRESSION_ALIAS || kind > Py_SOAC_TYPE_EXPRESSION_DEFAULT) {
+        PyErr_SetString(PyExc_TypeError, "invalid native type-expression identity query");
+        return -1;
+    }
+    if (!PyFunction_Check(evaluator)) {
+        return 0;
+    }
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    if (kind == Py_SOAC_TYPE_EXPRESSION_ALIAS) {
+        return Py_IS_TYPE(target, &_PyTypeAlias_Type) &&
+            ((typealiasobject *)target)->compute_value == evaluator;
+    }
+    if (Py_IS_TYPE(target, interp->cached_objects.typevar_type)) {
+        typevarobject *value = (typevarobject *)target;
+        switch (kind) {
+            case Py_SOAC_TYPE_EXPRESSION_BOUND:
+                return value->evaluate_bound == evaluator;
+            case Py_SOAC_TYPE_EXPRESSION_CONSTRAINTS:
+                return value->evaluate_constraints == evaluator;
+            case Py_SOAC_TYPE_EXPRESSION_DEFAULT:
+                return value->evaluate_default == evaluator;
+        }
+    }
+    if (kind == Py_SOAC_TYPE_EXPRESSION_DEFAULT) {
+        if (Py_IS_TYPE(target, interp->cached_objects.paramspec_type)) {
+            return ((paramspecobject *)target)->evaluate_default == evaluator;
+        }
+        if (Py_IS_TYPE(target, interp->cached_objects.typevartuple_type)) {
+            return ((typevartupleobject *)target)->evaluate_default == evaluator;
+        }
+    }
+    return 0;
+}

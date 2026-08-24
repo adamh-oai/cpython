@@ -63,6 +63,34 @@ PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSourceDetails(
 /* Execute SETUP_ANNOTATIONS against the explicit actual local namespace. */
 PyAPI_FUNC(int) PySoac_SetupAnnotations(PyObject *locals);
 
+/* Explicit consumers of compiler-selected type-expression operations. These
+ * constructors do not execute evaluators or grant source/optimizer authority.
+ * The caller authenticates the exact owned function and result separately. */
+#define Py_SOAC_TYPE_PARAM_TYPEVAR 0
+#define Py_SOAC_TYPE_PARAM_BOUND 1
+#define Py_SOAC_TYPE_PARAM_CONSTRAINTS 2
+#define Py_SOAC_TYPE_PARAM_PARAMSPEC 3
+#define Py_SOAC_TYPE_PARAM_TYPEVARTUPLE 4
+
+#define Py_SOAC_TYPE_EXPRESSION_ALIAS 0
+#define Py_SOAC_TYPE_EXPRESSION_BOUND 1
+#define Py_SOAC_TYPE_EXPRESSION_CONSTRAINTS 2
+#define Py_SOAC_TYPE_EXPRESSION_DEFAULT 3
+
+PyAPI_FUNC(PyObject *) PySoac_NewTypeAlias(
+    PyObject *name, PyObject *type_params, PyObject *evaluator);
+/* evaluator is NULL except for BOUND and CONSTRAINTS. */
+PyAPI_FUNC(PyObject *) PySoac_NewTypeParameter(
+    int kind, PyObject *name, PyObject *evaluator);
+/* Attach a default only once to a freshly constructed parameter, retaining
+ * native evaluation/creation order. Returns an owned alias to parameter. */
+PyAPI_FUNC(PyObject *) PySoac_SetTypeParameterDefault(
+    PyObject *parameter, PyObject *evaluator);
+/* 1/0 for exact private slot identity, -1 for invalid C arguments. Success is
+ * allocation/callback-free and does not make an unowned function executable. */
+PyAPI_FUNC(int) PySoac_MatchesTypeExpression(
+    PyObject *target, int kind, PyObject *evaluator);
+
 #define PY_INVALID_STACK_EFFECT INT_MAX
 PyAPI_FUNC(int) PyCompile_OpcodeStackEffect(int opcode, int oparg);
 PyAPI_FUNC(int) PyCompile_OpcodeStackEffectWithJump(int opcode, int oparg, int jump);
