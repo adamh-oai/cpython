@@ -156,7 +156,7 @@ soac_handle_traverse(SoacConstructionHandle *handle, visitproc visit, void *arg)
     Py_VISIT(handle->spec.namespace_function);
     Py_VISIT(handle->spec.name);
     Py_VISIT(handle->spec.bases);
-    Py_VISIT(handle->spec.namespace);
+    Py_VISIT(handle->spec.namespace_dict);
     Py_VISIT(handle->spec.keywords);
     Py_VISIT(handle->spec.fields);
     Py_VISIT(handle->spec.object_slot_fields);
@@ -173,7 +173,7 @@ soac_handle_clear(SoacConstructionHandle *handle)
     Py_CLEAR(handle->spec.namespace_function);
     Py_CLEAR(handle->spec.name);
     Py_CLEAR(handle->spec.bases);
-    Py_CLEAR(handle->spec.namespace);
+    Py_CLEAR(handle->spec.namespace_dict);
     Py_CLEAR(handle->spec.keywords);
     Py_CLEAR(handle->spec.fields);
     Py_CLEAR(handle->spec.object_slot_fields);
@@ -284,7 +284,7 @@ soac_new_construction_handle(const PySoacTypeConstructionSpec *spec,
                             !PyFunction_Check(spec->namespace_function))) ||
         spec->name == NULL || !PyUnicode_CheckExact(spec->name) ||
         spec->bases == NULL || !PyTuple_CheckExact(spec->bases) ||
-        spec->namespace == NULL || !PyDict_CheckExact(spec->namespace) ||
+        spec->namespace_dict == NULL || !PyDict_CheckExact(spec->namespace_dict) ||
         spec->keywords == NULL || !PyDict_CheckExact(spec->keywords) ||
         spec->fields == NULL || !soac_valid_names(spec->fields) ||
         (spec->object_slot_fields != NULL && !soac_valid_names(spec->object_slot_fields)) ||
@@ -311,7 +311,7 @@ soac_new_construction_handle(const PySoacTypeConstructionSpec *spec,
         &_Py_ID(__setattr__), &_Py_ID(__delattr__), NULL,
     };
     for (PyObject **hook = unsupported_hooks; *hook != NULL; ++hook) {
-        PyObject *value = PyDict_GetItemWithError(spec->namespace, *hook);
+        PyObject *value = PyDict_GetItemWithError(spec->namespace_dict, *hook);
         if (value != NULL) {
             if (slots_context == NULL) {
                 PyErr_SetString(soac_type_mutation_error(), "custom attribute hooks require a verified adapter or dynamic construction");
@@ -341,7 +341,7 @@ soac_new_construction_handle(const PySoacTypeConstructionSpec *spec,
     Py_XINCREF(spec->namespace_function);
     Py_INCREF(spec->name);
     Py_INCREF(spec->bases);
-    Py_INCREF(spec->namespace);
+    Py_INCREF(spec->namespace_dict);
     Py_INCREF(spec->keywords);
     Py_INCREF(spec->fields);
     Py_XINCREF(spec->object_slot_fields);
@@ -764,13 +764,13 @@ soac_type_from_handle(SoacConstructionHandle *handle,
     /* Consume before allocation or a callback can observe the class/owner. */
     handle->consumed = 1;
     PySoacTypeConstructionSpec *spec = &handle->spec;
-    PyObject *args = PyTuple_Pack(3, spec->name, spec->bases, spec->namespace);
+    PyObject *args = PyTuple_Pack(3, spec->name, spec->bases, spec->namespace_dict);
     if (args == NULL) {
         return NULL;
     }
     type_new_ctx ctx = {
         .metatype = &PyType_Type, .args = args, .kwds = spec->keywords,
-        .orig_dict = spec->namespace, .name = spec->name, .bases = spec->bases,
+        .orig_dict = spec->namespace_dict, .name = spec->name, .bases = spec->bases,
         .soac_handle = (PyObject *)handle,
         .soac_dataclass_slots = slots_context,
     };

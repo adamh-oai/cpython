@@ -93,7 +93,7 @@ soac_slot_type(PyObject *self, PyObject *args)
     PySoacTypeConstructionSpec spec = {
         .abi_version = Py_SOAC_TYPE_CONTRACT_ABI, .owner = owner,
         .namespace_function = namespace_function, .name = name,
-        .bases = bases, .namespace = namespace, .keywords = keywords,
+        .bases = bases, .namespace_dict = namespace, .keywords = keywords,
         .fields = dictionary_fields == NULL ? empty : dictionary_fields,
         .protected_names = empty, .final_methods = empty,
         .check_instance_write = soac_slot_test_write,
@@ -279,7 +279,7 @@ soac_dc_test_prepare_slots(PyObject *owner, const PySoacDataclassFrameView *prod
         .abi_version = Py_SOAC_TYPE_CONTRACT_ABI,
         .owner = mode == 2 ? PyType_GetSoacContractOwner(original) : slot_owner,
         .namespace_function = NULL, .name = name, .bases = bases,
-        .namespace = namespace, .keywords = keywords,
+        .namespace_dict = namespace, .keywords = keywords,
         .fields = empty, .protected_names = empty, .final_methods = empty,
         .check_instance_write = soac_slot_test_write,
         .bind_type = soac_slot_test_bind,

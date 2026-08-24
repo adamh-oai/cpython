@@ -316,7 +316,7 @@ typedef struct {
     PyObject *namespace_function;
     PyObject *name;
     PyObject *bases;
-    PyObject *namespace;
+    PyObject *namespace_dict;
     PyObject *keywords;
     PyObject *fields;
     PyObject *protected_names;

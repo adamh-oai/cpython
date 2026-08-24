@@ -2132,7 +2132,7 @@ dict_new_soac_type(PyObject *self, PyObject *args)
     PySoacTypeConstructionSpec spec = {
         .abi_version = Py_SOAC_TYPE_CONTRACT_ABI, .flags = 0, .owner = owner,
         .namespace_function = namespace_function, .name = name,
-        .bases = bases, .namespace = namespace, .keywords = keywords,
+        .bases = bases, .namespace_dict = namespace, .keywords = keywords,
         .fields = fields,
         .protected_names = protected_names == NULL ? empty : protected_names,
         .final_methods = final_methods == NULL ? empty : final_methods,

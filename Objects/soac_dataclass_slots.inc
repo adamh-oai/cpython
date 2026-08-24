@@ -44,7 +44,7 @@ soac_dataclass_slots_spec_matches(_PySoacDataclassSlotsContext *context,
         spec->owner == NULL || spec->owner == context->invocation->class_owner ||
         (context->expected_owner != NULL && spec->owner != context->expected_owner) ||
         spec->namespace_function != NULL || spec->name != arguments[1] ||
-        spec->bases != arguments[2] || spec->namespace != arguments[3] ||
+        spec->bases != arguments[2] || spec->namespace_dict != arguments[3] ||
         spec->keywords == NULL || !PyDict_CheckExact(spec->keywords) ||
         PyDict_GET_SIZE(spec->keywords) != 0 ||
         spec->object_slot_fields == NULL || !PyTuple_CheckExact(spec->object_slot_fields)) {
