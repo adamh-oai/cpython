@@ -737,13 +737,23 @@ PySoac_GetStrictConfig(const char **bytes, Py_ssize_t *length,
     return *bytes != NULL;
 }
 
+static PyObject *
+soac_new_frozen_exception(const char *name, PyObject *base)
+{
+    PyObject *exception = PyErr_NewException(name, base, NULL);
+    if (exception != NULL && PyType_Freeze((PyTypeObject *)exception) < 0) {
+        Py_CLEAR(exception);
+    }
+    return exception;
+}
+
 PyObject *
 PySoac_GetStrictMutationError(void)
 {
     PyInterpreterState *interp = _PyInterpreterState_GET();
     if (interp->soac.mutation_error == NULL) {
-        interp->soac.mutation_error = PyErr_NewException(
-            "soac.StrictMutationError", PyExc_TypeError, NULL);
+        interp->soac.mutation_error = soac_new_frozen_exception(
+            "soac.StrictMutationError", PyExc_TypeError);
     }
     return interp->soac.mutation_error;
 }
@@ -753,8 +763,8 @@ PySoac_GetStrictRuntimeUnavailableError(void)
 {
     PyInterpreterState *interp = _PyInterpreterState_GET();
     if (interp->soac.runtime_unavailable_error == NULL) {
-        interp->soac.runtime_unavailable_error = PyErr_NewException(
-            "soac.StrictRuntimeUnavailableError", PyExc_RuntimeError, NULL);
+        interp->soac.runtime_unavailable_error = soac_new_frozen_exception(
+            "soac.StrictRuntimeUnavailableError", PyExc_ImportError);
     }
     return interp->soac.runtime_unavailable_error;
 }

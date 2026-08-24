@@ -4046,7 +4046,10 @@ _PyObject_SetDict(PyObject *obj, PyObject *value)
         return -1;
     }
     if (*dictptr != NULL && PyDict_HasSoacPolicy(*dictptr)) {
-        PyErr_SetString(PyExc_TypeError, "cannot replace an authoritative protected dictionary");
+        PyObject *error = PySoac_GetStrictMutationError();
+        if (error != NULL) {
+            PyErr_SetString(error, "cannot replace an authoritative protected dictionary");
+        }
         return -1;
     }
     Py_BEGIN_CRITICAL_SECTION(obj);
@@ -7714,6 +7717,16 @@ object_set_class_world_stopped(PyObject *self, PyTypeObject *newto)
 static int
 object_set_class(PyObject *self, PyObject *value, void *closure)
 {
+    if (PyModule_Check(self)) {
+        PyObject *dict = ((PyModuleObject *)self)->md_dict;
+        if (dict != NULL && PyDict_HasSoacPolicy(dict)) {
+            PyObject *error = PySoac_GetStrictMutationError();
+            if (error != NULL) {
+                PyErr_SetString(error, "cannot replace a protected module's __class__");
+            }
+            return -1;
+        }
+    }
 
     if (value == NULL) {
         PyErr_SetString(PyExc_TypeError,
