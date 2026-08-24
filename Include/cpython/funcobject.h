@@ -97,6 +97,16 @@ PyAPI_FUNC(int) PyFunction_SetSoacMetadata(
     void (*destructor)(void *)
 );
 PyAPI_FUNC(void *) PyFunction_GetSoacMetadata(PyObject *);
+/* Borrow the current opaque pointer only when its actual owning destructor
+ * equals the caller's non-NULL expected destructor. NULL/no new error means
+ * no metadata. A mismatch raises RuntimeError; invalid input also fails.
+ * Every path preserves an already pending exception. Matching/absent valid
+ * queries allocate nothing, call no Python callback and add no owner.
+ * The result is valid only until a callback/release/replacement; clone any
+ * Rust code/context owner in a callback-free scope, then end this borrow.
+ * This is ownership consistency, never source execution authority. */
+PyAPI_FUNC(void *) PyFunction_GetSoacMetadataForDestructorV1(
+    PyObject *function, void (*expected_destructor)(void *));
 PyAPI_FUNC(uint64_t) PyFunction_GetSoacFunctionId(PyObject *);
 PyAPI_FUNC(int) PyFunction_SealSoacStrict(PyObject *, uint64_t identity);
 PyAPI_FUNC(uint64_t) PyFunction_GetSoacStrictId(PyObject *);

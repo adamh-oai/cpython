@@ -201,6 +201,15 @@ typedef struct {
 PyAPI_FUNC(int) PyFunction_SetSoacSourceEntryV1(
     PyObject *function, const PySoacSourceEntrySpecV1 *spec, size_t spec_size);
 PyAPI_FUNC(int) PyFunction_ClearSoacSourceEntryV1(PyObject *function);
+/* Current admission query: 1 for the exact current native record, 0 for
+ * absence/stale admission (including unsupported native reference modes).
+ * No spec escapes and no Python reference is added. A valid query does
+ * not allocate or call Python; stale C-only records may be invalidated.
+ * An invalid receiver returns -1. Every path preserves an existing PyErr;
+ * failure constructs a new error only when none was already pending.
+ * Query before binding; neither this result nor a copied Rust context
+ * permits retry after a native binder/body error. */
+PyAPI_FUNC(int) PyFunction_HasSoacSourceEntryV1(PyObject *function);
 
 /* Public C-vectorcall adapter: input array/function/kwnames are BORROWED.
  * Acquire references as native _PyEval_Vector does, then the same native

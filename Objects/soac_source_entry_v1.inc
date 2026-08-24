@@ -74,6 +74,20 @@ _PySoacSourceEntry_CopyV1(PyFunctionObject *function,
 }
 
 int
+PyFunction_HasSoacSourceEntryV1(PyObject *object)
+{
+    if (object == NULL || !PyFunction_Check(object)) {
+        if (!PyErr_Occurred()) {
+            PyErr_SetString(PyExc_TypeError,
+                            "SOAC source-entry query needs an exact function");
+        }
+        return -1;
+    }
+    PySoacSourceEntrySpecV1 current;
+    return _PySoacSourceEntry_CopyV1((PyFunctionObject *)object, &current);
+}
+
+int
 PyFunction_SetSoacSourceEntryV1(PyObject *object,
                                const PySoacSourceEntrySpecV1 *spec,
                                size_t spec_size)

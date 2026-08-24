@@ -883,6 +883,32 @@ PyFunction_GetSoacMetadata(PyObject *op)
     return ((PyFunctionObject *)op)->func_soac_metadata;
 }
 
+void *
+PyFunction_GetSoacMetadataForDestructorV1(
+    PyObject *object, void (*expected_destructor)(void *))
+{
+    if (object == NULL || !PyFunction_Check(object) || expected_destructor == NULL) {
+        if (!PyErr_Occurred()) {
+            PyErr_SetString(PyExc_TypeError,
+                            "SOAC metadata query needs an exact function and non-NULL destructor");
+        }
+        return NULL;
+    }
+    PyFunctionObject *function = (PyFunctionObject *)object;
+    void *metadata = function->func_soac_metadata;
+    if (metadata == NULL) {
+        return NULL;
+    }
+    if (function->func_soac_metadata_destructor != expected_destructor) {
+        if (!PyErr_Occurred()) {
+            PyErr_SetString(PyExc_RuntimeError,
+                            "SOAC function metadata destructor does not match");
+        }
+        return NULL;
+    }
+    return metadata;
+}
+
 uint64_t
 PyFunction_GetSoacFunctionId(PyObject *op)
 {
