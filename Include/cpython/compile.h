@@ -53,6 +53,16 @@ typedef struct {
 PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSource(
     const char *source, Py_ssize_t length, PyObject *filename, int optimize);
 
+/* Compile the same authenticated source once, returning (code, strings).
+ * strings is an exact tuple of (line, column, end_line, end_column, text)
+ * entries for future-stringized annotations in that native AST. The returned
+ * ordinary data is not an execution or optimizer capability. */
+PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSourceDetails(
+    const char *source, Py_ssize_t length, PyObject *filename, int optimize);
+
+/* Execute SETUP_ANNOTATIONS against the explicit actual local namespace. */
+PyAPI_FUNC(int) PySoac_SetupAnnotations(PyObject *locals);
+
 #define PY_INVALID_STACK_EFFECT INT_MAX
 PyAPI_FUNC(int) PyCompile_OpcodeStackEffect(int opcode, int oparg);
 PyAPI_FUNC(int) PyCompile_OpcodeStackEffectWithJump(int opcode, int oparg, int jump);

@@ -10,6 +10,7 @@
 
 #include "Python.h"
 
+#include "pycore_abstract.h"      // _PyMapping_GetOptionalItem2()
 #include "pycore_ast.h"           // PyAST_mod2obj()
 #include "pycore_audit.h"         // _PySys_Audit()
 #include "pycore_ceval.h"         // _Py_EnterRecursiveCall()
@@ -1528,9 +1529,169 @@ soac_mark_verified_code_tree(PyCodeObject *code, uint64_t identity)
     }
 }
 
-PyObject *
-PySoac_CompileVerifiedSource(const char *source, Py_ssize_t length,
-                             PyObject *filename, int optimize)
+static int soac_collect_annotation_body(asdl_stmt_seq *, PyObject *);
+
+static int
+soac_collect_annotation_expr(expr_ty expression, PyObject *strings)
+{
+    if (expression == NULL) {
+        return 0;
+    }
+    PyObject *text = _PyAST_ExprAsUnicode(expression);
+    if (text == NULL) {
+        return -1;
+    }
+    PyObject *entry = Py_BuildValue(
+        "(iiiiN)", expression->lineno, expression->col_offset,
+        expression->end_lineno, expression->end_col_offset, text);
+    if (entry == NULL) {
+        return -1;
+    }
+    int result = PyList_Append(strings, entry);
+    Py_DECREF(entry);
+    return result;
+}
+
+static int
+soac_collect_annotation_arguments(arguments_ty arguments, PyObject *strings)
+{
+    asdl_arg_seq *groups[] = {
+        arguments->args, arguments->posonlyargs, arguments->kwonlyargs
+    };
+    for (size_t group = 0; group < Py_ARRAY_LENGTH(groups); group++) {
+        for (Py_ssize_t index = 0; index < asdl_seq_LEN(groups[group]); index++) {
+            arg_ty argument = asdl_seq_GET(groups[group], index);
+            if (soac_collect_annotation_expr(argument->annotation, strings) < 0) {
+                return -1;
+            }
+        }
+    }
+    if (arguments->vararg != NULL &&
+        soac_collect_annotation_expr(arguments->vararg->annotation, strings) < 0)
+    {
+        return -1;
+    }
+    if (arguments->kwarg != NULL &&
+        soac_collect_annotation_expr(arguments->kwarg->annotation, strings) < 0)
+    {
+        return -1;
+    }
+    return 0;
+}
+
+static int
+soac_collect_annotation_try(asdl_stmt_seq *body,
+                            asdl_excepthandler_seq *handlers,
+                            asdl_stmt_seq *orelse, asdl_stmt_seq *finalbody,
+                            PyObject *strings)
+{
+    if (soac_collect_annotation_body(body, strings) < 0 ||
+        soac_collect_annotation_body(orelse, strings) < 0 ||
+        soac_collect_annotation_body(finalbody, strings) < 0)
+    {
+        return -1;
+    }
+    for (Py_ssize_t index = 0; index < asdl_seq_LEN(handlers); index++) {
+        excepthandler_ty handler = asdl_seq_GET(handlers, index);
+        if (soac_collect_annotation_body(handler->v.ExceptHandler.body, strings) < 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int
+soac_collect_annotation_statement(stmt_ty statement, PyObject *strings)
+{
+    switch (statement->kind) {
+        case FunctionDef_kind:
+            if (soac_collect_annotation_arguments(statement->v.FunctionDef.args, strings) < 0 ||
+                soac_collect_annotation_expr(statement->v.FunctionDef.returns, strings) < 0)
+            {
+                return -1;
+            }
+            return soac_collect_annotation_body(statement->v.FunctionDef.body, strings);
+        case AsyncFunctionDef_kind:
+            if (soac_collect_annotation_arguments(statement->v.AsyncFunctionDef.args, strings) < 0 ||
+                soac_collect_annotation_expr(statement->v.AsyncFunctionDef.returns, strings) < 0)
+            {
+                return -1;
+            }
+            return soac_collect_annotation_body(statement->v.AsyncFunctionDef.body, strings);
+        case ClassDef_kind:
+            return soac_collect_annotation_body(statement->v.ClassDef.body, strings);
+        case AnnAssign_kind:
+            return soac_collect_annotation_expr(statement->v.AnnAssign.annotation, strings);
+        case For_kind:
+            if (soac_collect_annotation_body(statement->v.For.body, strings) < 0) {
+                return -1;
+            }
+            return soac_collect_annotation_body(statement->v.For.orelse, strings);
+        case AsyncFor_kind:
+            if (soac_collect_annotation_body(statement->v.AsyncFor.body, strings) < 0) {
+                return -1;
+            }
+            return soac_collect_annotation_body(statement->v.AsyncFor.orelse, strings);
+        case While_kind:
+            if (soac_collect_annotation_body(statement->v.While.body, strings) < 0) {
+                return -1;
+            }
+            return soac_collect_annotation_body(statement->v.While.orelse, strings);
+        case If_kind:
+            if (soac_collect_annotation_body(statement->v.If.body, strings) < 0) {
+                return -1;
+            }
+            return soac_collect_annotation_body(statement->v.If.orelse, strings);
+        case With_kind:
+            return soac_collect_annotation_body(statement->v.With.body, strings);
+        case AsyncWith_kind:
+            return soac_collect_annotation_body(statement->v.AsyncWith.body, strings);
+        case Try_kind:
+            return soac_collect_annotation_try(
+                statement->v.Try.body, statement->v.Try.handlers,
+                statement->v.Try.orelse, statement->v.Try.finalbody, strings);
+        case TryStar_kind:
+            return soac_collect_annotation_try(
+                statement->v.TryStar.body, statement->v.TryStar.handlers,
+                statement->v.TryStar.orelse, statement->v.TryStar.finalbody, strings);
+        case Match_kind:
+            for (Py_ssize_t index = 0;
+                 index < asdl_seq_LEN(statement->v.Match.cases); index++)
+            {
+                match_case_ty item = asdl_seq_GET(statement->v.Match.cases, index);
+                if (soac_collect_annotation_body(item->body, strings) < 0) {
+                    return -1;
+                }
+            }
+            return 0;
+        default:
+            /* Expressions cannot contain nested annotated statements. Type
+             * parameter bounds/defaults and type-alias values are not
+             * stringized by the annotations future feature. */
+            return 0;
+    }
+}
+
+static int
+soac_collect_annotation_body(asdl_stmt_seq *body, PyObject *strings)
+{
+    if (_Py_EnterRecursiveCall(" while collecting annotation strings")) {
+        return -1;
+    }
+    int result = 0;
+    for (Py_ssize_t index = 0; index < asdl_seq_LEN(body); index++) {
+        if (soac_collect_annotation_statement(asdl_seq_GET(body, index), strings) < 0) {
+            result = -1;
+            break;
+        }
+    }
+    _Py_LeaveRecursiveCall();
+    return result;
+}
+
+static PyObject *
+soac_compile_verified_source(const char *source, Py_ssize_t length,
+                             PyObject *filename, int optimize, int details)
 {
     if (source == NULL || length < 0 || length == PY_SSIZE_T_MAX ||
         memchr(source, '\0', (size_t)length) != NULL) {
@@ -1543,21 +1704,56 @@ PySoac_CompileVerifiedSource(const char *source, Py_ssize_t length,
     }
     memcpy(terminated, source, (size_t)length);
     terminated[length] = '\0';
-    /* Like an import, this entrypoint never inherits caller future flags. */
+    PyArena *arena = _PyArena_New();
+    if (arena == NULL) {
+        PyMem_Free(terminated);
+        return NULL;
+    }
+    /* Like an import, this entrypoint never inherits caller future flags.
+     * Keep the one native AST alive until optional metadata is extracted;
+     * no extra parse, compile audit event, or Python AST helper is involved. */
     PyCompilerFlags flags = _PyCompilerFlags_INIT;
-    PyObject *result = Py_CompileStringObject(terminated, filename,
-                                             Py_file_input, &flags, optimize);
+    mod_ty mod = _PyParser_ASTFromString(terminated, filename, Py_file_input,
+                                         &flags, arena, NULL);
+    PyObject *result = mod == NULL ? NULL :
+        (PyObject *)_PyAST_Compile(mod, filename, &flags, optimize, arena, NULL);
     PyMem_Free(terminated);
     if (result == NULL) {
+        _PyArena_Free(arena);
         return NULL;
     }
     PyCodeObject *code = (PyCodeObject *)result;
     if (!(code->co_flags & CO_FUTURE_STRICT)) {
         Py_DECREF(result);
+        _PyArena_Free(arena);
         PyErr_SetString(PyExc_ValueError,
                         "authenticated strict source must explicitly opt in");
         return NULL;
     }
+    if (details) {
+        PyObject *strings = PyList_New(0);
+        if (strings != NULL && (code->co_flags & CO_FUTURE_ANNOTATIONS)) {
+            assert(mod->kind == Module_kind);
+            /* Native AST preprocessing deliberately leaves future annotation
+             * expressions unfolded. These are the same objects passed to
+             * _PyAST_ExprAsUnicode by codegen, including dead source suites. */
+            if (soac_collect_annotation_body(mod->v.Module.body, strings) < 0) {
+                Py_CLEAR(strings);
+            }
+        }
+        PyObject *immutable = strings == NULL ? NULL : PyList_AsTuple(strings);
+        Py_XDECREF(strings);
+        PyObject *combined = immutable == NULL ? NULL : PyTuple_Pack(2, result, immutable);
+        Py_XDECREF(immutable);
+        Py_DECREF(result);
+        result = combined;
+        if (result == NULL) {
+            _PyArena_Free(arena);
+            return NULL;
+        }
+        code = (PyCodeObject *)PyTuple_GET_ITEM(result, 0);
+    }
+    _PyArena_Free(arena);
     PyInterpreterState *interp = _PyInterpreterState_GET();
     FT_MUTEX_LOCK(&interp->func_state.mutex);
     uint64_t identity = interp->soac.source_counter;
@@ -1572,6 +1768,46 @@ PySoac_CompileVerifiedSource(const char *source, Py_ssize_t length,
     }
     soac_mark_verified_code_tree(code, identity);
     return result;
+}
+
+PyObject *
+PySoac_CompileVerifiedSource(const char *source, Py_ssize_t length,
+                             PyObject *filename, int optimize)
+{
+    return soac_compile_verified_source(source, length, filename, optimize, 0);
+}
+
+PyObject *
+PySoac_CompileVerifiedSourceDetails(const char *source, Py_ssize_t length,
+                                    PyObject *filename, int optimize)
+{
+    return soac_compile_verified_source(source, length, filename, optimize, 1);
+}
+
+int
+PySoac_SetupAnnotations(PyObject *locals)
+{
+    if (locals == NULL) {
+        PyErr_SetString(PyExc_SystemError, "no locals found when setting up annotations");
+        return -1;
+    }
+    int error;
+    PyObject *annotations = _PyMapping_GetOptionalItem2(
+        locals, &_Py_ID(__annotations__), &error);
+    if (error < 0) {
+        return -1;
+    }
+    if (annotations == NULL) {
+        annotations = PyDict_New();
+        if (annotations == NULL) {
+            return -1;
+        }
+        error = PyObject_SetItem(locals, &_Py_ID(__annotations__), annotations);
+        Py_DECREF(annotations);
+        return error;
+    }
+    Py_DECREF(annotations);
+    return 0;
 }
 
 PyObject *
