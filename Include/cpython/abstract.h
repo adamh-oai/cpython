@@ -39,9 +39,10 @@ _PyVectorcall_NARGS(size_t n)
 PyAPI_FUNC(vectorcallfunc) PyVectorcall_Function(PyObject *callable);
 
 /* Explicit compiler call context, never ambient thread-local authority.
- * Native globals()/locals()/vars() identities use the supplied mappings for
- * their valid zero-argument forms. All other supported calls keep vectorcall
- * semantics; dynamic compile/eval/exec need a separate authenticated protocol. */
+ * Native globals()/locals()/vars()/dir() identities use the supplied mappings
+ * for valid zero-argument forms; dir() returns sorted local-namespace keys.
+ * Other supported calls keep vectorcall semantics; dynamic compile/eval/exec
+ * need a separate authenticated protocol. */
 PyAPI_FUNC(PyObject *) PySoac_VectorcallWithContext(
     PyObject *callable, PyObject *const *args, size_t nargsf,
     PyObject *kwnames, PyObject *actual_globals, PyObject *actual_locals);

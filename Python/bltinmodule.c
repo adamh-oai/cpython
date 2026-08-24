@@ -3605,6 +3605,7 @@ enum soac_context_builtin {
     SOAC_CONTEXT_NONE,
     SOAC_CONTEXT_GLOBALS,
     SOAC_CONTEXT_LOCALS,
+    SOAC_CONTEXT_DIR,
     SOAC_CONTEXT_DYNAMIC,
 };
 
@@ -3619,6 +3620,7 @@ soac_classify_context_builtin(PyObject *callable)
     if (implementation != (PyCFunction)builtin_globals &&
         implementation != (PyCFunction)builtin_locals &&
         implementation != builtin_vars &&
+        implementation != builtin_dir &&
         implementation != _PyCFunction_CAST(builtin_compile) &&
         implementation != _PyCFunction_CAST(builtin_eval) &&
         implementation != _PyCFunction_CAST(builtin_exec)) {
@@ -3640,6 +3642,9 @@ soac_classify_context_builtin(PyObject *callable)
         implementation == _PyCFunction_CAST(builtin_eval) ||
         implementation == _PyCFunction_CAST(builtin_exec)) {
         return SOAC_CONTEXT_DYNAMIC;
+    }
+    if (implementation == builtin_dir) {
+        return SOAC_CONTEXT_DIR;
     }
     return implementation == (PyCFunction)builtin_globals
            ? SOAC_CONTEXT_GLOBALS : SOAC_CONTEXT_LOCALS;
@@ -3667,6 +3672,29 @@ soac_call_context_builtin(enum soac_context_builtin kind,
                         "SOAC function locals are not materialized");
         return NULL;
     }
+    if (kind == SOAC_CONTEXT_DIR) {
+        /* Match PyObject_Dir(NULL)'s local-namespace protocol without reading
+         * an unrelated native caller frame. Keep the supplied mapping alive
+         * across its keys callback, then sort the returned list normally. */
+        Py_INCREF(actual_locals);
+        PyObject *names = PyMapping_Keys(actual_locals);
+        Py_DECREF(actual_locals);
+        if (names == NULL) {
+            return NULL;
+        }
+        if (!PyList_Check(names)) {
+            PyErr_Format(PyExc_TypeError,
+                         "dir(): expected keys() of locals to be a list, "
+                         "not '%.200s'", Py_TYPE(names)->tp_name);
+            Py_DECREF(names);
+            return NULL;
+        }
+        if (PyList_Sort(names) < 0) {
+            Py_DECREF(names);
+            return NULL;
+        }
+        return names;
+    }
     return Py_NewRef(actual_locals);
 }
 
@@ -3687,8 +3715,8 @@ PySoac_VectorcallWithContext(PyObject *callable, PyObject *const *args,
           (kwnames == NULL || PyTuple_GET_SIZE(kwnames) == 0)))) {
         return soac_call_context_builtin(kind, actual_globals, actual_locals);
     }
-    /* Preserve normal argument errors and vars(object), including its
-     * ordinary descriptor lookup and exception behavior. */
+    /* Preserve normal argument errors and vars(object)/dir(object), including
+     * their ordinary descriptor lookup and exception behavior. */
     return PyObject_Vectorcall(callable, args, nargsf, kwnames);
 }
 
