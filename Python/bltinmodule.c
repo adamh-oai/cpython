@@ -3568,6 +3568,118 @@ static PyMethodDef builtin_methods[] = {
     {NULL,              NULL},
 };
 
+enum soac_context_builtin {
+    SOAC_CONTEXT_NONE,
+    SOAC_CONTEXT_GLOBALS,
+    SOAC_CONTEXT_LOCALS,
+    SOAC_CONTEXT_DYNAMIC,
+};
+
+static enum soac_context_builtin
+soac_classify_context_builtin(PyObject *callable)
+{
+    if (!PyCFunction_Check(callable)) {
+        return SOAC_CONTEXT_NONE;
+    }
+    PyMethodDef *definition = ((PyCFunctionObject *)callable)->m_ml;
+    PyCFunction implementation = definition->ml_meth;
+    if (implementation != (PyCFunction)builtin_globals &&
+        implementation != (PyCFunction)builtin_locals &&
+        implementation != builtin_vars &&
+        implementation != _PyCFunction_CAST(builtin_compile) &&
+        implementation != _PyCFunction_CAST(builtin_eval) &&
+        implementation != _PyCFunction_CAST(builtin_exec)) {
+        return SOAC_CONTEXT_NONE;
+    }
+    /* A name or copied method definition does not identify a builtin. This
+     * table has static native lifetime and cannot be rebound through Python. */
+    int canonical = 0;
+    for (PyMethodDef *entry = builtin_methods; entry->ml_name != NULL; entry++) {
+        if (entry == definition) {
+            canonical = 1;
+            break;
+        }
+    }
+    if (!canonical) {
+        return SOAC_CONTEXT_NONE;
+    }
+    if (implementation == _PyCFunction_CAST(builtin_compile) ||
+        implementation == _PyCFunction_CAST(builtin_eval) ||
+        implementation == _PyCFunction_CAST(builtin_exec)) {
+        return SOAC_CONTEXT_DYNAMIC;
+    }
+    return implementation == (PyCFunction)builtin_globals
+           ? SOAC_CONTEXT_GLOBALS : SOAC_CONTEXT_LOCALS;
+}
+
+static PyObject *
+soac_call_context_builtin(enum soac_context_builtin kind,
+                          PyObject *actual_globals, PyObject *actual_locals)
+{
+    if (kind == SOAC_CONTEXT_DYNAMIC) {
+        PyErr_SetString(PyExc_NotImplementedError,
+                        "SOAC contextual compile/eval/exec requires an explicit dynamic-code protocol");
+        return NULL;
+    }
+    if (kind == SOAC_CONTEXT_GLOBALS) {
+        if (actual_globals == NULL || !PyDict_Check(actual_globals)) {
+            PyErr_SetString(PyExc_TypeError,
+                            "SOAC global context requires an actual dictionary");
+            return NULL;
+        }
+        return Py_NewRef(actual_globals);
+    }
+    if (actual_locals == NULL) {
+        PyErr_SetString(PyExc_NotImplementedError,
+                        "SOAC function locals are not materialized");
+        return NULL;
+    }
+    return Py_NewRef(actual_locals);
+}
+
+PyObject *
+PySoac_VectorcallWithContext(PyObject *callable, PyObject *const *args,
+                             size_t nargsf, PyObject *kwnames,
+                             PyObject *actual_globals, PyObject *actual_locals)
+{
+    if (callable == NULL ||
+        (kwnames != NULL && !PyTuple_Check(kwnames))) {
+        PyErr_BadInternalCall();
+        return NULL;
+    }
+    enum soac_context_builtin kind = soac_classify_context_builtin(callable);
+    if (kind != SOAC_CONTEXT_NONE &&
+        (kind == SOAC_CONTEXT_DYNAMIC ||
+         (PyVectorcall_NARGS(nargsf) == 0 &&
+          (kwnames == NULL || PyTuple_GET_SIZE(kwnames) == 0)))) {
+        return soac_call_context_builtin(kind, actual_globals, actual_locals);
+    }
+    /* Preserve normal argument errors and vars(object), including its
+     * ordinary descriptor lookup and exception behavior. */
+    return PyObject_Vectorcall(callable, args, nargsf, kwnames);
+}
+
+PyObject *
+PySoac_ObjectCallWithContext(PyObject *callable, PyObject *args, PyObject *kwargs,
+                             PyObject *actual_globals, PyObject *actual_locals)
+{
+    if (callable == NULL || args == NULL || !PyTuple_Check(args) ||
+        (kwargs != NULL && !PyDict_Check(kwargs))) {
+        PyErr_BadInternalCall();
+        return NULL;
+    }
+    enum soac_context_builtin kind = soac_classify_context_builtin(callable);
+    if (kind != SOAC_CONTEXT_NONE &&
+        (kind == SOAC_CONTEXT_DYNAMIC ||
+         (PyTuple_GET_SIZE(args) == 0 &&
+          (kwargs == NULL || PyDict_GET_SIZE(kwargs) == 0)))) {
+        return soac_call_context_builtin(kind, actual_globals, actual_locals);
+    }
+    /* Let the normal CPython call path unpack the tuple/dictionary; do not
+     * duplicate keyword validation or binding in the compiler runtime. */
+    return PyObject_Call(callable, args, kwargs);
+}
+
 PyDoc_STRVAR(builtin_doc,
 "Built-in functions, types, exceptions, and other objects.\n\
 \n\

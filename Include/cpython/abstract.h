@@ -38,6 +38,17 @@ _PyVectorcall_NARGS(size_t n)
 
 PyAPI_FUNC(vectorcallfunc) PyVectorcall_Function(PyObject *callable);
 
+/* Explicit compiler call context, never ambient thread-local authority.
+ * Native globals()/locals()/vars() identities use the supplied mappings for
+ * their valid zero-argument forms. All other supported calls keep vectorcall
+ * semantics; dynamic compile/eval/exec need a separate authenticated protocol. */
+PyAPI_FUNC(PyObject *) PySoac_VectorcallWithContext(
+    PyObject *callable, PyObject *const *args, size_t nargsf,
+    PyObject *kwnames, PyObject *actual_globals, PyObject *actual_locals);
+PyAPI_FUNC(PyObject *) PySoac_ObjectCallWithContext(
+    PyObject *callable, PyObject *args, PyObject *kwargs,
+    PyObject *actual_globals, PyObject *actual_locals);
+
 // Backwards compatibility aliases (PEP 590) for API that was provisional
 // in Python 3.8
 #define _PyObject_Vectorcall PyObject_Vectorcall
@@ -101,4 +112,3 @@ PyAPI_FUNC(Py_ssize_t) PyObject_LengthHint(PyObject *o, Py_ssize_t);
 #define PySequence_Fast_ITEMS(sf) \
     (PyList_Check(sf) ? ((PyListObject *)(sf))->ob_item \
                       : ((PyTupleObject *)(sf))->ob_item)
-
