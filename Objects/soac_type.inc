@@ -1630,6 +1630,20 @@ _PySOAC_CheckClassAssignment(PyTypeObject *old_type, PyTypeObject *new_type)
 int
 _PySOAC_CheckDictionaryReplacement(PyObject *object)
 {
+    if (PyType_Check(object)) {
+        PyTypeObject *type = (PyTypeObject *)object;
+        SoacTypeContract *state = soac_type_state(type);
+        /* PyType_Type exposes tp_dict through tp_dictoffset too. Replacing
+         * that slot must not detach a pending construction witness, an own
+         * permanent policy, or a dynamic subclass's inherited final policy.
+         * A successfully disposed original without either policy is ordinary. */
+        if ((state != NULL && soac_type_phase(state) != Py_SOAC_TYPE_STATE_DYNAMIC) ||
+            _PyDict_HasSoacBindingPolicy(type->tp_dict)) {
+            PyErr_SetString(soac_type_mutation_error(),
+                            "cannot replace a protected type's __dict__");
+            return -1;
+        }
+    }
     /* An ordinary instance may detach a foreign protected dictionary alias.
      * A module's actual md_dict is its authoritative global namespace, not
      * such an alias. Keep its identity through every supported setter while
