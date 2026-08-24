@@ -1277,6 +1277,59 @@ soac_ip_read_nodes(SoacInterpreterFixture *fixture, PyObject *nodes)
     return 0;
 }
 
+/* Generic definitions are published outside their type-parameter helper.
+ * Accept that one exact native edge, not an ancestor search or a helper name. */
+static int
+soac_ip_definition_parent_matches(SoacInterpreterFixture *fixture,
+                                  PyObject *nodes, PyObject *table,
+                                  Py_ssize_t publisher, Py_ssize_t child,
+                                  PyObject *declaration)
+{
+    Py_ssize_t parent = fixture->nodes[child].parent;
+    if (parent == publisher) return 1;
+    if (parent < 0 || fixture->nodes[parent].parent != publisher ||
+        fixture->nodes[parent].native_scope != Py_SOAC_SCOPE_ANNOTATIONS ||
+        fixture->nodes[parent].symtable_kind != Py_SOAC_SYMTABLE_TYPE_PARAMETERS ||
+        declaration == Py_None)
+        return 0;
+    int same = PyObject_RichCompareBool(
+        PyTuple_GET_ITEM(PyTuple_GET_ITEM(nodes, parent), 5), declaration, Py_EQ);
+    if (same <= 0) return same;
+    PyObject *calls = PyTuple_GET_ITEM(table, 6);
+    if (!soac_ip_tuple(calls, -1))
+        return soac_ip_error("fixture generic parent CALL table malformed");
+    int found = 0;
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(calls); i++) {
+        PyObject *row = PyTuple_GET_ITEM(calls, i);
+        if (!soac_ip_tuple(row, 2) ||
+            !soac_ip_tuple(PyTuple_GET_ITEM(row, 0), 3) ||
+            !soac_ip_tuple(PyTuple_GET_ITEM(row, 1), -1))
+            return soac_ip_error("fixture generic parent CALL row malformed");
+        PyObject *origin = PyTuple_GET_ITEM(row, 0);
+        long role = PyLong_AsLong(PyTuple_GET_ITEM(origin, 0));
+        if (PyErr_Occurred()) return -1;
+        if (role != Py_SOAC_CALL_GENERIC_SCOPE) continue;
+        Py_ssize_t target = PyLong_AsSsize_t(PyTuple_GET_ITEM(origin, 2));
+        if (PyErr_Occurred()) return -1;
+        if (target != parent) continue;
+        same = PyObject_RichCompareBool(
+            PyTuple_GET_ITEM(origin, 1), declaration, Py_EQ);
+        if (same < 0) return -1;
+        PyObject *emissions = PyTuple_GET_ITEM(row, 1);
+        if (!same || PyTuple_GET_SIZE(emissions) == 0) continue;
+        for (Py_ssize_t e = 0; e < PyTuple_GET_SIZE(emissions); e++) {
+            PyObject *emission = PyTuple_GET_ITEM(emissions, e);
+            if (!soac_ip_tuple(emission, 6))
+                return soac_ip_error("fixture generic parent CALL emission malformed");
+            Py_ssize_t ordinal = PyLong_AsSsize_t(PyTuple_GET_ITEM(emission, 0));
+            if (PyErr_Occurred() || ordinal < 0)
+                return soac_ip_error("fixture generic parent CALL has no physical site");
+        }
+        if (found++) return soac_ip_error("fixture generic definition edge is ambiguous");
+    }
+    return found;
+}
+
 static int
 soac_ip_read_sites(SoacInterpreterFixture *fixture, PyObject *nodes, PyObject *tables)
 {
@@ -1307,8 +1360,11 @@ soac_ip_read_sites(SoacInterpreterFixture *fixture, PyObject *nodes, PyObject *t
                     unsigned int expected_scope = origin == Py_SOAC_BINDING_FUNCTION
                         ? Py_SOAC_SCOPE_FUNCTION : origin == Py_SOAC_BINDING_ASYNC_FUNCTION
                         ? Py_SOAC_SCOPE_ASYNC_FUNCTION : Py_SOAC_SCOPE_CLASS;
-                    if (fixture->nodes[n].parent != i ||
-                        fixture->nodes[n].native_scope != expected_scope) continue;
+                    if (fixture->nodes[n].native_scope != expected_scope) continue;
+                    int parent_matches = soac_ip_definition_parent_matches(
+                        fixture, nodes, table, i, n, PyTuple_GET_ITEM(binding, 1));
+                    if (parent_matches < 0) return -1;
+                    if (!parent_matches) continue;
                     PyObject *native_node = PyTuple_GET_ITEM(nodes, n);
                     int same = PyObject_RichCompareBool(
                         PyTuple_GET_ITEM(native_node, 5), PyTuple_GET_ITEM(binding, 1), Py_EQ);
