@@ -21,6 +21,7 @@
 #include "pycore_compile.h"       // _PyCompile_CodeGen()
 #include "pycore_context.h"       // _PyContext_NewHamtForTests()
 #include "pycore_dict.h"          // PyDictValues
+#include "pycore_soac_type.h"     // actual ordinary dictionary selection
 #include "pycore_fileutils.h"     // _Py_normpath()
 #include "pycore_flowgraph.h"     // _PyCompile_OptimizeCfg()
 #include "pycore_frame.h"         // _PyInterpreterFrame
@@ -2198,6 +2199,297 @@ soac_test_ordinary_field(PyObject *owner, PyObject *name, PyObject *value)
     return 0;
 }
 
+/* These observer edges belong only to this existing test fixture's GC-visible
+ * owner. No normal contract field, process-global registry or TLS is added. */
+static PyObject *
+soac_test_ordinary_observers(PyObject *owner)
+{
+    if (!PyTuple_CheckExact(owner) || PyTuple_GET_SIZE(owner) != 3 ||
+        !PyList_CheckExact(PyTuple_GET_ITEM(owner, 2)) ||
+        PyList_GET_SIZE(PyTuple_GET_ITEM(owner, 2)) != 2) {
+        PyErr_SetString(PyExc_TypeError, "expected the ordinary dictionary test owner");
+        return NULL;
+    }
+    return PyTuple_GET_ITEM(owner, 2);
+}
+
+static PyObject *
+soac_test_ordinary_owner(PyObject *type)
+{
+    if (!PyType_Check(type)) {
+        PyErr_SetString(PyExc_TypeError, "ordinary test hook requires a type");
+        return NULL;
+    }
+    PyObject *owner = PyType_GetSoacContractOwner(type);
+    if (owner == NULL) {
+        if (!PyErr_Occurred()) PyErr_SetString(PyExc_TypeError, "type has no ordinary test owner");
+        return NULL;
+    }
+    return soac_test_ordinary_observers(owner) == NULL ? NULL : owner;
+}
+
+typedef struct {
+    PyMemAllocatorEx previous_allocator;
+    PyObject *instance;              /* actual C argument support only */
+    PyObject *candidate;
+    PyDictObject *previous_dictionary;
+    PyDictValues *previous_values;
+    size_t expected_size;
+    int initial_complete;
+    int armed;
+    int failed;
+    int unexpected;
+} SoacTestOrdinaryDetachFault;
+
+static void
+soac_test_ordinary_restore_allocator(SoacTestOrdinaryDetachFault *fault)
+{
+    if (fault->armed) {
+        fault->armed = 0;
+        PyMem_SetAllocator(PYMEM_DOMAIN_MEM, &fault->previous_allocator);
+    }
+}
+
+static void *
+soac_test_ordinary_fault_malloc(void *ctx, size_t size)
+{
+    SoacTestOrdinaryDetachFault *fault = ctx;
+    int matches = size == fault->expected_size && fault->initial_complete &&
+        _PyObject_GetManagedDict(fault->instance) == fault->previous_dictionary &&
+        _PyObject_InlineValues(fault->instance) == fault->previous_values &&
+        fault->previous_dictionary->ma_values == fault->previous_values &&
+        fault->previous_values->valid == 1;
+    /* Restore BEFORE returning NULL; native detach then creates its original
+     * MemoryError without the failing allocator still being installed. */
+    soac_test_ordinary_restore_allocator(fault);
+    if (matches) {
+        fault->failed = 1;
+        return NULL;
+    }
+    fault->unexpected = 1;
+    return fault->previous_allocator.malloc(fault->previous_allocator.ctx, size);
+}
+
+static void *
+soac_test_ordinary_fault_calloc(void *ctx, size_t count, size_t size)
+{
+    SoacTestOrdinaryDetachFault *fault = ctx;
+    fault->unexpected = 1;
+    soac_test_ordinary_restore_allocator(fault);
+    return fault->previous_allocator.calloc(fault->previous_allocator.ctx, count, size);
+}
+
+static void *
+soac_test_ordinary_fault_realloc(void *ctx, void *ptr, size_t size)
+{
+    SoacTestOrdinaryDetachFault *fault = ctx;
+    fault->unexpected = 1;
+    soac_test_ordinary_restore_allocator(fault);
+    return fault->previous_allocator.realloc(fault->previous_allocator.ctx, ptr, size);
+}
+
+static void
+soac_test_ordinary_fault_free(void *ctx, void *ptr)
+{
+    SoacTestOrdinaryDetachFault *fault = ctx;
+    fault->previous_allocator.free(fault->previous_allocator.ctx, ptr);
+}
+
+static void
+soac_test_ordinary_arm_fault(SoacTestOrdinaryDetachFault *fault)
+{
+    PyMem_GetAllocator(PYMEM_DOMAIN_MEM, &fault->previous_allocator);
+    PyMemAllocatorEx allocator = {
+        .ctx = fault,
+        .malloc = soac_test_ordinary_fault_malloc,
+        .calloc = soac_test_ordinary_fault_calloc,
+        .realloc = soac_test_ordinary_fault_realloc,
+        .free = soac_test_ordinary_fault_free,
+    };
+    fault->armed = 1;
+    PyMem_SetAllocator(PYMEM_DOMAIN_MEM, &allocator);
+}
+
+static int
+soac_test_ordinary_after_initial(PyObject *owner, PyObject *dictionary)
+{
+    PyObject *observers = soac_test_ordinary_observers(owner);
+    if (observers == NULL) return -1;
+    PyObject *capsule = PyList_GET_ITEM(observers, 1);
+    if (capsule == Py_None) return 0;
+    SoacTestOrdinaryDetachFault *fault = PyCapsule_GetPointer(
+        capsule, "test.soac.ordinary.detach_fault");
+    if (fault == NULL) return -1;
+    if (fault->candidate != dictionary || fault->initial_complete ||
+        ((PyDictObject *)dictionary)->ma_used != 1 ||
+        _PyObject_GetManagedDict(fault->instance) != fault->previous_dictionary ||
+        fault->previous_dictionary->ma_values != fault->previous_values ||
+        fault->previous_values->valid != 1) {
+        PyErr_SetString(PyExc_AssertionError, "detach fault missed its actual INITIAL boundary");
+        return -1;
+    }
+    fault->initial_complete = 1;
+    soac_test_ordinary_arm_fault(fault);
+    return 0;
+}
+
+static int
+soac_test_ordinary_invoke_hook(PyObject *owner, PyObject *instance, PyObject *candidate)
+{
+    PyObject *observers = soac_test_ordinary_observers(owner);
+    if (observers == NULL) return -1;
+    PyObject *hook = PyList_GET_ITEM(observers, 0);
+    if (hook == Py_None) return 0;
+    if ((Py_TYPE(instance)->tp_flags & Py_TPFLAGS_INLINE_VALUES) &&
+        _PyObject_GetManagedDict(instance) == NULL &&
+        _PyObject_InlineValues(instance)->valid == 2 &&
+        PyObject_GC_IsTracked(candidate)) {
+        PyErr_SetString(PyExc_AssertionError, "private dictionary header became GC-visible");
+        return -1;
+    }
+    /* MOVE the one observer edge off the owner before reentry. Neither the
+     * private dictionary nor an extra receiver argument is exposed to Python. */
+    PyList_SET_ITEM(observers, 0, Py_NewRef(Py_None));
+    PyObject *result = PyObject_CallNoArgs(hook);
+    int ok = result == Py_None;
+    if (result != NULL && !ok) PyErr_SetString(PyExc_TypeError, "test hook must return None");
+    PyObject *error = PyErr_GetRaisedException();
+    Py_XDECREF(result);
+    Py_DECREF(hook);
+    PyErr_SetRaisedException(error);
+    return ok ? 0 : -1;
+}
+
+static PyObject *
+dict_arm_soac_ordinary_hook(PyObject *self, PyObject *args)
+{
+    PyObject *type, *hook;
+    if (!PyArg_ParseTuple(args, "OO:dict_arm_soac_ordinary_hook", &type, &hook)) return NULL;
+    PyObject *owner = soac_test_ordinary_owner(type);
+    if (owner == NULL) return NULL;
+    PyObject *observers = PyTuple_GET_ITEM(owner, 2);
+    if (!PyCallable_Check(hook) || PyList_GET_ITEM(observers, 0) != Py_None) {
+        PyErr_SetString(PyExc_TypeError, "ordinary test hook must be callable and unarmed");
+        return NULL;
+    }
+    PyObject *old = PyList_GET_ITEM(observers, 0);
+    PyList_SET_ITEM(observers, 0, Py_NewRef(hook));
+    Py_DECREF(old);
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+dict_ordinary_inline_state(PyObject *self, PyObject *instance)
+{
+    if (!(Py_TYPE(instance)->tp_flags & Py_TPFLAGS_INLINE_VALUES)) {
+        PyErr_SetString(PyExc_TypeError, "test receiver has no inline values");
+        return NULL;
+    }
+    return Py_BuildValue("(iO)", (int)_PyObject_InlineValues(instance)->valid,
+                         _PyObject_GetManagedDict(instance) == NULL ? Py_False : Py_True);
+}
+
+static PyObject *
+dict_ordinary_clear_managed_probe(PyObject *self, PyObject *args)
+{
+    PyObject *instance, *primary;
+    if (!PyArg_ParseTuple(args, "OO:dict_ordinary_clear_managed_probe", &instance, &primary)) return NULL;
+    if (!(Py_TYPE(instance)->tp_flags & Py_TPFLAGS_INLINE_VALUES) ||
+        (primary != Py_None && !PyExceptionInstance_Check(primary))) {
+        PyErr_SetString(PyExc_TypeError, "clear probe requires inline receiver and exception or None");
+        return NULL;
+    }
+    PyDictValues *values = _PyObject_InlineValues(instance);
+    int preparing = values->valid == 2;
+    PyDictObject *dictionary = _PyObject_GetManagedDict(instance);
+    PyObject *saved[SHARED_KEYS_MAX_SIZE];
+    unsigned char size = values->size, capacity = values->capacity;
+    if (preparing) {
+        assert(capacity <= SHARED_KEYS_MAX_SIZE);
+        memcpy(saved, values->values, capacity * sizeof(PyObject *));
+    }
+    if (primary != Py_None) PyErr_SetRaisedException(Py_NewRef(primary));
+    PyObject_ClearManagedDict(instance);
+    /* Void is NOT a success signal: inspect the exact pending exception
+     * immediately, before returning through any other C/Python operation. */
+    PyObject *error = PyErr_GetRaisedException();
+    if (preparing &&
+        (error == NULL || values->valid != 2 || values->size != size ||
+         _PyObject_GetManagedDict(instance) != dictionary ||
+         memcmp(saved, values->values, capacity * sizeof(PyObject *)) != 0)) {
+        Py_XDECREF(error);
+        PyErr_SetString(PyExc_AssertionError, "busy clear changed live inline storage or lost its error");
+        return NULL;
+    }
+    return error == NULL ? Py_NewRef(Py_None) : error;
+}
+
+static PyObject *
+dict_ordinary_replace_detach_oom(PyObject *self, PyObject *args)
+{
+    PyObject *instance, *candidate;
+    if (!PyArg_ParseTuple(args, "OO:dict_ordinary_replace_detach_oom", &instance, &candidate)) return NULL;
+    if (!(Py_TYPE(instance)->tp_flags & Py_TPFLAGS_INLINE_VALUES) ||
+        !PyDict_CheckExact(candidate) || PyDict_Size(candidate) != 1 ||
+        PyDict_HasSoacPolicy(candidate)) {
+        PyErr_SetString(PyExc_TypeError, "detach fault requires live inline storage and an unprotected one-entry dict");
+        return NULL;
+    }
+    PyDictValues *values = _PyObject_InlineValues(instance);
+    PyDictObject *previous = _PyObject_GetManagedDict(instance);
+    if (previous == NULL || previous->ma_values != values || values->valid != 1 ||
+        Py_REFCNT(previous) < 2) {
+        PyErr_SetString(PyExc_TypeError, "detach fault requires the actual retained embedded dictionary");
+        return NULL;
+    }
+    SoacTestOrdinaryDetachFault fault = {
+        .instance = instance, .candidate = candidate,
+        .previous_dictionary = previous, .previous_values = values,
+        /* Exact new_values(capacity) byte size in native copy_values. */
+        .expected_size = (values->capacity + 1) * sizeof(PyObject *) +
+            _Py_SIZE_ROUND_UP(values->capacity, sizeof(PyObject *)),
+    };
+    PyObject *observers = NULL;
+    if (_PySOAC_HasOrdinaryInstanceWrites(Py_TYPE(instance))) {
+        PyObject *owner = soac_test_ordinary_owner((PyObject *)Py_TYPE(instance));
+        if (owner == NULL) return NULL;
+        observers = PyTuple_GET_ITEM(owner, 2);
+        if (PyList_GET_ITEM(observers, 0) != Py_None ||
+            PyList_GET_ITEM(observers, 1) != Py_None) {
+            PyErr_SetString(PyExc_TypeError, "detach observer is already armed");
+            return NULL;
+        }
+        PyObject *capsule = PyCapsule_New(&fault, "test.soac.ordinary.detach_fault", NULL);
+        if (capsule == NULL) return NULL;
+        PyObject *old = PyList_GET_ITEM(observers, 1);
+        PyList_SET_ITEM(observers, 1, capsule);
+        Py_DECREF(old);
+        /* The actual INITIAL callback arms only after validating the sole
+         * candidate item. No native MEM allocation intervenes before detach. */
+    }
+    else {
+        /* Ordinary control has no factory/INITIAL interval: the same checked
+         * native destination enters copy_values directly from this setter. */
+        fault.initial_complete = 1;
+        soac_test_ordinary_arm_fault(&fault);
+    }
+    int result = PyObject_GenericSetDict(instance, candidate, NULL);
+    soac_test_ordinary_restore_allocator(&fault);
+    PyObject *error = PyErr_GetRaisedException();
+    if (observers != NULL) {
+        PyObject *capsule = PyList_GET_ITEM(observers, 1);
+        PyList_SET_ITEM(observers, 1, Py_NewRef(Py_None));
+        Py_DECREF(capsule);
+    }
+    if (!fault.failed || fault.unexpected || result != -1 || error == NULL) {
+        Py_XDECREF(error);
+        PyErr_SetString(PyExc_AssertionError, "fault did not hit actual post-validation detach allocation");
+        return NULL;
+    }
+    PyErr_SetRaisedException(error);
+    return NULL;
+}
+
 static int
 soac_test_ordinary_instance_policy(PyObject *owner, PyObject *dict, PyObject *key,
                                    PyObject *value, int operation, PyObject *provenance)
@@ -2219,7 +2511,9 @@ soac_test_ordinary_instance_policy(PyObject *owner, PyObject *dict, PyObject *ke
     }
     /* The original incoming attribute name is not the canonical stored key.
      * Inspect Unicode data, never repeat arbitrary hash/equality or str(). */
-    return attribute ? soac_test_ordinary_field(owner, provenance, value) : 0;
+    if (attribute && soac_test_ordinary_field(owner, provenance, value) < 0) return -1;
+    return operation == PyDict_SOAC_VALIDATE_INITIAL
+        ? soac_test_ordinary_after_initial(owner, dict) : 0;
 }
 
 static int
@@ -2243,6 +2537,7 @@ soac_test_ordinary_prepare_dictionary(PyObject *owner, PyObject *instance,
         PyErr_SetString(PyExc_TypeError, "incompatible actual instance dictionary policy");
         return -1;
     }
+    if (soac_test_ordinary_invoke_hook(owner, instance, dictionary) < 0) return -1;
     out->owner = Py_NewRef(owner);
     out->validate = soac_test_ordinary_instance_policy;
     return 0;
@@ -2291,7 +2586,14 @@ dict_new_soac_ordinary_type(PyObject *self, PyObject *args)
     }
     PyObject *empty = PyTuple_New(0);
     PyObject *keywords = PyDict_New();
-    PyObject *owner = empty == NULL ? NULL : PyTuple_Pack(2, fields, empty);
+    PyObject *observers = PyList_New(2);
+    if (observers != NULL) {
+        PyList_SET_ITEM(observers, 0, Py_NewRef(Py_None));
+        PyList_SET_ITEM(observers, 1, Py_NewRef(Py_None));
+    }
+    PyObject *owner = empty == NULL || observers == NULL
+        ? NULL : PyTuple_Pack(3, fields, empty, observers);
+    Py_XDECREF(observers);
     if (empty == NULL || keywords == NULL || owner == NULL) {
         Py_XDECREF(empty);
         Py_XDECREF(keywords);
@@ -3606,6 +3908,10 @@ static PyMethodDef module_functions[] = {
     {"dict_setitem_and_delete_for_module", dict_setitem_and_delete_for_module, METH_VARARGS},
     {"dict_new_soac_type", dict_new_soac_type, METH_VARARGS},
     {"dict_new_soac_ordinary_type", dict_new_soac_ordinary_type, METH_VARARGS},
+    {"dict_arm_soac_ordinary_hook", dict_arm_soac_ordinary_hook, METH_VARARGS},
+    {"dict_ordinary_inline_state", dict_ordinary_inline_state, METH_O},
+    {"dict_ordinary_clear_managed_probe", dict_ordinary_clear_managed_probe, METH_VARARGS},
+    {"dict_ordinary_replace_detach_oom", dict_ordinary_replace_detach_oom, METH_VARARGS},
     {"soac_function_create_watch", soac_function_create_watch, METH_VARARGS},
     {"soac_function_create_unwatch", soac_function_create_unwatch, METH_O},
     {"soac_interpreter_fixture", soac_interpreter_fixture, METH_VARARGS},
