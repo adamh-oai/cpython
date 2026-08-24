@@ -497,10 +497,30 @@ capability.  Those require separately verified native owners.
    replace that result.  A module owner need not grant that permission.
    The owner must identity-match its immutable captured provider and validate
    the exact approved key and value; for class annotation caches these are
-   ``__annotations__`` and an exact dictionary.  All public operations,
+   ``__annotations__`` and an exact dictionary.  Mapping operations,
    initial validation, and terminal notifications pass ``NULL`` provenance.
    There is no ambient cache-write permission that a reentrant public write
    could acquire.  Owners without such a provider must reject cache requests.
+
+   ``PyDict_SOAC_ATTRIBUTE_SET`` and ``PyDict_SOAC_ATTRIBUTE_SET_EXISTING``
+   describe native instance attribute assignment to an absent or existing
+   binding, respectively. They apply only to instance policies with
+   ``PyDict_SOAC_ALLOW_NONSTRING_KEYS``. The callback receives the original
+   Unicode attribute name, including a possible string subclass, as
+   *provenance*, separately from the once-resolved canonical stored *key*.
+   The owner must enforce contracts for both the canonical key and the
+   attribute name's Unicode payload, without invoking the name's Python
+   conversion, hash, or equality hooks. Do not move the value check ahead of
+   normal descriptor and dictionary lookup: their exceptions and side-effect
+   order must be preserved. This is one guarded lookup/validation/commit,
+   not a precheck followed by a second lookup. Public mapping writes remain
+   ordinary ``SET``/``SET_EXISTING`` operations with ``NULL`` provenance, and
+   no mapping key is normalized or replaced merely because it aliases a field.
+
+   ``_PyDict_SetItemForAttribute(dict, name, value)`` is the private native
+   entrypoint for that transaction; it requires a Unicode name and a non-NULL
+   value. Attribute deletion and namespace policies retain their ordinary
+   dictionary operations. It is not a runtime-cache or initialization permit.
 
    ``PyDict_SOAC_TERMINAL_TEARDOWN`` is a non-rejectable, irreversible
    notification before unreachable-GC or terminal module cleanup invalidates

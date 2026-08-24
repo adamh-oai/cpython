@@ -3995,7 +3995,8 @@ _PyDict_LoadBuiltinsFromGlobals(PyObject *globals)
    validation and commit use the same resolved canonical entry. */
 static int
 soac_setitem_resolved(PyDictObject *dict, PyObject *key, PyObject *value,
-                      PyObject *provenance, int override, Py_hash_t hash)
+                      int operation, PyObject *provenance,
+                      int override, Py_hash_t hash)
 {
     SoacDictPolicy *policy = soac_policy(dict);
     if (soac_check_key(dict, key) < 0 || soac_begin_mutation(policy) < 0) {
@@ -4026,10 +4027,21 @@ soac_setitem_resolved(PyDictObject *dict, PyObject *key, PyObject *value,
         }
         goto done;
     }
-    int operation = old_value == NULL ? PyDict_SOAC_SET : PyDict_SOAC_SET_EXISTING;
-    if (provenance != NULL) {
-        operation = old_value == NULL
-            ? PyDict_SOAC_CACHE_INSERT : PyDict_SOAC_CACHE_REPLACE;
+    assert(operation == PyDict_SOAC_SET || operation == PyDict_SOAC_CACHE_INSERT ||
+           operation == PyDict_SOAC_ATTRIBUTE_SET);
+    assert((operation == PyDict_SOAC_SET) == (provenance == NULL));
+    if (old_value != NULL) {
+        switch (operation) {
+            case PyDict_SOAC_SET:
+                operation = PyDict_SOAC_SET_EXISTING;
+                break;
+            case PyDict_SOAC_CACHE_INSERT:
+                operation = PyDict_SOAC_CACHE_REPLACE;
+                break;
+            case PyDict_SOAC_ATTRIBUTE_SET:
+                operation = PyDict_SOAC_ATTRIBUTE_SET_EXISTING;
+                break;
+        }
     }
     if (soac_validate(policy, dict, canonical, value, operation, provenance) < 0) {
         goto done;
@@ -4056,9 +4068,9 @@ done:
 
 static int
 soac_setitem_lock_held(PyDictObject *dict, PyObject *key, PyObject *value,
-                       PyObject *provenance)
+                       int operation, PyObject *provenance)
 {
-    return soac_setitem_resolved(dict, key, value, provenance, 1, -1);
+    return soac_setitem_resolved(dict, key, value, operation, provenance, 1, -1);
 }
 
 /* Consumes references to key and value */
@@ -4071,7 +4083,7 @@ setitem_take2_lock_held(PyDictObject *mp, PyObject *key, PyObject *value)
     assert(value);
     assert(PyDict_Check(mp));
     if (_PyDict_HasSoacPolicy(mp)) {
-        int result = soac_setitem_lock_held(mp, key, value, NULL);
+        int result = soac_setitem_lock_held(mp, key, value, PyDict_SOAC_SET, NULL);
         Py_DECREF(key);
         Py_DECREF(value);
         return result;
@@ -4135,7 +4147,7 @@ _PyDict_SetItem_KnownHash_LockHeld(PyDictObject *mp, PyObject *key, PyObject *va
                                    Py_hash_t hash)
 {
     if (_PyDict_HasSoacPolicy(mp)) {
-        return soac_setitem_resolved(mp, key, value, NULL, 1, hash);
+        return soac_setitem_resolved(mp, key, value, PyDict_SOAC_SET, NULL, 1, hash);
     }
     if (mp->ma_keys == Py_EMPTY_KEYS) {
         return insert_to_emptydict(mp, Py_NewRef(key), hash, Py_NewRef(value));
@@ -4156,7 +4168,8 @@ _PyDict_SetItemForRuntimeCache(PyObject *dict, PyObject *key, PyObject *value,
     if (!PyDict_HasSoacPolicy(dict)) {
         return PyDict_SetItem(dict, key, value);
     }
-    return soac_setitem_lock_held((PyDictObject *)dict, key, value, provider);
+    return soac_setitem_lock_held((PyDictObject *)dict, key, value,
+                                  PyDict_SOAC_CACHE_INSERT, provider);
 }
 
 int
@@ -4366,7 +4379,7 @@ _PyDict_SetItemAndDeleteForModule(PyObject *op, PyObject *key,
     }
     int result = value == NULL
         ? soac_remove_lock_held(dict, key, hash, 0, NULL)
-        : (soac_setitem_lock_held(dict, key, value, NULL) < 0 ? -1 : 1);
+        : (soac_setitem_lock_held(dict, key, value, PyDict_SOAC_SET, NULL) < 0 ? -1 : 1);
     if (result <= 0) {
         return result;
     }
@@ -5797,7 +5810,8 @@ validated:
         for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(items); i += 2) {
             PyObject *key = PyTuple_GET_ITEM(items, i);
             PyObject *value = PyTuple_GET_ITEM(items, i + 1);
-            if (soac_setitem_resolved(dict, key, value, NULL, override, hashes[i / 2]) < 0) {
+            if (soac_setitem_resolved(dict, key, value, PyDict_SOAC_SET, NULL,
+                                      override, hashes[i / 2]) < 0) {
                 result = -1;
                 break;
             }
@@ -9239,6 +9253,32 @@ _PyDict_SetItem_LockHeld(PyDictObject *dict, PyObject *name, PyObject *value)
     }
 }
 
+static int
+setitem_for_attribute_lock_held(PyDictObject *dict, PyObject *name, PyObject *value)
+{
+    if (value != NULL && _PyDict_HasSoacPolicy(dict) &&
+        (soac_policy(dict)->flags & PyDict_SOAC_ALLOW_NONSTRING_KEYS)) {
+        return soac_setitem_lock_held(dict, name, value,
+                                      PyDict_SOAC_ATTRIBUTE_SET, name);
+    }
+    /* Namespace policies and deletions retain their ordinary operations. */
+    return _PyDict_SetItem_LockHeld(dict, name, value);
+}
+
+int
+_PyDict_SetItemForAttribute(PyObject *op, PyObject *name, PyObject *value)
+{
+    if (!PyDict_Check(op) || name == NULL || !PyUnicode_Check(name) || value == NULL) {
+        PyErr_BadInternalCall();
+        return -1;
+    }
+    int result;
+    Py_BEGIN_CRITICAL_SECTION(op);
+    result = setitem_for_attribute_lock_held((PyDictObject *)op, name, value);
+    Py_END_CRITICAL_SECTION();
+    return result;
+}
+
 // Called with either the object's lock or the dict's lock held
 // depending on whether or not a dict has been materialized for
 // the object.
@@ -9254,7 +9294,7 @@ store_instance_attr_lock_held(PyObject *obj, PyDictValues *values,
     PyDictObject *dict = _PyObject_GetManagedDict(obj);
     assert(dict == NULL || ((PyDictObject *)dict)->ma_values == values);
     if (dict != NULL && _PyDict_HasSoacPolicy(dict)) {
-        return _PyDict_SetItem_LockHeld(dict, name, value);
+        return setitem_for_attribute_lock_held(dict, name, value);
     }
     if (PyUnicode_CheckExact(name)) {
         Py_hash_t hash = unicode_get_hash(name);
@@ -9289,7 +9329,7 @@ store_instance_attr_lock_held(PyObject *obj, PyDictValues *values,
             // so that no one else will see it.
             dict = make_dict_from_instance_attributes(keys, values);
             if (dict == NULL ||
-                _PyDict_SetItem_LockHeld(dict, name, value) < 0) {
+                setitem_for_attribute_lock_held(dict, name, value) < 0) {
                 Py_XDECREF(dict);
                 return -1;
             }
@@ -9301,7 +9341,7 @@ store_instance_attr_lock_held(PyObject *obj, PyDictValues *values,
 
         _Py_CRITICAL_SECTION_ASSERT_OBJECT_LOCKED(dict);
 
-        res = _PyDict_SetItem_LockHeld(dict, name, value);
+        res = setitem_for_attribute_lock_held(dict, name, value);
         return res;
     }
 
@@ -9353,7 +9393,7 @@ store_instance_attr_dict(PyObject *obj, PyDictObject *dict, PyObject *name, PyOb
         res = store_instance_attr_lock_held(obj, values, name, value);
     }
     else {
-        res = _PyDict_SetItem_LockHeld(dict, name, value);
+        res = setitem_for_attribute_lock_held(dict, name, value);
     }
     Py_END_CRITICAL_SECTION();
     return res;
@@ -10047,7 +10087,7 @@ _PyObjectDict_SetItem(PyTypeObject *tp, PyObject *obj, PyObject **dictptr,
     }
 
     Py_BEGIN_CRITICAL_SECTION(dict);
-    res = _PyDict_SetItem_LockHeld((PyDictObject *)dict, key, value);
+    res = setitem_for_attribute_lock_held((PyDictObject *)dict, key, value);
     ASSERT_CONSISTENT(dict);
     Py_END_CRITICAL_SECTION();
     return res;

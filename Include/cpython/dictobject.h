@@ -40,7 +40,9 @@ typedef struct {
  * this dictionary.  SET means a currently absent binding; SET_EXISTING means
  * an existing binding or an earlier write in the same staged bulk input.
  * VALIDATE_INITIAL checks existing contents before installation succeeds.
- * provenance is NULL except for a private native CACHE_INSERT/CACHE_REPLACE.
+ * provenance is NULL for mapping writes.  Private CACHE_INSERT/CACHE_REPLACE
+ * carry their provider; ATTRIBUTE_SET/ATTRIBUTE_SET_EXISTING carry the original
+ * Unicode attribute name, separately from the once-resolved canonical key.
  *
  * TERMINAL_TEARDOWN is an irreversible notification from unreachable GC or
  * module destruction: the owner must make dependent execution unavailable
@@ -55,7 +57,9 @@ enum {
     PyDict_SOAC_TERMINAL_TEARDOWN = 4,
     PyDict_SOAC_SET_EXISTING = 5,
     PyDict_SOAC_CACHE_INSERT = 6,
-    PyDict_SOAC_CACHE_REPLACE = 7
+    PyDict_SOAC_CACHE_REPLACE = 7,
+    PyDict_SOAC_ATTRIBUTE_SET = 8,
+    PyDict_SOAC_ATTRIBUTE_SET_EXISTING = 9
 };
 #define PyDict_SOAC_ALLOW_NONSTRING_KEYS 1u
 typedef int (*PyDict_SoacPolicyCallback)(

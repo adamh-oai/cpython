@@ -26,6 +26,10 @@ extern int _PyDict_SetItemForTeardown(
    never a temporary permission flag available to reentrant public writes. */
 extern int _PyDict_SetItemForRuntimeCache(
     PyObject *dict, PyObject *key, PyObject *value, PyObject *provider);
+/* Attribute provenance belongs to this one lookup/validation/commit, not a
+   precheck or ambient permit.  Mapping writes never emit ATTRIBUTE_SET. */
+PyAPI_FUNC(int) _PyDict_SetItemForAttribute(
+    PyObject *dict, PyObject *name, PyObject *value);
 
 #ifndef Py_BUILD_CORE
 #  error "this header requires Py_BUILD_CORE define"

@@ -96,6 +96,28 @@ static PyType_Spec soac_test_owner_spec = {
 };
 
 static int
+soac_test_validate_value(SoacTestOwner *owner, PyObject *key, PyObject *value)
+{
+    PyObject *expected = PyUnicode_CheckExact(key)
+        ? PyDict_GetItemWithError(owner->schema, key) : NULL;
+    if (expected == NULL && !PyErr_Occurred() &&
+        (owner->flags & PyDict_SOAC_ALLOW_NONSTRING_KEYS)) {
+        expected = Py_None;
+    }
+    if (expected == NULL) {
+        if (!PyErr_Occurred()) {
+            PyErr_SetString(PyExc_TypeError, "undeclared SOAC test field");
+        }
+        return -1;
+    }
+    if (expected != Py_None && Py_TYPE(value) != (PyTypeObject *)expected) {
+        PyErr_SetString(PyExc_TypeError, "incorrect SOAC test field value");
+        return -1;
+    }
+    return 0;
+}
+
+static int
 soac_test_validate(PyObject *op, PyObject *dict, PyObject *key,
                    PyObject *value, int operation, PyObject *provenance)
 {
@@ -104,7 +126,10 @@ soac_test_validate(PyObject *op, PyObject *dict, PyObject *key,
         PyErr_SetString(PyExc_TypeError, "SOAC test owner has no cache provider");
         return -1;
     }
-    assert(provenance == NULL);
+    int attribute = operation == PyDict_SOAC_ATTRIBUTE_SET ||
+                    operation == PyDict_SOAC_ATTRIBUTE_SET_EXISTING;
+    assert(attribute ? (provenance != NULL && PyUnicode_Check(provenance))
+                     : provenance == NULL);
     if (operation == PyDict_SOAC_VALIDATE_INITIAL) {
         assert(!PyDict_MatchesSoacPolicy(dict, op, soac_test_validate, owner->flags));
     }
@@ -131,22 +156,20 @@ soac_test_validate(PyObject *op, PyObject *dict, PyObject *key,
         }
     }
     if (operation == PyDict_SOAC_SET || operation == PyDict_SOAC_SET_EXISTING ||
-        operation == PyDict_SOAC_VALIDATE_INITIAL) {
-        PyObject *expected = PyUnicode_CheckExact(key)
-            ? PyDict_GetItemWithError(owner->schema, key) : NULL;
-        if (expected == NULL && !PyErr_Occurred() &&
-            (owner->flags & PyDict_SOAC_ALLOW_NONSTRING_KEYS)) {
-            expected = Py_None;
+        operation == PyDict_SOAC_VALIDATE_INITIAL || attribute) {
+        if (soac_test_validate_value(owner, key, value) < 0) {
+            return -1;
         }
-        if (expected == NULL) {
-            if (!PyErr_Occurred()) {
-                PyErr_SetString(PyExc_TypeError, "undeclared SOAC test field");
+        if (attribute) {
+            PyObject *name = PyUnicode_FromObject(provenance);
+            if (name == NULL) {
+                return -1;
             }
-            return -1;
-        }
-        if (expected != Py_None && Py_TYPE(value) != (PyTypeObject *)expected) {
-            PyErr_SetString(PyExc_TypeError, "incorrect SOAC test field value");
-            return -1;
+            int result = soac_test_validate_value(owner, name, value);
+            Py_DECREF(name);
+            if (result < 0) {
+                return -1;
+            }
         }
     }
     if (key != NULL && PyUnicode_CheckExact(key) && operation != PyDict_SOAC_VALIDATE_INITIAL) {
@@ -155,6 +178,7 @@ soac_test_validate(PyObject *op, PyObject *dict, PyObject *key,
             return -1;
         }
         if (final && (operation == PyDict_SOAC_SET_EXISTING ||
+                      operation == PyDict_SOAC_ATTRIBUTE_SET_EXISTING ||
                       operation == PyDict_SOAC_DELETE)) {
             PyErr_SetString(PyExc_TypeError, "immutable SOAC test binding");
             return -1;

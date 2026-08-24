@@ -2090,7 +2090,7 @@ _PyObject_GenericSetAttrWithDict(PyObject *obj, PyObject *name,
         if (value == NULL)
             res = PyDict_DelItem(dict, name);
         else
-            res = PyDict_SetItem(dict, name, value);
+            res = _PyDict_SetItemForAttribute(dict, name, value);
         Py_DECREF(dict);
     }
   error_check:

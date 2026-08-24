@@ -281,6 +281,70 @@ class SoacDictPolicyTests(unittest.TestCase):
         # The alias was never stored, so it cannot change a future lookup.
         self.assertTrue(_testinternalcapi.dict_has_no_lookup_aliases(d))
 
+    def test_attribute_policy_checks_name_payload_and_canonical_key(self):
+        class Receiver:
+            pass
+
+        receiver = Receiver()
+        d = _testinternalcapi.dict_new_indexed(("field", "other"))
+        d.update({"field": 1, "other": "original"})
+        receiver.__dict__ = d
+        calls = []
+        self.protect(d, {"field": int, "other": str}, flags=1,
+                     callback=lambda d, k, v, op: calls.append((k, op)))
+        comparisons = []
+
+        class Name(str):
+            def __hash__(self):
+                return hash("other")
+
+            def __eq__(self, other):
+                comparisons.append(other)
+                return other == "other"
+
+            def __str__(self):
+                raise AssertionError("the policy called user conversion")
+
+        # Each value meets one contract but fails the other. The same native
+        # lookup resolves 'other'; the original attribute payload names field.
+        for value in (2, "bad for field"):
+            comparisons.clear()
+            with self.assertRaises(TypeError):
+                setattr(receiver, Name("field"), value)
+            self.assertEqual(comparisons, ["other"])
+            self.assertEqual(d, {"field": 1, "other": "original"})
+        self.assertEqual(calls, [])
+
+        comparisons.clear()
+        setattr(receiver, Name("unchecked"), "attribute value")
+        self.assertEqual(comparisons, ["other"])
+        self.assertEqual(calls, [("other", 9)])
+        self.assertIs(calls[0][0], list(d)[1])
+        comparisons.clear()
+        d[Name("field")] = "mapping value"
+        self.assertEqual(comparisons, ["other"])
+        self.assertEqual(calls[-1], ("other", 5))
+        self.assertEqual(d, {"field": 1, "other": "mapping value"})
+        self.assertTrue(_testinternalcapi.dict_has_no_lookup_aliases(d))
+
+    def test_attribute_operations_do_not_escape_into_namespace_policies(self):
+        class Receiver:
+            pass
+
+        for flags, expected in ((0, (1, 5, 5)), (1, (8, 9, 5))):
+            with self.subTest(flags=flags):
+                receiver = Receiver()
+                d = _testinternalcapi.dict_new_indexed(("field",))
+                receiver.__dict__ = d
+                calls = []
+                self.protect(d, {"field": int}, flags=flags,
+                             callback=lambda d, k, v, op: calls.append(op))
+                receiver.field = 1
+                receiver.field = 2
+                d["field"] = 3
+                self.assertEqual(calls, list(expected))
+                self.assertEqual(d, {"field": 3})
+
     def test_instance_alias_deletion_and_bulk_use_canonical_field_policy(self):
         d = _testinternalcapi.dict_new_indexed(("field", "fixed"))
         self.protect(d, {"field": int, "fixed": int}, finals=("fixed",), flags=1)

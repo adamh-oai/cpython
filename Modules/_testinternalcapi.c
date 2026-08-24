@@ -2024,12 +2024,25 @@ soac_test_instance_policy(PyObject *owner, PyObject *dict, PyObject *key,
         operation == PyDict_SOAC_DELETE || operation == PyDict_SOAC_CLEAR) {
         return 0;
     }
-    if (provenance != NULL) {
+    int attribute = operation == PyDict_SOAC_ATTRIBUTE_SET ||
+                    operation == PyDict_SOAC_ATTRIBUTE_SET_EXISTING;
+    if (!attribute && provenance != NULL) {
         PyErr_SetString(PyExc_TypeError, "test instance has no runtime cache provider");
         return -1;
     }
-    if (PyUnicode_CheckExact(key) && _PyDict_IndexedKeyIndex(dict, key) >= 0 &&
-        !PyLong_CheckExact(value)) {
+    int checked = PyUnicode_CheckExact(key) && _PyDict_IndexedKeyIndex(dict, key) >= 0;
+    if (attribute) {
+        assert(provenance != NULL && PyUnicode_Check(provenance));
+        /* Copy the Unicode payload, never call str(), hash(), or equality on
+           the original subclass a second time during policy validation. */
+        PyObject *name = PyUnicode_FromObject(provenance);
+        if (name == NULL) {
+            return -1;
+        }
+        checked |= _PyDict_IndexedKeyIndex(dict, name) >= 0;
+        Py_DECREF(name);
+    }
+    if (checked && !PyLong_CheckExact(value)) {
         PyErr_SetString(PyExc_TypeError, "test declared field requires an exact int");
         return -1;
     }
