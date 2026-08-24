@@ -128,6 +128,32 @@ class TestDefaultEvalFrameSelection(unittest.TestCase):
             actual[instruction.name] = producer
         self.assertEqual(actual, expected, "exercise every actual native push path")
 
+
+    def test_real_expanded_call_specializations_deopt_before_callback_or_consume(self):
+        analysis = analyzer.analyze_files([
+            os.path.join(test_tools.basepath, "Python", "bytecodes.c")
+        ])
+        guard = "_CHECK_NO_SOAC_GENERATED_ACTIVATION"
+        self.assertTrue(analysis.uops[guard].properties.deopts)
+        for name, consumer in (
+            ("CALL_EX_PY", "_PY_FRAME_EX"),
+            ("CALL_EX_NON_PY_GENERAL", "_CALL_FUNCTION_EX_NON_PY_GENERAL"),
+        ):
+            with self.subTest(instruction=name):
+                parts = [
+                    part.replicates or part
+                    for part in analysis.instructions[name].parts
+                    if isinstance(part, analyzer.Uop)
+                ]
+                names = [part.name for part in parts]
+                self.assertEqual(names.count(guard), 1)
+                self.assertLess(names.index(guard), names.index("_MAKE_CALLARGS_A_TUPLE"))
+                self.assertLess(names.index(guard), names.index(consumer))
+                if name == "CALL_EX_PY":
+                    # Recording remains first, as required by the generator.
+                    self.assertEqual(names[0], "_RECORD_4OS")
+                    self.assertLess(names.index("_RECORD_4OS"), names.index(guard))
+
     def test_known_guarded_producer_is_accepted(self):
         analysis = self.analyze_macro(
             "_CHECK_PEP_523 + _PY_FRAME_GENERAL + _SAVE_RETURN_OFFSET + _PUSH_FRAME"
