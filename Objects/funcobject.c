@@ -16,6 +16,7 @@
 #include "pycore_pyerrors.h"      // _PyErr_Occurred()
 #include "pycore_setobject.h"     // _PySet_NextEntry()
 #include "pycore_soac_descriptor.h" // Explicit fresh builtin descriptor birth
+#include "pycore_soac_type.h"
 #include "pycore_stats.h"
 #include "pycore_tuple.h"         // _PyTuple_ITEMS()
 #include "pycore_weakref.h"       // FT_CLEAR_WEAKREFS()

@@ -3,6 +3,7 @@
 //  See InternalDocs/garbage_collector.md for more infromation.
 
 #include "Python.h"
+#include "pycore_soac_type.h"  // pending allocation barrier
 #include "pycore_ceval.h"         // _Py_set_eval_breaker_bit()
 #include "pycore_dict.h"          // _PyInlineValuesSize()
 #include "pycore_initconfig.h"    // _PyStatus_OK()
@@ -2364,6 +2365,7 @@ gc_alloc(PyTypeObject *tp, size_t basicsize, size_t presize)
 PyObject *
 _PyObject_GC_New(PyTypeObject *tp)
 {
+    if (_PySOAC_CheckTypeAllocation(tp) < 0) return NULL;
     size_t presize = _PyType_PreHeaderSize(tp);
     size_t size = _PyObject_SIZE(tp);
     if (_PyType_HasFeature(tp, Py_TPFLAGS_INLINE_VALUES)) {
@@ -2383,6 +2385,7 @@ _PyObject_GC_New(PyTypeObject *tp)
 PyVarObject *
 _PyObject_GC_NewVar(PyTypeObject *tp, Py_ssize_t nitems)
 {
+    if (_PySOAC_CheckTypeAllocation(tp) < 0) return NULL;
     PyVarObject *op;
 
     if (nitems < 0) {
@@ -2402,6 +2405,7 @@ _PyObject_GC_NewVar(PyTypeObject *tp, Py_ssize_t nitems)
 PyObject *
 PyUnstable_Object_GC_NewWithExtraData(PyTypeObject *tp, size_t extra_size)
 {
+    if (_PySOAC_CheckTypeAllocation(tp) < 0) return NULL;
     size_t presize = _PyType_PreHeaderSize(tp);
     size_t size = _PyObject_SIZE(tp) + extra_size;
     PyObject *op = gc_alloc(tp, size, presize);

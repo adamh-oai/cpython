@@ -5,6 +5,14 @@
 #endif
 
 /* These operations consult native type-owned state, never Python attributes. */
+extern int _PySOAC_CheckTypeAllocation(PyTypeObject *);
+extern int _PySOAC_CheckPendingBases(PyObject *);
+extern int _PySOAC_CheckPendingTypeWrite(PyTypeObject *);
+extern void _PySOAC_FailPendingType(PyTypeObject *);
+extern PyObject *_PySOAC_GetTypeConstructionOwner(PyObject *);
+extern int _PySOAC_LinkPendingTypeHandle(PyObject *, PyObject *, PyObject *);
+extern int _PySOAC_BeginPendingTypeAdapter(PyObject *, PyObject **);
+extern void _PySOAC_EndPendingTypeAdapter(PyObject *, int);
 extern int _PySOAC_ProtectedName(PyTypeObject *, PyObject *);
 extern int _PySOAC_CheckInstanceWrite(PyObject *, PyObject *, PyObject *);
 extern int _PySOAC_CheckClassWrite(PyTypeObject *, PyObject *, PyObject *);
@@ -19,6 +27,12 @@ extern void _PySOAC_TypeContractClear(PyTypeObject *);
 extern void _PySOAC_TypeContractDealloc(PyTypeObject *);
 extern PyObject *_PySOAC_NewInstanceDictionary(PyObject *);
 extern int _PySOAC_UsesInstanceDictionaryPolicy(PyTypeObject *);
+/* Actual generated _testinternalcapi executor consumes these guard/check
+ * helpers; export only these private implementation symbols. */
+PyAPI_FUNC(int) _PySOAC_HasOrdinaryInstanceWrites(PyTypeObject *);
+PyAPI_FUNC(int) _PySOAC_CheckInlineInstanceWrite(PyObject *, PyObject *, PyObject *);
+extern int _PySOAC_PrepareInstanceDictPolicy(
+    PyObject *, PyObject *, const PySoacInstanceDictPolicy *, PySoacInstanceDictPolicy *);
 /* Also consumed by the generated _testinternalcapi executor. */
 PyAPI_FUNC(int) _PySOAC_UsesObjectSlotPolicy(PyTypeObject *);
 extern int _PySOAC_CheckObjectSlotAccess(PyObject *, const PyMemberDef *);

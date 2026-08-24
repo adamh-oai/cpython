@@ -307,41 +307,145 @@ PyAPI_FUNC(uint64_t) PyType_GetSoacFunctionId(PyObject *);
 
 /* The C-only caller must authenticate the source plan. Ordinary Python cannot
  * construct these interpreter-owned handles or install type capabilities. */
-#define Py_SOAC_TYPE_CONTRACT_ABI 3
+#define Py_SOAC_TYPE_CONTRACT_ABI 4
 #define Py_SOAC_TYPE_FINAL 1u
+
+enum {
+    Py_SOAC_TYPE_CONSTRUCT_ENFORCED = 0, /* existing permanent path */
+    Py_SOAC_TYPE_CONSTRUCT_PENDING = 1,
+};
+
+typedef struct _PySoacInstanceDictPolicy PySoacInstanceDictPolicy;
+enum {
+    Py_SOAC_INSTANCE_DICT_NONE = 0,
+    Py_SOAC_INSTANCE_DICT_INDEXED = 1,
+    Py_SOAC_INSTANCE_DICT_ORDINARY = 2,
+};
+
+/* One definition for the existing permanent policy payload. These are the
+ * existing fields/callbacks, factored out rather than copied into a new schema.
+ * Names are exact immutable canonical tuples. No execution/source grant. */
+typedef struct {
+    uint32_t flags;               /* existing FINAL; all other bits rejected */
+    uint32_t dictionary_mode;     /* explicit NONE / INDEXED / ORDINARY */
+    PyObject *fields;
+    PyObject *protected_names;
+    PyObject *final_methods;
+    PyObject *object_slot_fields;
+    int (*check_instance_write)(PyObject *, PyObject *, PyObject *, PyObject *);
+    PyObject *(*new_instance_dict)(PyObject *, PyObject *);
+    /* ORDINARY returns one metadata owner, not a new dictionary or receiver
+     * pin. Native owns provisional policy validation/commit/abort. The view
+     * definition follows PyDict_SoacPolicyCallback in cpython/dictobject.h. */
+    int (*prepare_instance_dictionary_policy)(
+        PyObject *, PyObject *, PyObject *,
+        const PySoacInstanceDictPolicy *, PySoacInstanceDictPolicy *);
+} PySoacTypeContractSpecV4;
+
+/* Captured by the original PENDING construction, never chosen by admission.
+ * actual_contract is the stable, native-pinned input view. Success compares it
+ * with the owner's immutable prepared requirements without Python/allocation. */
+typedef int (*PySoacTypeFinalCommitV4)(
+    PyObject *owner, PyObject *actual_type,
+    const PySoacTypeContractSpecV4 *actual_contract);
+
 typedef struct {
     uint32_t abi_version;
-    uint32_t flags;
+    uint32_t struct_size;
+    uint32_t construction_mode;
+    uint32_t reserved;
     PyObject *owner;
     PyObject *namespace_function;
     PyObject *name;
     PyObject *bases;
     PyObject *namespace_dict;
     PyObject *keywords;
-    PyObject *fields;
-    PyObject *protected_names;
-    PyObject *final_methods;
-    int (*check_instance_write)(PyObject *, PyObject *, PyObject *, PyObject *);
-    PyObject *(*new_instance_dict)(PyObject *, PyObject *);
-    /* Bind the actual type into an already-reserved owner edge. Must not
-     * allocate or call Python; runs before PyType_Ready and user callbacks. */
+    /* ENFORCED keeps the existing bind phase after set_attrs.
+     * PENDING runs after copied-namespace installation, before set_attrs, under
+     * the native barrier. It may allocate/reenter; exact native state is
+     * revalidated on return. Final admission uses the separate strict commit. */
     int (*bind_type)(PyObject *, PyObject *);
-    /* Exact, unique canonical field names backed by fixed native object
-     * members. NULL is an absent slot plan; fields above remains the separate
-     * dictionary plan. Native construction resolves and owns the offsets. */
-    PyObject *object_slot_fields;
+    /* PENDING requires this trusted final hook; ENFORCED requires NULL. */
+    PySoacTypeFinalCommitV4 commit_final;
+    /* ENFORCED: existing complete contract. PENDING: all-zero, no own
+     * instance/namespace contract or inferred replacement field layout. */
+    PySoacTypeContractSpecV4 contract;
 } PySoacTypeConstructionSpec;
 
-PyAPI_FUNC(PyObject *) PyType_NewSoacConstructionHandle(const PySoacTypeConstructionSpec *);
+/* Existing functions, same roles. Pending mode is a distinct native state,
+ * not a flag that lets an ordinary/pre-existing type acquire provenance. */
 struct _PySoacDataclassFrameView;
-/* Only the explicit native prepare_slots callback's borrowed producer view
- * can mint this distinct handle mode. namespace_function MUST be NULL. The
- * active invocation/original owner/actual evaluated operands are validated;
- * only its same opcode-dispatched bridge can consume the one reserved handle.
- * No original namespace-function lifetime or source/JIT authority is added. */
+PyAPI_FUNC(PyObject *) PyType_NewSoacConstructionHandle(
+    const PySoacTypeConstructionSpec *);
 PyAPI_FUNC(PyObject *) PyType_NewSoacDataclassSlotsHandle(
-    const struct _PySoacDataclassFrameView *, const PySoacTypeConstructionSpec *);
-PyAPI_FUNC(PyObject *) PyType_FromSoacConstructionHandle(PyObject *, PyObject *);
+    const struct _PySoacDataclassFrameView *,
+    const PySoacTypeConstructionSpec *);
+PyAPI_FUNC(PyObject *) PyType_FromSoacConstructionHandle(
+    PyObject *construction, PyObject *namespace_function);
+
+#define Py_SOAC_TYPE_CONSTRUCTION_INFO_ABI_V1 1u
+enum {
+    Py_SOAC_TYPE_STATE_PENDING = 1,
+    Py_SOAC_TYPE_STATE_ADMITTING = 2,
+    Py_SOAC_TYPE_STATE_ENFORCED = 3,
+    Py_SOAC_TYPE_STATE_FAILED = 4,
+    Py_SOAC_TYPE_STATE_DYNAMIC = 5,
+};
+typedef struct {
+    uint32_t abi_version;
+    uint32_t struct_size;
+    uint32_t phase;
+    uint32_t permanent_contract_published; /* independent of pending barrier */
+    /* Borrowed; caller's actual type supports these views for this immediate
+     * callback-free use. NULL after terminal/dynamic retirement. */
+    PyObject *owner;
+    PyObject *root_construction;
+} PySoacTypeConstructionInfoV1;
+
+/* 1 = actual native construction state; 0 = ordinary/no state; -1 = invalid.
+ * No allocation/Python callback on a valid query; incoming PyErr preserved.
+ * Out is zeroed before validation. No arbitrary owner/handle restamping. */
+PyAPI_FUNC(int) PyType_GetSoacConstructionInfoV1(
+    PyObject *actual_type, PySoacTypeConstructionInfoV1 *out, size_t out_size);
+
+/* Trusted adapter prepares all semantic/nominal/method requirements first.
+ * Native preparation may allocate; instances remain barred throughout.
+ * expected_commit_final is only an equality assertion against the callback
+ * captured during original PENDING construction. Mismatch rejects before phase
+ * change. Only the recorded callback runs LAST, after native preparation and any
+ * required type-cache notifications, while state is ADMITTING. Success must
+ * neither allocate nor call Python: revalidate the actual final objects,
+ * atomically publish the prepared Rust owner policy, then return 0.
+ * Native verifies the same live state/error condition, publishes ENFORCED
+ * without callback/release, and only then retires temporary metadata.
+ * A failed real admission terminalizes pending state; installed permanent
+ * constraints are never removed. Invalid foreign arguments do not mutate it.
+ */
+PyAPI_FUNC(int) PyType_AdmitSoacPendingV1(
+    PyObject *actual_final_type,
+    PyObject *expected_owner,
+    PyObject *expected_root_construction,
+    const PySoacTypeContractSpecV4 *contract,
+    size_t contract_size,
+    PySoacTypeFinalCommitV4 expected_commit_final);
+
+/* Exact canonical, consumed pending construction HANDLE required. Scalar
+ * terminalization of its unresolved lineage, before callback-capable cleanup.
+ * No original type must be kept alive merely to report failure: the original
+ * may have died while linked provisional types escaped. This tightens an
+ * unresolved barrier, never grants admission or revokes an enforced type.
+ * Preserve incoming PyErr exactly; already FAILED is idempotent. */
+PyAPI_FUNC(int) PyType_FailSoacPendingV1(PyObject *root_construction);
+
+/* Only after native final admission succeeded in this exact lineage; never
+ * the selected final type; no prior own permanent type contract. Keep ordinary
+ * source storage and inherited/per-function permanent restrictions. Publish
+ * dynamic disposition before releasing obsolete metadata; no earlier reopen. */
+PyAPI_FUNC(int) PyType_DisposeSoacProvisionalV1(
+    PyObject *actual_type, PyObject *expected_owner,
+    PyObject *expected_root_construction);
+
+
 PyAPI_FUNC(int) PyType_SealSoacContract(PyObject *, PyObject *);
 PyAPI_FUNC(int) PyType_HasSoacContract(PyObject *);
 PyAPI_FUNC(int) PyType_IsSoacSealed(PyObject *);

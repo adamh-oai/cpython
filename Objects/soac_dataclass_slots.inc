@@ -41,13 +41,17 @@ soac_dataclass_slots_spec_matches(_PySoacDataclassSlotsContext *context,
 {
     PyObject *const *arguments = context->arguments;
     if (spec == NULL || spec->abi_version != Py_SOAC_TYPE_CONTRACT_ABI ||
+        spec->struct_size != sizeof(*spec) ||
+        spec->construction_mode > Py_SOAC_TYPE_CONSTRUCT_PENDING ||
         spec->owner == NULL || spec->owner == context->invocation->class_owner ||
         (context->expected_owner != NULL && spec->owner != context->expected_owner) ||
         spec->namespace_function != NULL || spec->name != arguments[1] ||
         spec->bases != arguments[2] || spec->namespace_dict != arguments[3] ||
         spec->keywords == NULL || !PyDict_CheckExact(spec->keywords) ||
         PyDict_GET_SIZE(spec->keywords) != 0 ||
-        spec->object_slot_fields == NULL || !PyTuple_CheckExact(spec->object_slot_fields)) {
+        (spec->construction_mode == Py_SOAC_TYPE_CONSTRUCT_ENFORCED &&
+         (spec->contract.object_slot_fields == NULL ||
+          !PyTuple_CheckExact(spec->contract.object_slot_fields)))) {
         return _PySOAC_DataclassFailSlots(context,
                                          "replacement handle plan does not match its exact operands");
     }
@@ -80,7 +84,7 @@ PySoac_DataclassMatchesSlotsClass(PyObject *object, PyObject *actual,
     if (((PyWeakReference *)invocation->replacement_weakref)->wr_object != actual) {
         return soac_dataclass_error("dataclass replacement class is no longer live");
     }
-    PyObject *owner = PyType_GetSoacContractOwner(actual);
+    PyObject *owner = _PySOAC_GetTypeConstructionOwner(actual);
     if (owner == NULL && PyErr_Occurred()) {
         return -1;
     }
@@ -154,6 +158,10 @@ _PySOAC_DataclassRecordSlotsHandle(_PySoacDataclassSlotsContext *context,
         return _PySOAC_DataclassFailSlots(context,
                                          "replacement handle birth did not authenticate");
     }
+    if (_PySOAC_LinkPendingTypeHandle(handle, context->arguments[4],
+                                      context->invocation->class_owner) < 0) {
+        return _PySOAC_DataclassFailSlots(context, "replacement pending lineage did not authenticate");
+    }
     context->handle = Py_NewRef(handle);
     return 0;
 }
@@ -182,7 +190,7 @@ _PySOAC_DataclassBindSlotsType(_PySoacDataclassSlotsContext *context,
         context->handle == NULL || owner != context->expected_owner ||
         actual == NULL || !PyType_Check(actual) ||
         Py_TYPE(actual) != &PyType_Type || actual == context->arguments[4] ||
-        PyType_GetSoacContractOwner(actual) != owner ||
+        _PySOAC_GetTypeConstructionOwner(actual) != owner ||
         soac_dataclass_slots_context_live(context) < 0) {
         return _PySOAC_DataclassFailSlots(context,
                                          "replacement type pre-Ready binding did not authenticate");
@@ -198,13 +206,13 @@ _PySOAC_DataclassBindSlotsType(_PySoacDataclassSlotsContext *context,
         }
         return 0;
     }
-    /* Pinned GIL build: the exact builtin weakref allocator only schedules
-     * GC via _PyObject_GC_TRACK -> _Py_TriggerGC; it does not run Python or
-     * collect synchronously. NULL callback and native list insertion keep
-     * the actual type unexposed until its allocation-free owner bind. */
+    /* The actual replacement is already protected: ENFORCED keeps its
+     * existing pre-Ready policy; PENDING has its preallocated barrier. The
+     * callback-free weak witness adds no type primary. Revalidate afterward,
+     * independently of whether this allocation runs a collector. */
     PyObject *weak = PyWeakref_NewRef(actual, NULL);
     if (weak == NULL || soac_dataclass_slots_context_live(context) < 0 ||
-        PyType_GetSoacContractOwner(actual) != owner) {
+        _PySOAC_GetTypeConstructionOwner(actual) != owner) {
         _PySOAC_DataclassFailSlots(context,
                                    "replacement type changed during weak binding");
         PyObject *exception = PyErr_GetRaisedException();
@@ -259,7 +267,7 @@ soac_dataclass_new_slots_bridge(_PyInterpreterFrame *parent, PyObject *builtin,
     result = _PySOAC_TypeFromDataclassSlotsHandle(&context, handle);
     if (result == NULL ||
         result != (PyObject *)invocation->replacement_type ||
-        PyType_GetSoacContractOwner(result) != context.expected_owner ||
+        _PySOAC_GetTypeConstructionOwner(result) != context.expected_owner ||
         soac_dataclass_slots_context_live(&context) < 0) {
         goto error;
     }

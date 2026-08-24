@@ -27,6 +27,8 @@ typedef struct {
     PyObject *replacement_weakref; /* Callback-free, prevents raw-address ABA. */
     int slots_started;
     int member_pending;
+    PyObject *pending_type_root;  /* existing native lineage metadata only */
+    int pending_scope_active;
 } SoacDataclassInvocation;
 
 typedef enum {
@@ -117,11 +119,22 @@ soac_dataclass_expire(SoacDataclassInvocation *invocation,
     invocation->class_owner = NULL;
     invocation->replacement_owner = NULL;
     invocation->replacement_weakref = NULL;
+    PyObject *pending_root = invocation->pending_type_root;
+    invocation->pending_type_root = NULL;
+    if (invocation->pending_scope_active) {
+        invocation->pending_scope_active = 0;
+        _PySOAC_EndPendingTypeAdapter(pending_root, phase != SOAC_DC_COMPLETE);
+    }
+    else if (pending_root != NULL && phase != SOAC_DC_COMPLETE) {
+        /* Body error/abandonment terminalizes before releasing active owners. */
+        (void)PyType_FailSoacPendingV1(pending_root);
+    }
     PyObject *exception = PyErr_GetRaisedException();
     Py_XDECREF(owner);
     Py_XDECREF(class_owner);
     Py_XDECREF(replacement_owner);
     Py_XDECREF(replacement_weakref);
+    Py_XDECREF(pending_root);
     PyErr_SetRaisedException(exception);
 }
 
@@ -172,6 +185,7 @@ soac_dataclass_traverse(SoacDataclassInvocation *invocation,
     Py_VISIT(invocation->class_owner);
     Py_VISIT(invocation->replacement_owner);
     Py_VISIT(invocation->replacement_weakref);
+    Py_VISIT(invocation->pending_type_root);
     return 0;
 }
 
@@ -336,6 +350,8 @@ PySoac_NewDataclassInvocation(PyObject *owner)
     invocation->replacement_weakref = NULL;
     invocation->slots_started = 0;
     invocation->member_pending = 0;
+    invocation->pending_type_root = NULL;
+    invocation->pending_scope_active = 0;
     PyObject_GC_Track(invocation);
     return (PyObject *)invocation;
 }
@@ -385,9 +401,15 @@ PySoac_DataclassBindClass(PyObject *object, PyObject *actual_type,
     if ((invocation->phase != SOAC_DC_NEW &&
          invocation->phase != SOAC_DC_FACTORY_READY) ||
         actual_type == NULL || !PyType_Check(actual_type) || expected_owner == NULL ||
-        PyType_GetSoacContractOwner(actual_type) != expected_owner) {
+        _PySOAC_GetTypeConstructionOwner(actual_type) != expected_owner) {
         return soac_dataclass_fail(invocation, "dataclass class binding is not authentic");
     }
+    PyObject *pending_root = NULL;
+    if (_PySOAC_BeginPendingTypeAdapter(actual_type, &pending_root) < 0) {
+        return soac_dataclass_fail(invocation, "pending dataclass interval is unavailable");
+    }
+    invocation->pending_type_root = pending_root;
+    invocation->pending_scope_active = pending_root != NULL;
     invocation->class_owner = Py_NewRef(expected_owner);
     invocation->actual_type = (PyTypeObject *)actual_type;
     invocation->phase = SOAC_DC_CLASS_BOUND;
@@ -692,6 +714,10 @@ PySoac_DataclassVectorcall(PyObject *object, unsigned int stage,
     }
     invocation->phase = stage == Py_SOAC_DATACLASS_ROOT_FACTORY
         ? SOAC_DC_FACTORY_READY : SOAC_DC_APPLY_RETURNED;
+    if (stage == Py_SOAC_DATACLASS_ROOT_APPLY && invocation->pending_scope_active) {
+        invocation->pending_scope_active = 0;
+        _PySOAC_EndPendingTypeAdapter(invocation->pending_type_root, 0);
+    }
     return result;
 }
 
@@ -1015,7 +1041,7 @@ soac_dataclass_validate_member(SoacDataclassInvocation *invocation,
         actual_type != (PyObject *)invocation->actual_type ||
         class_owner == NULL || class_owner != invocation->class_owner ||
         !PyType_Check(actual_type) ||
-        PyType_GetSoacContractOwner(actual_type) != class_owner ||
+        _PySOAC_GetTypeConstructionOwner(actual_type) != class_owner ||
         name == NULL || !PyUnicode_CheckExact(name) ||
         function == NULL || !PyFunction_Check(function) ||
         record == NULL || record->function != (PyFunctionObject *)function ||

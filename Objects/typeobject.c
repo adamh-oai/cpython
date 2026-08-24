@@ -1471,6 +1471,7 @@ static PyMemberDef type_members[] = {
 static int
 check_set_special_type_attr(PyTypeObject *type, PyObject *value, const char *name)
 {
+    if (_PySOAC_CheckPendingTypeWrite(type) < 0) return 0;
     if (type->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
         PyObject *attribute = PyUnicode_FromString(name);
         if (attribute == NULL) {
@@ -2453,6 +2454,7 @@ static PyObject *
 type_call(PyObject *self, PyObject *args, PyObject *kwds)
 {
     PyTypeObject *type = PyTypeObject_CAST(self);
+    if (_PySOAC_CheckTypeAllocation(type) < 0) return NULL;
     PyObject *obj;
     PyThreadState *tstate = _PyThreadState_GET();
 
@@ -2518,6 +2520,7 @@ type_call(PyObject *self, PyObject *args, PyObject *kwds)
 PyObject *
 _PyType_NewManagedObject(PyTypeObject *type)
 {
+    if (_PySOAC_CheckTypeAllocation(type) < 0) return NULL;
     assert(type->tp_flags & Py_TPFLAGS_INLINE_VALUES);
     assert(_PyType_IS_GC(type));
     assert(type->tp_new == PyBaseObject_Type.tp_new);
@@ -2525,7 +2528,7 @@ _PyType_NewManagedObject(PyTypeObject *type)
     assert(type->tp_itemsize == 0);
     PyObject *obj = PyType_GenericAlloc(type, 0);
     if (obj == NULL) {
-        return PyErr_NoMemory();
+        return NULL;
     }
     return obj;
 }
@@ -2533,6 +2536,7 @@ _PyType_NewManagedObject(PyTypeObject *type)
 PyObject *
 _PyType_AllocNoTrack(PyTypeObject *type, Py_ssize_t nitems)
 {
+    if (_PySOAC_CheckTypeAllocation(type) < 0) return NULL;
     PyObject *obj;
     /* The +1 on nitems is needed for most types but not all. We could save a
      * bit of space by allocating one less item in certain cases, depending on
@@ -2606,6 +2610,7 @@ PyType_GenericAlloc(PyTypeObject *type, Py_ssize_t nitems)
 PyObject *
 PyType_GenericNew(PyTypeObject *type, PyObject *args, PyObject *kwds)
 {
+    if (_PySOAC_CheckTypeAllocation(type) < 0) return NULL;
     return type->tp_alloc(type, 0);
 }
 
@@ -3751,6 +3756,7 @@ mro_internal(PyTypeObject *type, int initial, PyObject **p_old_mro)
 static PyTypeObject *
 find_best_base(PyObject *bases)
 {
+    if (_PySOAC_CheckPendingBases(bases) < 0) return NULL;
     Py_ssize_t i, n;
     PyTypeObject *base, *winner, *candidate;
 
@@ -4466,10 +4472,17 @@ type_new_alloc(type_new_ctx *ctx)
 {
     PyTypeObject *metatype = ctx->metatype;
     PyTypeObject *type;
+    SoacConstructionHandle *handle = (SoacConstructionHandle *)ctx->soac_handle;
+    SoacTypeContract *pending_state = soac_take_pending_state(handle);
+    if (handle != NULL &&
+        handle->spec.construction_mode == Py_SOAC_TYPE_CONSTRUCT_PENDING &&
+        pending_state == NULL) return NULL;
 
     // Allocate the type object
     type = (PyTypeObject *)metatype->tp_alloc(metatype, ctx->nslot);
     if (type == NULL) {
+        soac_fail_construction(handle);
+        Py_XDECREF(pending_state);
         return NULL;
     }
     PyHeapTypeObject *et = (PyHeapTypeObject *)type;
@@ -4507,6 +4520,12 @@ type_new_alloc(type_new_ctx *ctx)
     et->unique_id = _PyObject_AssignUniqueId((PyObject *)et);
 #endif
 
+    soac_attach_pending_type(type, handle, pending_state);
+    if (soac_pending_constructor_live(type) < 0) {
+        _PySOAC_FailPendingType(type);
+        Py_DECREF(type);
+        return NULL;
+    }
     return type;
 }
 
@@ -4910,7 +4929,8 @@ type_new_set_attrs(const type_new_ctx *ctx, PyTypeObject *type)
 
     type_new_set_slots(ctx, type);
 
-    if (type_new_set_classcell(type, dict) < 0) {
+    if (type_new_set_classcell(type, dict) < 0 ||
+        soac_pending_constructor_live(type) < 0) {
         return -1;
     }
     if (type_new_set_classdictcell(dict) < 0) {
@@ -4985,6 +5005,12 @@ type_new_init(type_new_ctx *ctx)
         Py_CLEAR(ctx->slots);
     }
 
+    if (soac_bind_pending_type(type, (SoacConstructionHandle *)ctx->soac_handle,
+                               ctx->soac_dataclass_slots) < 0) {
+        _PySOAC_FailPendingType(type);
+        Py_DECREF(type);  /* type now owns dict/slots */
+        return NULL;
+    }
     return type;
 
 error:
@@ -5012,10 +5038,14 @@ type_new_impl(type_new_ctx *ctx)
         goto error;
     }
 
+    if (soac_pending_constructor_live(type) < 0) goto error;
+
     /* Initialize the rest */
     if (PyType_Ready(type) < 0) {
         goto error;
     }
+
+    if (soac_pending_constructor_live(type) < 0) goto error;
 
     // Put the proper slots in place
     fixup_slot_dispatchers(type);
@@ -5039,6 +5069,7 @@ type_new_impl(type_new_ctx *ctx)
         goto error;
     }
 
+    if (soac_pending_constructor_live(type) < 0) goto error;
     assert(_PyType_CheckConsistency(type));
 #if defined(Py_GIL_DISABLED) && defined(Py_DEBUG) && SIZEOF_VOID_P > 4
     // After this point, other threads can potentally use this type.
@@ -5048,6 +5079,7 @@ type_new_impl(type_new_ctx *ctx)
     return (PyObject *)type;
 
 error:
+    _PySOAC_FailPendingType(type);
     Py_DECREF(type);
     return NULL;
 }
@@ -5056,6 +5088,8 @@ error:
 static int
 type_new_get_bases(type_new_ctx *ctx, PyObject **type)
 {
+    /* Before metaclass winner delegation or base Ready callbacks. */
+    if (_PySOAC_CheckPendingBases(ctx->bases) < 0) return -1;
     Py_ssize_t nbases = PyTuple_GET_SIZE(ctx->bases);
     if (nbases == 0) {
         // Adjust for empty tuple bases
@@ -6816,7 +6850,7 @@ PyType_SetSoacDataclassMember(PyObject *invocation, PyObject *actual_type,
                               PyObject *name, PyObject *function)
 {
     PyObject *owner = actual_type != NULL && PyType_Check(actual_type)
-        ? PyType_GetSoacContractOwner(actual_type) : NULL;
+        ? _PySOAC_GetTypeConstructionOwner(actual_type) : NULL;
     PyObject *operation = _PySOAC_DataclassBeginMember(
         invocation, actual_type, owner, name, function);
     if (operation == NULL) {
@@ -7423,6 +7457,7 @@ object_init(PyObject *self, PyObject *args, PyObject *kwds)
 static PyObject *
 object_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
 {
+    if (_PySOAC_CheckTypeAllocation(type) < 0) return NULL;
     if (excess_args(args, kwds)) {
         if (type->tp_new != object_new) {
             PyErr_SetString(PyExc_TypeError,
@@ -7839,6 +7874,9 @@ object_set_class(PyObject *self, PyObject *value, void *closure)
         return -1;
     }
     PyTypeObject *newto = (PyTypeObject *)value;
+    /* Pre-audit refusal, plus the existing world-stopped actual-type check
+     * after audit callbacks. Layout compatibility never bypasses admission. */
+    if (_PySOAC_CheckClassAssignment(Py_TYPE(self), newto) < 0) return -1;
 
     if (PySys_Audit("object.__setattr__", "OsO",
                     self, "__class__", value) < 0) {
@@ -9563,6 +9601,7 @@ static int
 type_ready(PyTypeObject *type, int initial)
 {
     ASSERT_TYPE_LOCK_HELD();
+    if (_PySOAC_CheckPendingBases(lookup_tp_bases(type)) < 0) return -1;
 
     _PyObject_ASSERT((PyObject *)type, !is_readying(type));
     start_readying(type);
@@ -10475,6 +10514,7 @@ tp_new_wrapper(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObject
         return NULL;
     }
     PyTypeObject *subtype = (PyTypeObject *)arg0;
+    if (_PySOAC_CheckTypeAllocation(subtype) < 0) return NULL;
 
     if (!PyType_IsSubtype(subtype, type)) {
         PyErr_Format(PyExc_TypeError,
@@ -11225,6 +11265,7 @@ slot_tp_init(PyObject *self, PyObject *args, PyObject *kwds)
 static PyObject *
 slot_tp_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
 {
+    if (_PySOAC_CheckTypeAllocation(type) < 0) return NULL;
     PyThreadState *tstate = _PyThreadState_GET();
     PyObject *result;
 
@@ -12316,6 +12357,7 @@ type_new_set_names(PyTypeObject *type)
         }
 
         PyObject *res = PyObject_CallFunctionObjArgs(set_name, type, key, NULL);
+        if (res == NULL) _PySOAC_FailPendingType(type);
         Py_DECREF(set_name);
 
         if (res == NULL) {
@@ -12327,6 +12369,7 @@ type_new_set_names(PyTypeObject *type)
         }
         else {
             Py_DECREF(res);
+            if (soac_pending_constructor_live(type) < 0) goto error;
         }
     }
 
@@ -12334,6 +12377,7 @@ type_new_set_names(PyTypeObject *type)
     return 0;
 
 error:
+    _PySOAC_FailPendingType(type);
     Py_DECREF(names_to_set);
     return -1;
 }
@@ -12357,13 +12401,14 @@ type_new_init_subclass(PyTypeObject *type, PyObject *kwds)
     }
 
     PyObject *result = PyObject_VectorcallDict(func, NULL, 0, kwds);
+    if (result == NULL) _PySOAC_FailPendingType(type);
     Py_DECREF(func);
     if (result == NULL) {
         return -1;
     }
 
     Py_DECREF(result);
-    return 0;
+    return soac_pending_constructor_live(type);
 }
 
 

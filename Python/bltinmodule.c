@@ -130,6 +130,7 @@ PySoac_PrepareClass(PyObject *name, PyObject *orig_bases, PyObject *keywords)
         Py_INCREF(bases);
     }
     PyObject *meta = NULL, *ns = NULL, *prep = NULL, *result = NULL;
+    if (_PySOAC_CheckPendingBases(bases) < 0) goto done;
     if (PyDict_Pop(mkw, &_Py_ID(metaclass), &meta) < 0) {
         goto done;
     }
@@ -219,10 +220,12 @@ int
 PySoac_FinishClass(PyObject *name, PyObject *cell, PyObject *cls)
 {
     if (!PyUnicode_Check(name)) {
+        if (PyType_Check(cls)) _PySOAC_FailPendingType((PyTypeObject *)cls);
         PyErr_SetString(PyExc_TypeError, "class name must be a string");
         return -1;
     }
     if (cell != Py_None && !PyCell_Check(cell)) {
+        if (PyType_Check(cls)) _PySOAC_FailPendingType((PyTypeObject *)cls);
         PyErr_SetString(PyExc_TypeError, "class body result must be None or an actual cell");
         return -1;
     }
@@ -231,6 +234,7 @@ PySoac_FinishClass(PyObject *name, PyObject *cell, PyObject *cls)
     }
     PyObject *cell_cls = PyCell_GetRef((PyCellObject *)cell);
     if (cell_cls != cls) {
+        _PySOAC_FailPendingType((PyTypeObject *)cls);
         if (cell_cls == NULL) {
             PyErr_Format(PyExc_RuntimeError,
                          "__class__ not set defining %.200R as %.200R. "
@@ -310,6 +314,8 @@ builtin_build_class_with_source(
         Py_DECREF(orig_bases);
         return NULL;
     }
+
+    if (_PySOAC_CheckPendingBases(bases) < 0) goto error;
 
     if (kwnames == NULL) {
         meta = NULL;
@@ -434,6 +440,7 @@ builtin_build_class_with_source(
         if (cls != NULL && PyType_Check(cls) && PyCell_Check(cell)) {
             PyObject *cell_cls = PyCell_GetRef((PyCellObject *)cell);
             if (cell_cls != cls) {
+                _PySOAC_FailPendingType((PyTypeObject *)cls);
                 if (cell_cls == NULL) {
                     const char *msg =
                         "__class__ not set defining %.200R as %.200R. "

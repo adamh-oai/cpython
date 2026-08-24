@@ -534,6 +534,7 @@ PyObject_Init(PyObject *op, PyTypeObject *tp)
         return PyErr_NoMemory();
     }
 
+    if (_PySOAC_CheckTypeAllocation(tp) < 0) return NULL;
     _PyObject_Init(op, tp);
     return op;
 }
@@ -545,6 +546,7 @@ PyObject_InitVar(PyVarObject *op, PyTypeObject *tp, Py_ssize_t size)
         return (PyVarObject *) PyErr_NoMemory();
     }
 
+    if (_PySOAC_CheckTypeAllocation(tp) < 0) return NULL;
     _PyObject_InitVar(op, tp, size);
     return op;
 }
@@ -552,6 +554,7 @@ PyObject_InitVar(PyVarObject *op, PyTypeObject *tp, Py_ssize_t size)
 PyObject *
 _PyObject_New(PyTypeObject *tp)
 {
+    if (_PySOAC_CheckTypeAllocation(tp) < 0) return NULL;
     PyObject *op = (PyObject *) PyObject_Malloc(_PyObject_SIZE(tp));
     if (op == NULL) {
         return PyErr_NoMemory();
@@ -563,6 +566,7 @@ _PyObject_New(PyTypeObject *tp)
 PyVarObject *
 _PyObject_NewVar(PyTypeObject *tp, Py_ssize_t nitems)
 {
+    if (_PySOAC_CheckTypeAllocation(tp) < 0) return NULL;
     PyVarObject *op;
     const size_t size = _PyObject_VAR_SIZE(tp, nitems);
     op = (PyVarObject *) PyObject_Malloc(size);
