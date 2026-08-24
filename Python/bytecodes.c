@@ -5036,6 +5036,14 @@ dummy_func(
 
         inst(SET_FUNCTION_ATTRIBUTE, (attr_st, func_in -- func_out)) {
             PyObject *func = PyStackRef_AsPyObjectBorrow(func_in);
+            if (((PyFunctionObject *)func)->func_soac_strict_id != 0) {
+                PyObject *exception = PySoac_GetStrictMutationError();
+                if (exception != NULL) {
+                    PyErr_SetString(exception, "cannot replace sealed strict function metadata");
+                }
+                DECREF_INPUTS();
+                ERROR_IF(true);
+            }
             PyObject *attr = PyStackRef_AsPyObjectSteal(attr_st);
             func_out = func_in;
             DEAD(func_in);
@@ -5827,6 +5835,17 @@ dummy_func(
         spilled label(start_frame) {
             int too_deep = _Py_EnterRecursivePy(tstate);
             if (too_deep) {
+                goto exit_unwind;
+            }
+            /* Includes inlined CALL/SEND entries that do not re-enter the C
+             * evaluator. A future bit or original authenticated code is not
+             * a native execution permit. SOAC executes through its own entry. */
+            if (_PyFrame_GetCode(frame)->co_flags & CO_FUTURE_STRICT) {
+                PyObject *exception = PySoac_GetStrictRuntimeUnavailableError();
+                if (exception != NULL) {
+                    _PyErr_SetString(tstate, exception,
+                                    "strict code execution requires an authenticated runtime entry");
+                }
                 goto exit_unwind;
             }
             next_instr = frame->instr_ptr;

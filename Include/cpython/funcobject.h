@@ -56,6 +56,8 @@ typedef struct {
      *     annotations
      *     vectorcall function pointer */
     uint32_t func_version;
+    /* Permanent semantic identity, independent of replaceable JIT metadata. */
+    uint64_t func_soac_strict_id;
 
     /* Invariant:
      *     func_closure contains the bindings for func_code->co_freevars, so
@@ -86,6 +88,8 @@ PyAPI_FUNC(int) PyFunction_SetSoacMetadata(
 );
 PyAPI_FUNC(void *) PyFunction_GetSoacMetadata(PyObject *);
 PyAPI_FUNC(uint64_t) PyFunction_GetSoacFunctionId(PyObject *);
+PyAPI_FUNC(int) PyFunction_SealSoacStrict(PyObject *, uint64_t identity);
+PyAPI_FUNC(uint64_t) PyFunction_GetSoacStrictId(PyObject *);
 PyAPI_FUNC(PyObject *) PyFunction_GetKwDefaults(PyObject *);
 PyAPI_FUNC(int) PyFunction_SetKwDefaults(PyObject *, PyObject *);
 PyAPI_FUNC(PyObject *) PyFunction_GetClosure(PyObject *);

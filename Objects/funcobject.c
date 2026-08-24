@@ -84,6 +84,87 @@ func_clear_soac_metadata(PyFunctionObject *op)
     }
 }
 
+static void
+func_soac_mutation_error(const char *message)
+{
+    PyObject *exception = PySoac_GetStrictMutationError();
+    if (exception != NULL) {
+        PyErr_SetString(exception, message);
+    }
+}
+
+static int
+func_check_soac_mutable(PyFunctionObject *func)
+{
+    if (func->func_soac_strict_id != 0) {
+        func_soac_mutation_error("cannot replace sealed strict function metadata");
+        return -1;
+    }
+    return 0;
+}
+
+static int
+func_soac_kwdefaults_policy(PyObject *owner, PyObject *dict, PyObject *key,
+                            PyObject *value, int operation,
+                            PyObject *provenance)
+{
+    if (operation == PyDict_SOAC_VALIDATE_INITIAL ||
+        operation == PyDict_SOAC_TERMINAL_TEARDOWN) {
+        return 0;
+    }
+    func_soac_mutation_error("cannot mutate sealed strict function keyword defaults");
+    return -1;
+}
+
+int
+PyFunction_SealSoacStrict(PyObject *object, uint64_t identity)
+{
+    if (!PyFunction_Check(object) || identity == 0) {
+        PyErr_SetString(PyExc_TypeError,
+                        "strict function sealing requires a function and nonzero identity");
+        return -1;
+    }
+    PyFunctionObject *func = (PyFunctionObject *)object;
+    if (func->func_soac_strict_id != 0) {
+        if (func->func_soac_strict_id == identity) {
+            return 0;
+        }
+        func_soac_mutation_error("strict function identity is already sealed");
+        return -1;
+    }
+    if (func->func_kwdefaults != NULL) {
+        PyObject *defaults = func->func_kwdefaults;
+        if (!PyDict_CheckExact(defaults)) {
+            PyErr_SetString(PyExc_TypeError,
+                            "strict keyword defaults require an exact dictionary");
+            return -1;
+        }
+        /* No function -> dictionary -> function cycle. The immutable owner and
+         * exact native policy predicate also permit legitimate shared defaults. */
+        if (!PyDict_MatchesSoacPolicy(defaults, Py_None,
+                                     func_soac_kwdefaults_policy, 0) &&
+            PyDict_SetSoacPolicy(defaults, Py_None,
+                                 func_soac_kwdefaults_policy, 0) < 0) {
+            return -1;
+        }
+        if (PyDict_SealSoacNamespace(defaults) < 0) {
+            return -1;
+        }
+    }
+    func->func_soac_strict_id = identity;
+    return 0;
+}
+
+uint64_t
+PyFunction_GetSoacStrictId(PyObject *object)
+{
+    if (!PyFunction_Check(object)) {
+        PyErr_BadInternalCall();
+        return 0;
+    }
+    return ((PyFunctionObject *)object)->func_soac_strict_id;
+}
+
 int
 PyFunction_AddWatcher(PyFunction_WatchCallback callback)
 {
@@ -154,6 +235,7 @@ _PyFunction_FromConstructor(PyFrameConstructor *constr)
     op->func_soac_metadata_destructor = NULL;
     op->func_soac_function_id = 0;
     op->func_version = FUNC_VERSION_UNSET;
+    op->func_soac_strict_id = 0;
     // NOTE: functions created via FrameConstructor do not use deferred
     // reference counting because they are typically not part of cycles
     // nor accessed by multiple threads.
@@ -235,6 +317,7 @@ PyFunction_NewWithQualName(PyObject *code, PyObject *globals, PyObject *qualname
     op->func_soac_metadata_destructor = NULL;
     op->func_soac_function_id = 0;
     op->func_version = FUNC_VERSION_UNSET;
+    op->func_soac_strict_id = 0;
     if (((code_obj->co_flags & CO_NESTED) == 0) ||
         (code_obj->co_flags & CO_METHOD)) {
         // Use deferred reference counting for top-level functions, but not
@@ -477,6 +560,9 @@ PyFunction_SetDefaults(PyObject *op, PyObject *defaults)
         PyErr_BadInternalCall();
         return -1;
     }
+    if (func_check_soac_mutable((PyFunctionObject *)op) < 0) {
+        return -1;
+    }
     if (defaults == Py_None)
         defaults = NULL;
     else if (defaults && PyTuple_Check(defaults)) {
@@ -552,6 +638,9 @@ PyFunction_SetKwDefaults(PyObject *op, PyObject *defaults)
         PyErr_BadInternalCall();
         return -1;
     }
+    if (func_check_soac_mutable((PyFunctionObject *)op) < 0) {
+        return -1;
+    }
     if (defaults == Py_None)
         defaults = NULL;
     else if (defaults && PyDict_Check(defaults)) {
@@ -584,6 +673,9 @@ PyFunction_SetClosure(PyObject *op, PyObject *closure)
 {
     if (!PyFunction_Check(op)) {
         PyErr_BadInternalCall();
+        return -1;
+    }
+    if (func_check_soac_mutable((PyFunctionObject *)op) < 0) {
         return -1;
     }
     if (closure == Py_None)
@@ -666,6 +758,9 @@ PyFunction_SetAnnotations(PyObject *op, PyObject *annotations)
         PyErr_BadInternalCall();
         return -1;
     }
+    if (func_check_soac_mutable((PyFunctionObject *)op) < 0) {
+        return -1;
+    }
     if (annotations == Py_None)
         annotations = NULL;
     else if (annotations && PyDict_Check(annotations)) {
@@ -717,6 +812,9 @@ static int
 func_set_code(PyObject *self, PyObject *value, void *Py_UNUSED(ignored))
 {
     PyFunctionObject *op = _PyFunction_CAST(self);
+    if (func_check_soac_mutable(op) < 0) {
+        return -1;
+    }
 
     /* Not legal to del f.func_code or to set it to anything
      * other than a code object. */
@@ -826,6 +924,9 @@ func_set_defaults(PyObject *self, PyObject *value, void *Py_UNUSED(ignored))
     /* Legal to del f.func_defaults.
      * Can only set func_defaults to NULL or a tuple. */
     PyFunctionObject *op = _PyFunction_CAST(self);
+    if (func_check_soac_mutable(op) < 0) {
+        return -1;
+    }
     if (value == Py_None)
         value = NULL;
     if (value != NULL && !PyTuple_Check(value)) {
@@ -867,6 +968,9 @@ static int
 func_set_kwdefaults(PyObject *self, PyObject *value, void *Py_UNUSED(ignored))
 {
     PyFunctionObject *op = _PyFunction_CAST(self);
+    if (func_check_soac_mutable(op) < 0) {
+        return -1;
+    }
     if (value == Py_None)
         value = NULL;
     /* Legal to del f.func_kwdefaults.
@@ -920,6 +1024,9 @@ static int
 function___annotate___set_impl(PyFunctionObject *self, PyObject *value)
 /*[clinic end generated code: output=05b7dfc07ada66cd input=eb6225e358d97448]*/
 {
+    if (func_check_soac_mutable(self) < 0) {
+        return -1;
+    }
     if (value == NULL) {
         PyErr_SetString(PyExc_TypeError,
             "__annotate__ cannot be deleted");
@@ -974,6 +1081,9 @@ static int
 function___annotations___set_impl(PyFunctionObject *self, PyObject *value)
 /*[clinic end generated code: output=a61795d4a95eede4 input=5302641f686f0463]*/
 {
+    if (func_check_soac_mutable(self) < 0) {
+        return -1;
+    }
     if (value == Py_None)
         value = NULL;
     /* Legal to del f.func_annotations.
@@ -1019,6 +1129,9 @@ static int
 function___type_params___set_impl(PyFunctionObject *self, PyObject *value)
 /*[clinic end generated code: output=038b4cda220e56fb input=3862fbd4db2b70e8]*/
 {
+    if (func_check_soac_mutable(self) < 0) {
+        return -1;
+    }
     /* Not legal to del f.__type_params__ or to set it to anything
      * other than a tuple object. */
     if (value == NULL || !PyTuple_Check(value)) {
@@ -1037,6 +1150,9 @@ _Py_set_function_type_params(PyThreadState *Py_UNUSED(ignored), PyObject *func,
     assert(PyFunction_Check(func));
     assert(PyTuple_Check(type_params));
     PyFunctionObject *f = (PyFunctionObject *)func;
+    if (func_check_soac_mutable(f) < 0) {
+        return NULL;
+    }
     Py_XSETREF(f->func_typeparams, Py_NewRef(type_params));
     return Py_NewRef(func);
 }

@@ -107,6 +107,8 @@ typedef struct {
        Type is a void* to keep the format private in codeobject.c to force     \
        people to go through the proper APIs. */                                \
     void *co_extra;                                                            \
+    /* C-owned source identity; never copied from public flags or CodeType. */ \
+    uint64_t _co_soac_strict_source_id;                                         \
     _PyCode_DEF_THREAD_LOCAL_BYTECODE()                                        \
     char co_code_adaptive[(SIZE)];                                             \
 }
@@ -151,6 +153,11 @@ struct PyCodeObject _PyCode_DEF(1);
 
 /* A function defined in class scope */
 #define CO_METHOD  0x8000000
+
+/* Language policy only. This flag never grants authenticated execution. */
+#define CO_FUTURE_STRICT 0x10000000
+
+PyAPI_FUNC(uint64_t) PyCode_GetSoacStrictSourceId(PyObject *);
 
 /* This should be defined if a future statement modifies the syntax.
    For example, when a keyword is added.

@@ -526,6 +526,7 @@ init_code(PyCodeObject *co, struct _PyCodeConstructor *con)
     _PyUnicode_InternMortal(interp, &co->co_name);
     _PyUnicode_InternMortal(interp, &co->co_qualname);
     co->co_flags = con->flags;
+    co->_co_soac_strict_source_id = 0;
 
     co->co_firstlineno = con->firstlineno;
     co->co_linetable = Py_NewRef(con->linetable);
@@ -2843,6 +2844,10 @@ code_replace_impl(PyCodeObject *self, int co_argcount,
         co_freevars = freevars;
     }
 
+    /* A Python-visible copy cannot remove the original execution restriction
+     * or inherit its native compiler provenance. The constructor resets the
+     * private source identity even when every public field is unchanged. */
+    co_flags |= self->co_flags & CO_FUTURE_STRICT;
     co = PyCode_NewWithPosOnlyArgs(
         co_argcount, co_posonlyargcount, co_kwonlyargcount, co_nlocals,
         co_stacksize, co_flags, co_code, co_consts, co_names,
@@ -2856,6 +2861,16 @@ error:
     Py_XDECREF(cellvars);
     Py_XDECREF(freevars);
     return (PyObject *)co;
+}
+
+uint64_t
+PyCode_GetSoacStrictSourceId(PyObject *object)
+{
+    if (!PyCode_Check(object)) {
+        PyErr_BadInternalCall();
+        return 0;
+    }
+    return ((PyCodeObject *)object)->_co_soac_strict_source_id;
 }
 
 /*[clinic input]

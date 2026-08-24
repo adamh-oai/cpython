@@ -43,6 +43,7 @@
 
 #include <locale.h>               // setlocale()
 #include <stdlib.h>               // getenv()
+#include <sys/stat.h>             // fstat(), S_ISREG()
 #ifdef HAVE_UNISTD_H
 #  include <unistd.h>             // isatty()
 #endif
@@ -616,6 +617,148 @@ builtins_dict_watcher(PyDict_WatchEvent event, PyObject *dict, PyObject *key, Py
     return 0;
 }
 
+#define SOAC_STRICT_CONFIG_MAX (16 * 1024 * 1024)
+
+static PyStatus
+soac_capture_strict_config(PyInterpreterState *interp)
+{
+    const wchar_t *path = NULL;
+    const wchar_t *key = L"soac_strict_config";
+    const size_t key_length = wcslen(key);
+    const PyWideStringList *options = &interp->config.xoptions;
+    for (Py_ssize_t index = 0; index < options->length; index++) {
+        const wchar_t *option = options->items[index];
+        if (wcsncmp(option, key, key_length) != 0 ||
+            (option[key_length] != L'=' && option[key_length] != L'\0')) {
+            continue;
+        }
+        if (path != NULL || option[key_length] != L'=' ||
+            option[key_length + 1] == L'\0') {
+            return _PyStatus_ERR("-X soac_strict_config requires one absolute descriptor path");
+        }
+        path = option + key_length + 1;
+    }
+    if (path == NULL) {
+        return _PyStatus_OK();
+    }
+    if (!_Py_isabs(path)) {
+        return _PyStatus_ERR("-X soac_strict_config path must be absolute");
+    }
+
+    /* Open without invoking Python or blocking on a FIFO. Read one regular
+     * file descriptor exactly once; application code cannot replace the
+     * captured bytes by editing this path or sys._xoptions later. */
+#ifdef MS_WINDOWS
+    int descriptor = _wopen(path, _O_RDONLY | _O_BINARY | _O_NOINHERIT);
+    struct _stat info;
+    int valid_file = descriptor >= 0 && _fstat(descriptor, &info) == 0 &&
+                     (info.st_mode & _S_IFMT) == _S_IFREG;
+#else
+    char *encoded_path = _Py_EncodeLocaleRaw(path, NULL);
+    if (encoded_path == NULL) {
+        return _PyStatus_ERR("cannot encode -X soac_strict_config path");
+    }
+    int descriptor = open(encoded_path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    PyMem_RawFree(encoded_path);
+    struct stat info;
+    int valid_file = descriptor >= 0 && fstat(descriptor, &info) == 0 &&
+                     S_ISREG(info.st_mode);
+#endif
+    if (!valid_file || info.st_size <= 0 ||
+        info.st_size > SOAC_STRICT_CONFIG_MAX) {
+        if (descriptor >= 0) {
+            close(descriptor);
+        }
+        return _PyStatus_ERR("-X soac_strict_config must be a readable nonempty regular file of at most 16 MiB");
+    }
+    FILE *stream = fdopen(descriptor, "rb");
+    if (stream == NULL) {
+        close(descriptor);
+        return _PyStatus_ERR("cannot read -X soac_strict_config descriptor");
+    }
+    size_t length = (size_t)info.st_size;
+    char *bytes = PyMem_RawMalloc(length + 1);
+    wchar_t *copied_path = _PyMem_RawWcsdup(path);
+    if (bytes == NULL || copied_path == NULL) {
+        PyMem_RawFree(bytes);
+        PyMem_RawFree(copied_path);
+        fclose(stream);
+        return _PyStatus_NO_MEMORY();
+    }
+    size_t read_length = fread(bytes, 1, length + 1, stream);
+    int read_error = ferror(stream);
+    fclose(stream);
+    if (read_error || read_length != length || memchr(bytes, '\0', length)) {
+        PyMem_RawFree(bytes);
+        PyMem_RawFree(copied_path);
+        return _PyStatus_ERR("-X soac_strict_config descriptor changed while reading or contains invalid framing");
+    }
+    bytes[length] = '\0';
+    interp->soac.strict_config_bytes = bytes;
+    interp->soac.strict_config_length = (Py_ssize_t)length;
+    interp->soac.strict_config_path = copied_path;
+    return _PyStatus_OK();
+}
+
+static PyStatus
+soac_copy_strict_config(PyInterpreterState *destination,
+                        const PyInterpreterState *source)
+{
+    if (source->soac.strict_config_bytes == NULL) {
+        return _PyStatus_OK();
+    }
+    size_t size = (size_t)source->soac.strict_config_length + 1;
+    char *bytes = PyMem_RawMalloc(size);
+    wchar_t *path = _PyMem_RawWcsdup(source->soac.strict_config_path);
+    if (bytes == NULL || path == NULL) {
+        PyMem_RawFree(bytes);
+        PyMem_RawFree(path);
+        return _PyStatus_NO_MEMORY();
+    }
+    memcpy(bytes, source->soac.strict_config_bytes, size);
+    destination->soac.strict_config_bytes = bytes;
+    destination->soac.strict_config_length = source->soac.strict_config_length;
+    destination->soac.strict_config_path = path;
+    return _PyStatus_OK();
+}
+
+int
+PySoac_GetStrictConfig(const char **bytes, Py_ssize_t *length,
+                       const wchar_t **path)
+{
+    if (bytes == NULL || length == NULL || path == NULL) {
+        PyErr_BadInternalCall();
+        return -1;
+    }
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    *bytes = interp->soac.strict_config_bytes;
+    *length = interp->soac.strict_config_length;
+    *path = interp->soac.strict_config_path;
+    return *bytes != NULL;
+}
+
+PyObject *
+PySoac_GetStrictMutationError(void)
+{
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    if (interp->soac.mutation_error == NULL) {
+        interp->soac.mutation_error = PyErr_NewException(
+            "soac.StrictMutationError", PyExc_TypeError, NULL);
+    }
+    return interp->soac.mutation_error;
+}
+
+PyObject *
+PySoac_GetStrictRuntimeUnavailableError(void)
+{
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    if (interp->soac.runtime_unavailable_error == NULL) {
+        interp->soac.runtime_unavailable_error = PyErr_NewException(
+            "soac.StrictRuntimeUnavailableError", PyExc_RuntimeError, NULL);
+    }
+    return interp->soac.runtime_unavailable_error;
+}
+
 static PyStatus
 pycore_create_interpreter(_PyRuntimeState *runtime,
                           const PyConfig *src_config,
@@ -633,6 +776,11 @@ pycore_create_interpreter(_PyRuntimeState *runtime,
     interp->_ready = 1;
 
     status = _PyConfig_Copy(&interp->config, src_config);
+    if (_PyStatus_EXCEPTION(status)) {
+        return status;
+    }
+
+    status = soac_capture_strict_config(interp);
     if (_PyStatus_EXCEPTION(status)) {
         return status;
     }
@@ -934,6 +1082,14 @@ pycore_interp_init(PyThreadState *tstate)
 
     status = pycore_init_builtins(tstate);
     if (_PyStatus_EXCEPTION(status)) {
+        goto done;
+    }
+
+    /* Establish exact exception identities before application code or worker
+     * threads can race a lazy first use. No descriptor file is read here. */
+    if (PySoac_GetStrictMutationError() == NULL ||
+        PySoac_GetStrictRuntimeUnavailableError() == NULL) {
+        status = _PyStatus_ERR("cannot initialize strict runtime exceptions");
         goto done;
     }
 
@@ -2471,6 +2627,15 @@ new_interpreter(PyThreadState **tstate_p,
 
     /* This does not require that the GIL be held. */
     status = _PyConfig_Copy(&interp->config, src_config);
+    if (_PyStatus_EXCEPTION(status)) {
+        goto error;
+    }
+
+    /* Subinterpreters inherit the launch snapshot, never a later file read or
+     * a mutable replacement of the public configuration dictionary. */
+    PyInterpreterState *soac_source = save_tstate != NULL
+        ? save_tstate->interp : _PyInterpreterState_Main();
+    status = soac_copy_strict_config(interp, soac_source);
     if (_PyStatus_EXCEPTION(status)) {
         goto error;
     }

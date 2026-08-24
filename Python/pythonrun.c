@@ -1514,6 +1514,66 @@ error:
     return NULL;
 }
 
+static void
+soac_mark_verified_code_tree(PyCodeObject *code, uint64_t identity)
+{
+    /* Only called on a freshly compiled, privately owned source tree. No
+     * callback or allocation occurs while publishing these immutable IDs. */
+    code->_co_soac_strict_source_id = identity;
+    for (Py_ssize_t index = 0; index < PyTuple_GET_SIZE(code->co_consts); index++) {
+        PyObject *constant = PyTuple_GET_ITEM(code->co_consts, index);
+        if (PyCode_Check(constant)) {
+            soac_mark_verified_code_tree((PyCodeObject *)constant, identity);
+        }
+    }
+}
+
+PyObject *
+PySoac_CompileVerifiedSource(const char *source, Py_ssize_t length,
+                             PyObject *filename, int optimize)
+{
+    if (source == NULL || length < 0 || length == PY_SSIZE_T_MAX ||
+        memchr(source, '\0', (size_t)length) != NULL) {
+        PyErr_SetString(PyExc_ValueError, "invalid authenticated strict source bytes");
+        return NULL;
+    }
+    char *terminated = PyMem_Malloc((size_t)length + 1);
+    if (terminated == NULL) {
+        return PyErr_NoMemory();
+    }
+    memcpy(terminated, source, (size_t)length);
+    terminated[length] = '\0';
+    /* Like an import, this entrypoint never inherits caller future flags. */
+    PyCompilerFlags flags = _PyCompilerFlags_INIT;
+    PyObject *result = Py_CompileStringObject(terminated, filename,
+                                             Py_file_input, &flags, optimize);
+    PyMem_Free(terminated);
+    if (result == NULL) {
+        return NULL;
+    }
+    PyCodeObject *code = (PyCodeObject *)result;
+    if (!(code->co_flags & CO_FUTURE_STRICT)) {
+        Py_DECREF(result);
+        PyErr_SetString(PyExc_ValueError,
+                        "authenticated strict source must explicitly opt in");
+        return NULL;
+    }
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    FT_MUTEX_LOCK(&interp->func_state.mutex);
+    uint64_t identity = interp->soac.source_counter;
+    if (identity != UINT64_MAX) {
+        identity = ++interp->soac.source_counter;
+    }
+    FT_MUTEX_UNLOCK(&interp->func_state.mutex);
+    if (identity == UINT64_MAX) {
+        Py_DECREF(result);
+        PyErr_SetString(PyExc_OverflowError, "strict source identity exhausted");
+        return NULL;
+    }
+    soac_mark_verified_code_tree(code, identity);
+    return result;
+}
+
 PyObject *
 Py_CompileStringObject(const char *str, PyObject *filename, int start,
                        PyCompilerFlags *flags, int optimize)

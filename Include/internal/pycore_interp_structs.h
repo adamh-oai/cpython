@@ -879,6 +879,15 @@ struct _is {
     struct codecs_state codecs;
 
     PyConfig config;
+    struct {
+        /* Captured before importlib/site; reconfiguration never replaces it. */
+        char *strict_config_bytes;
+        Py_ssize_t strict_config_length;
+        wchar_t *strict_config_path;
+        uint64_t source_counter;
+        PyObject *mutation_error;
+        PyObject *runtime_unavailable_error;
+    } soac;
     unsigned long feature_flags;
 
     PyObject *dict;  /* Stores per-interpreter state */

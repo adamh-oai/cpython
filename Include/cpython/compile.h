@@ -6,7 +6,8 @@
 #define PyCF_MASK (CO_FUTURE_DIVISION | CO_FUTURE_ABSOLUTE_IMPORT | \
                    CO_FUTURE_WITH_STATEMENT | CO_FUTURE_PRINT_FUNCTION | \
                    CO_FUTURE_UNICODE_LITERALS | CO_FUTURE_BARRY_AS_BDFL | \
-                   CO_FUTURE_GENERATOR_STOP | CO_FUTURE_ANNOTATIONS)
+                   CO_FUTURE_GENERATOR_STOP | CO_FUTURE_ANNOTATIONS | \
+                   CO_FUTURE_STRICT)
 #define PyCF_MASK_OBSOLETE (CO_NESTED)
 
 /* bpo-39562: CO_FUTURE_ and PyCF_ constants must be kept unique.
@@ -44,6 +45,13 @@ typedef struct {
 #define FUTURE_BARRY_AS_BDFL "barry_as_FLUFL"
 #define FUTURE_GENERATOR_STOP "generator_stop"
 #define FUTURE_ANNOTATIONS "annotations"
+#define FUTURE_STRICT "strict"
+
+/* Trusted native loader boundary. The caller must first authenticate these
+ * exact source bytes against the immutable startup deployment authority.
+ * Returned original code is inspectable, never an ordinary native fallback. */
+PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSource(
+    const char *source, Py_ssize_t length, PyObject *filename, int optimize);
 
 #define PY_INVALID_STACK_EFFECT INT_MAX
 PyAPI_FUNC(int) PyCompile_OpcodeStackEffect(int opcode, int oparg);

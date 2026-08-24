@@ -27,6 +27,15 @@ PyAPI_FUNC(PyStatus) Py_InitializeFromConfig(
 
 PyAPI_FUNC(int) Py_RunMain(void);
 
+/* Borrowed immutable startup data, valid until this interpreter is deleted.
+ * Returns 1 when opted in, 0 when absent, and -1 for invalid output pointers.
+ * JSON/schema/signature validation belongs to the trusted native loader. */
+PyAPI_FUNC(int) PySoac_GetStrictConfig(
+    const char **bytes, Py_ssize_t *length, const wchar_t **path);
+/* Borrowed, interpreter-owned exact exception classes. NULL on error. */
+PyAPI_FUNC(PyObject *) PySoac_GetStrictMutationError(void);
+PyAPI_FUNC(PyObject *) PySoac_GetStrictRuntimeUnavailableError(void);
+
 
 PyAPI_FUNC(void) _Py_NO_RETURN Py_ExitStatusException(PyStatus err);
 

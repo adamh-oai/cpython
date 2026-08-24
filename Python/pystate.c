@@ -837,6 +837,8 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
 
     PyConfig_Clear(&interp->config);
     _PyCodec_Fini(interp);
+    Py_CLEAR(interp->soac.mutation_error);
+    Py_CLEAR(interp->soac.runtime_unavailable_error);
 
     assert(interp->imports.modules == NULL);
     assert(interp->imports.modules_by_index == NULL);
@@ -1018,6 +1020,8 @@ PyInterpreterState_Delete(PyInterpreterState *interp)
 
     PyConfig_Clear(&interp->config);
 
+    PyMem_RawFree(interp->soac.strict_config_bytes);
+    PyMem_RawFree(interp->soac.strict_config_path);
     free_interpreter(interp);
 }
 
