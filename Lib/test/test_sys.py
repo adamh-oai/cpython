@@ -1673,11 +1673,11 @@ class SizeofTest(unittest.TestCase):
         def func():
             return sys._getframe()
         x = func()
-        if support.Py_GIL_DISABLED:
-            INTERPRETER_FRAME = '9PihcP'
-        else:
-            INTERPRETER_FRAME = '9PhcP'
-        check(x, size('3PiccPPP' + INTERPRETER_FRAME + 'P'))
+        # This native frame also carries the explicit SOAC invocation edge.
+        # Use the actual C layout probe instead of a second stale ABI mirror.
+        from _testinternalcapi import soac_dataclass_frame_offsets
+        interpreter_frame_size = soac_dataclass_frame_offsets()['frame_size']
+        check(x, size('3PiccPPP') + interpreter_frame_size + self.P)
         # function
         def func(): pass
         # The SOAC tail includes two JIT metadata pointers and a uint64 id
@@ -1693,12 +1693,12 @@ class SizeofTest(unittest.TestCase):
             def bar(cls):
                 pass
             # staticmethod
-            check(foo, size('PPB'))
+            check(foo, size('PPBP'))
             # classmethod
-            check(bar, size('PPB'))
+            check(bar, size('PPBP'))
         # generator
         def get_gen(): yield 1
-        check(get_gen(), size('6P4c' + INTERPRETER_FRAME + 'P'))
+        check(get_gen(), size('6P4c') + interpreter_frame_size + self.P)
         # iterator
         check(iter('abc'), size('lP'))
         # callable-iterator
@@ -1743,7 +1743,7 @@ class SizeofTest(unittest.TestCase):
             def setx(self, value): self.__x = value
             def delx(self): del self.__x
             x = property(getx, setx, delx, "")
-            check(x, size('5PiB'))
+            check(x, size('5PiBP'))
         # PyCapsule
         try:
             import _datetime

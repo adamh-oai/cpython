@@ -2083,9 +2083,11 @@ static PyObject *
 dict_new_soac_type(PyObject *self, PyObject *args)
 {
     PyObject *name, *bases, *namespace, *fields, *namespace_function;
+    PyObject *protected_names = NULL, *final_methods = NULL;
     int failure_mode = 0;
-    if (!PyArg_ParseTuple(args, "OOOOO|i", &name, &bases, &namespace,
-                          &fields, &namespace_function, &failure_mode)) {
+    if (!PyArg_ParseTuple(args, "OOOOO|iOO", &name, &bases, &namespace,
+                          &fields, &namespace_function, &failure_mode,
+                          &protected_names, &final_methods)) {
         return NULL;
     }
     if (failure_mode < 0 || failure_mode > 2) {
@@ -2120,7 +2122,9 @@ dict_new_soac_type(PyObject *self, PyObject *args)
         .abi_version = Py_SOAC_TYPE_CONTRACT_ABI, .flags = 0, .owner = owner,
         .namespace_function = namespace_function, .name = name,
         .bases = bases, .namespace = namespace, .keywords = keywords,
-        .fields = fields, .protected_names = empty, .final_methods = empty,
+        .fields = fields,
+        .protected_names = protected_names == NULL ? empty : protected_names,
+        .final_methods = final_methods == NULL ? empty : final_methods,
         .new_instance_dict = soac_test_instance_factory,
         .bind_type = NULL,
     };
@@ -3221,7 +3225,21 @@ test_threadstate_set_stack_protection(PyObject *self, PyObject *Py_UNUSED(args))
 
 #include "_testinternalcapi/soac_dataclass.inc"
 
+/* A direct, allocation-free argument bridge for descriptor fault injection.
+ * Unlike ctypes marshalling, all allocation failures after this boundary are
+ * in the actual native constructor. This fixture grants no source authority. */
+static PyObject *
+soac_new_builtin_descriptor(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    if (nargs != 5) {
+        PyErr_SetString(PyExc_TypeError, "descriptor fixture needs five operands");
+        return NULL;
+    }
+    return PySoac_NewBuiltinDescriptor(args[0], args[1], args[2], args[3], args[4]);
+}
+
 static PyMethodDef module_functions[] = {
+    {"soac_new_builtin_descriptor", _PyCFunction_CAST(soac_new_builtin_descriptor), METH_FASTCALL},
     {"soac_dataclass_fixture", soac_dataclass_fixture, METH_VARARGS},
     {"soac_dataclass_fixture_call", soac_dataclass_fixture_call, METH_VARARGS},
     {"soac_dataclass_fixture_c_proxy", soac_dataclass_fixture_c_proxy, METH_O},

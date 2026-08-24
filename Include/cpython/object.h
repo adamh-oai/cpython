@@ -365,6 +365,29 @@ PyAPI_FUNC(int) _PySoac_SealProperty(PyObject *, PyObject *, PyObject *, PyObjec
 /* No-error, no-allocation predicate: 1 only for an exact builtin descriptor
  * with a permanent seal, 0 for any ordinary, non-exact, or unsealed object. */
 PyAPI_FUNC(int) _PySoac_IsDescriptorSealed(PyObject *);
+/* Explicit fresh descriptor construction. The trusted native caller must
+ * authenticate the actual MakeFunction witness, its live source owner/code,
+ * and the current namespace before calling. namespace_witness is a GC-visible
+ * identity-only payload: it must not own a class, namespace, globals, function,
+ * or other Python graph. This API does not mint strict-source/JIT authority. */
+PyAPI_FUNC(PyObject *) PySoac_NewBuiltinDescriptor(
+    PyObject *factory, PyObject *function, PyObject *expected_function_owner,
+    PyObject *verified_code, PyObject *namespace_witness);
+/* Borrowed namespace witness for a current birth, NULL without an exception
+ * for ordinary, invalidated, or changed descriptors. No allocation/callback
+ * on success. A recognized terminal function owner preserves its exception. */
+PyAPI_FUNC(PyObject *) PySoac_GetDescriptorBirthOwner(PyObject *descriptor);
+/* 1 for the exact live identities, 0 for a miss, -1 for invalid NULL operands
+ * or a recognized terminal owner. All non-NULL mismatches are callback-free. */
+PyAPI_FUNC(int) PySoac_MatchesDescriptorBirth(
+    PyObject *descriptor, PyObject *namespace_witness, PyObject *function,
+    PyObject *expected_function_owner, PyObject *verified_code);
+/* Match every identity, then permanently seal the descriptor's components.
+ * Same-identity adoption is idempotent; no component or function is replaced.
+ * Function metadata and checked entry remain the caller's separate obligation. */
+PyAPI_FUNC(int) PySoac_AdoptBuiltinDescriptor(
+    PyObject *descriptor, PyObject *namespace_witness, PyObject *function,
+    PyObject *expected_function_owner, PyObject *verified_code);
 /* Exact current-interpreter cached __dict__/__weakref__ descriptor identity.
    Valid operands never allocate or call Python; other names/objects return 0.
    NULL operands are invalid C API calls and return -1 with an exception. */

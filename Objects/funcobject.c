@@ -14,6 +14,7 @@
 #include "pycore_object_deferred.h" // _PyObject_SetDeferredRefcount()
 #include "pycore_pyerrors.h"      // _PyErr_Occurred()
 #include "pycore_setobject.h"     // _PySet_NextEntry()
+#include "pycore_soac_descriptor.h" // Explicit fresh builtin descriptor birth
 #include "pycore_stats.h"
 #include "pycore_tuple.h"         // _PyTuple_ITEMS()
 #include "pycore_weakref.h"       // FT_CLEAR_WEAKREFS()
@@ -1875,6 +1876,7 @@ typedef struct {
     PyObject *cm_callable;
     PyObject *cm_dict;
     unsigned char cm_soac_sealed;
+    PyObject *cm_soac_birth;
 } classmethod;
 
 #define _PyClassMethod_CAST(cm) \
@@ -1915,8 +1917,10 @@ cm_dealloc(PyObject *self)
 {
     classmethod *cm = _PyClassMethod_CAST(self);
     _PyObject_GC_UNTRACK((PyObject *)cm);
+    _PySoac_DescriptorBirth_Invalidate(cm->cm_soac_birth);
     Py_XDECREF(cm->cm_callable);
     Py_XDECREF(cm->cm_dict);
+    _PySoac_DescriptorBirth_Clear(&cm->cm_soac_birth);
     Py_TYPE(cm)->tp_free((PyObject *)cm);
 }
 
@@ -1926,6 +1930,7 @@ cm_traverse(PyObject *self, visitproc visit, void *arg)
     classmethod *cm = _PyClassMethod_CAST(self);
     Py_VISIT(cm->cm_callable);
     Py_VISIT(cm->cm_dict);
+    Py_VISIT(cm->cm_soac_birth);
     return 0;
 }
 
@@ -1933,8 +1938,10 @@ static int
 cm_clear(PyObject *self)
 {
     classmethod *cm = _PyClassMethod_CAST(self);
+    _PySoac_DescriptorBirth_Invalidate(cm->cm_soac_birth);
     Py_CLEAR(cm->cm_callable);
     Py_CLEAR(cm->cm_dict);
+    _PySoac_DescriptorBirth_Clear(&cm->cm_soac_birth);
     return 0;
 }
 
@@ -1956,6 +1963,7 @@ cm_set_callable(classmethod *cm, PyObject *callable)
         func_soac_mutation_error("cannot reinitialize a sealed strict classmethod");
         return -1;
     }
+    _PySoac_DescriptorBirth_Invalidate(cm->cm_soac_birth);
     if (cm->cm_callable == callable) {
         // cm_init() sets the same callable than cm_new()
         return 0;
@@ -2173,6 +2181,7 @@ typedef struct {
     PyObject *sm_callable;
     PyObject *sm_dict;
     unsigned char sm_soac_sealed;
+    PyObject *sm_soac_birth;
 } staticmethod;
 
 #define _PyStaticMethod_CAST(cm) \
@@ -2228,8 +2237,10 @@ sm_dealloc(PyObject *self)
 {
     staticmethod *sm = _PyStaticMethod_CAST(self);
     _PyObject_GC_UNTRACK((PyObject *)sm);
+    _PySoac_DescriptorBirth_Invalidate(sm->sm_soac_birth);
     Py_XDECREF(sm->sm_callable);
     Py_XDECREF(sm->sm_dict);
+    _PySoac_DescriptorBirth_Clear(&sm->sm_soac_birth);
     Py_TYPE(sm)->tp_free((PyObject *)sm);
 }
 
@@ -2239,6 +2250,7 @@ sm_traverse(PyObject *self, visitproc visit, void *arg)
     staticmethod *sm = _PyStaticMethod_CAST(self);
     Py_VISIT(sm->sm_callable);
     Py_VISIT(sm->sm_dict);
+    Py_VISIT(sm->sm_soac_birth);
     return 0;
 }
 
@@ -2246,8 +2258,10 @@ static int
 sm_clear(PyObject *self)
 {
     staticmethod *sm = _PyStaticMethod_CAST(self);
+    _PySoac_DescriptorBirth_Invalidate(sm->sm_soac_birth);
     Py_CLEAR(sm->sm_callable);
     Py_CLEAR(sm->sm_dict);
+    _PySoac_DescriptorBirth_Clear(&sm->sm_soac_birth);
     return 0;
 }
 
@@ -2266,6 +2280,7 @@ sm_set_callable(staticmethod *sm, PyObject *callable)
         func_soac_mutation_error("cannot reinitialize a sealed strict staticmethod");
         return -1;
     }
+    _PySoac_DescriptorBirth_Invalidate(sm->sm_soac_birth);
     if (sm->sm_callable == callable) {
         // sm_init() sets the same callable than sm_new()
         return 0;
@@ -2471,3 +2486,5 @@ _PyStaticMethod_GetFunc(PyObject *self)
     staticmethod *sm = _PyStaticMethod_CAST(self);
     return sm->sm_callable;
 }
+
+#include "soac_descriptor.inc"

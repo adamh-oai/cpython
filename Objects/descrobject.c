@@ -10,6 +10,7 @@
 #include "pycore_object.h"        // _PyObject_GC_UNTRACK()
 #include "pycore_object_deferred.h" // _PyObject_SetDeferredRefcount()
 #include "pycore_pystate.h"       // _PyThreadState_GET()
+#include "pycore_soac_descriptor.h" // Explicit fresh builtin descriptor birth
 #include "pycore_tuple.h"         // _PyTuple_ITEMS()
 
 
@@ -1606,7 +1607,9 @@ class property(object):
 */
 
 static PyObject * property_copy(PyObject *, PyObject *, PyObject *,
-                                  PyObject *);
+                               PyObject *);
+static int property_init_common(propertyobject *, PyObject *, PyObject *,
+                                PyObject *, PyObject *, int);
 
 static PyMemberDef property_members[] = {
     {"fget", _Py_T_OBJECT, offsetof(propertyobject, prop_get), Py_READONLY},
@@ -1686,11 +1689,13 @@ property_dealloc(PyObject *self)
     propertyobject *gs = (propertyobject *)self;
 
     _PyObject_GC_UNTRACK(self);
+    _PySoac_DescriptorBirth_Invalidate(gs->prop_soac_birth);
     Py_XDECREF(gs->prop_get);
     Py_XDECREF(gs->prop_set);
     Py_XDECREF(gs->prop_del);
     Py_XDECREF(gs->prop_doc);
     Py_XDECREF(gs->prop_name);
+    _PySoac_DescriptorBirth_Clear(&gs->prop_soac_birth);
     Py_TYPE(self)->tp_free(self);
 }
 
@@ -1889,9 +1894,19 @@ property_init_impl(propertyobject *self, PyObject *fget, PyObject *fset,
                    PyObject *fdel, PyObject *doc)
 /*[clinic end generated code: output=01a960742b692b57 input=dfb5dbbffc6932d5]*/
 {
+    return property_init_common(self, fget, fset, fdel, doc, 0);
+}
+
+static int
+property_init_common(propertyobject *self, PyObject *fget, PyObject *fset,
+                     PyObject *fdel, PyObject *doc, int birth_initialization)
+{
     if (self->prop_soac_sealed) {
         property_soac_mutation_error("cannot reinitialize a sealed strict property");
         return -1;
+    }
+    if (!birth_initialization) {
+        _PySoac_DescriptorBirth_Invalidate(self->prop_soac_birth);
     }
     if (fget == Py_None)
         fget = NULL;
@@ -2000,6 +2015,25 @@ property_set__name__(PyObject *op, PyObject *value, void *Py_UNUSED(ignored))
     return 0;
 }
 
+PyObject *
+_PySoac_NewProperty(PyObject *function, PyObject *birth)
+{
+    propertyobject *self = (propertyobject *)
+        _PyType_AllocNoTrack(&PyProperty_Type, 0);
+    if (self == NULL) {
+        return NULL;
+    }
+    self->prop_soac_birth = Py_NewRef(birth);
+    _PySoac_DescriptorBirth_Bind(birth, (PyObject *)self);
+    _PyObject_GC_TRACK(self);
+    if (property_init_common(self, function, Py_None, Py_None, Py_None, 1) < 0) {
+        _PySoac_DescriptorBirth_Invalidate(birth);
+        Py_DECREF(self);
+        return NULL;
+    }
+    return (PyObject *)self;
+}
+
 static PyObject *
 property_get___isabstractmethod__(PyObject *op, void *closure)
 {
@@ -2047,6 +2081,7 @@ property_traverse(PyObject *self, visitproc visit, void *arg)
     Py_VISIT(pp->prop_del);
     Py_VISIT(pp->prop_doc);
     Py_VISIT(pp->prop_name);
+    Py_VISIT(pp->prop_soac_birth);
     return 0;
 }
 
@@ -2054,7 +2089,9 @@ static int
 property_clear(PyObject *self)
 {
     propertyobject *pp = (propertyobject *)self;
+    _PySoac_DescriptorBirth_Invalidate(pp->prop_soac_birth);
     Py_CLEAR(pp->prop_doc);
+    _PySoac_DescriptorBirth_Clear(&pp->prop_soac_birth);
     return 0;
 }
 

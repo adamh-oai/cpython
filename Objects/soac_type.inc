@@ -64,6 +64,16 @@ soac_type_dictionary_contract(PyTypeObject *type)
     for (Py_ssize_t i = 1; mro != NULL && i < PyTuple_GET_SIZE(mro); ++i) {
         SoacTypeContract *base = soac_type_contract((PyTypeObject *)PyTuple_GET_ITEM(mro, i));
         if (base != NULL && base->new_instance_dict != NULL) {
+            /* A factory is installed on every actual strict class, including
+             * method-only classes with no physical field prefix. Its presence
+             * alone must not turn an ordinary subclass into a policy-bearing
+             * receiver or forbid ordinary __dict__ replacement. Continue the
+             * actual MRO search so a later nonempty prefix is still enforced.
+             * Unknown/terminal state stays fail-closed, not silently ordinary. */
+            if (!base->terminal && base->interpreter == _PyInterpreterState_GET() &&
+                base->fields != NULL && PyTuple_GET_SIZE(base->fields) == 0) {
+                continue;
+            }
             return base;
         }
     }
