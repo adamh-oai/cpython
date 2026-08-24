@@ -120,6 +120,21 @@ func_check_soac_mutable(PyFunctionObject *func)
 }
 
 static int
+func_check_soac_code_mutable(PyFunctionObject *func)
+{
+    if (func_check_soac_mutable(func) < 0) {
+        return -1;
+    }
+    if (func->func_soac_required_boundary) {
+        /* Even an identical code object notifies MODIFY_CODE watchers and
+           can discard the checked vectorcall. */
+        func_soac_mutation_error("cannot assign code on a function with a required strict boundary");
+        return -1;
+    }
+    return 0;
+}
+
+static int
 func_soac_kwdefaults_policy(PyObject *owner, PyObject *dict, PyObject *key,
                             PyObject *value, int operation,
                             PyObject *provenance)
@@ -742,6 +757,10 @@ PyFunction_SetDefaults(PyObject *op, PyObject *defaults)
     }
     handle_func_event(PyFunction_EVENT_MODIFY_DEFAULTS,
                       (PyFunctionObject *) op, defaults);
+    if (func_check_soac_mutable((PyFunctionObject *)op) < 0) {
+        Py_XDECREF(defaults);
+        return -1;
+    }
     _PyFunction_ClearVersion((PyFunctionObject *)op);
     Py_XSETREF(((PyFunctionObject *)op)->func_defaults, defaults);
     return 0;
@@ -821,6 +840,10 @@ PyFunction_SetKwDefaults(PyObject *op, PyObject *defaults)
     }
     handle_func_event(PyFunction_EVENT_MODIFY_KWDEFAULTS,
                       (PyFunctionObject *) op, defaults);
+    if (func_check_soac_mutable((PyFunctionObject *)op) < 0) {
+        Py_XDECREF(defaults);
+        return -1;
+    }
     _PyFunction_ClearVersion((PyFunctionObject *)op);
     Py_XSETREF(((PyFunctionObject *)op)->func_kwdefaults, defaults);
     return 0;
@@ -941,6 +964,9 @@ PyFunction_SetAnnotations(PyObject *op, PyObject *annotations)
     }
     PyFunctionObject *func = (PyFunctionObject *)op;
     Py_XSETREF(func->func_annotations, annotations);
+    if (func->func_annotate != NULL && func_check_soac_mutable(func) < 0) {
+        return -1;
+    }
     Py_CLEAR(func->func_annotate);
     return 0;
 }
@@ -980,13 +1006,7 @@ static int
 func_set_code(PyObject *self, PyObject *value, void *Py_UNUSED(ignored))
 {
     PyFunctionObject *op = _PyFunction_CAST(self);
-    if (func_check_soac_mutable(op) < 0) {
-        return -1;
-    }
-    if (op->func_soac_required_boundary) {
-        /* Even an identical code object fires MODIFY_CODE and can discard
-           the checked vectorcall. Reject before audit hooks or watchers. */
-        func_soac_mutation_error("cannot assign code on a function with a required strict boundary");
+    if (func_check_soac_code_mutable(op) < 0) {
         return -1;
     }
 
@@ -1000,6 +1020,9 @@ func_set_code(PyObject *self, PyObject *value, void *Py_UNUSED(ignored))
 
     if (PySys_Audit("object.__setattr__", "OsO",
                     op, "__code__", value) < 0) {
+        return -1;
+    }
+    if (func_check_soac_code_mutable(op) < 0) {
         return -1;
     }
 
@@ -1026,9 +1049,17 @@ func_set_code(PyObject *self, PyObject *value, void *Py_UNUSED(ignored))
         {
             return -1;
         }
+        if (func_check_soac_code_mutable(op) < 0) {
+            return -1;
+        }
     }
 
     handle_func_event(PyFunction_EVENT_MODIFY_CODE, op, value);
+    /* Audit, warning and watcher callbacks may install an irreversible
+       restriction. No callback remains between this check and the store. */
+    if (func_check_soac_code_mutable(op) < 0) {
+        return -1;
+    }
     _PyFunction_ClearVersion(op);
     Py_XSETREF(op->func_code, Py_NewRef(value));
     return 0;
@@ -1118,7 +1149,13 @@ func_set_defaults(PyObject *self, PyObject *value, void *Py_UNUSED(ignored))
         return -1;
     }
 
+    if (func_check_soac_mutable(op) < 0) {
+        return -1;
+    }
     handle_func_event(PyFunction_EVENT_MODIFY_DEFAULTS, op, value);
+    if (func_check_soac_mutable(op) < 0) {
+        return -1;
+    }
     _PyFunction_ClearVersion(op);
     Py_XSETREF(op->func_defaults, Py_XNewRef(value));
     return 0;
@@ -1164,7 +1201,13 @@ func_set_kwdefaults(PyObject *self, PyObject *value, void *Py_UNUSED(ignored))
         return -1;
     }
 
+    if (func_check_soac_mutable(op) < 0) {
+        return -1;
+    }
     handle_func_event(PyFunction_EVENT_MODIFY_KWDEFAULTS, op, value);
+    if (func_check_soac_mutable(op) < 0) {
+        return -1;
+    }
     _PyFunction_ClearVersion(op);
     Py_XSETREF(op->func_kwdefaults, Py_XNewRef(value));
     return 0;
@@ -1212,6 +1255,9 @@ function___annotate___set_impl(PyFunctionObject *self, PyObject *value)
     }
     else if (PyCallable_Check(value)) {
         Py_XSETREF(self->func_annotate, Py_XNewRef(value));
+        if (self->func_annotations != NULL && func_check_soac_mutable(self) < 0) {
+            return -1;
+        }
         Py_CLEAR(self->func_annotations);
         return 0;
     }
@@ -1269,6 +1315,9 @@ function___annotations___set_impl(PyFunctionObject *self, PyObject *value)
         return -1;
     }
     Py_XSETREF(self->func_annotations, Py_XNewRef(value));
+    if (self->func_annotate != NULL && func_check_soac_mutable(self) < 0) {
+        return -1;
+    }
     Py_CLEAR(self->func_annotate);
     return 0;
 }
@@ -1438,6 +1487,13 @@ func_new_impl(PyTypeObject *type, PyCodeObject *code, PyObject *globals,
     }
     if (name != Py_None) {
         Py_SETREF(newfunc->func_name, Py_NewRef(name));
+    }
+    /* CREATE watchers (or release of a watcher-supplied name) may seal the
+       new function. No callback remains before these protected stores. */
+    if ((defaults != Py_None || closure != Py_None || kwdefaults != Py_None) &&
+        func_check_soac_mutable(newfunc) < 0) {
+        Py_DECREF(newfunc);
+        return NULL;
     }
     if (defaults != Py_None) {
         newfunc->func_defaults = Py_NewRef(defaults);

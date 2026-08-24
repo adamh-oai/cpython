@@ -6,6 +6,7 @@ extern "C" {
 
 #define _PyDict_SOAC_POLICY_TAG (UINT64_C(1) << 12)
 #define _PyDict_SOAC_LOOKUP_ALIASES_TAG (UINT64_C(1) << 13)
+#define _PyDict_SOAC_SPLIT_CLEAR_TAG (UINT64_C(1) << 14)
 #ifdef Py_GIL_DISABLED
 #define _PyDict_HasSoacPolicy(mp) (0)
 #else

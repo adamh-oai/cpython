@@ -555,6 +555,17 @@ capability.  Those require separately verified native owners.
    and empty/self updates can still succeed without changing contents. Normal
    key-lookup errors precede rejection of a resolved write.
 
+   A write already in progress observes a policy installed by its key's hash
+   or equality callback, or by a dictionary watcher, before committing. The
+   kernel validates the actual resolved canonical entry without repeating the
+   lookup. If a watcher's policy installation also changes the dictionary's
+   physical layout, that suspended write fails rather than reusing its stale
+   locator; the newly installed policy remains permanent. A first policy
+   cannot be installed from a value finalizer during an ordinary in-place
+   split-table clear, because further stores still belong to that clear.
+   This rejected installation publishes no policy and may be retried after
+   the clear completes.
+
    Read-only storage grants no namespace, instance-layout, or stable-lookup
    authority. A custom key's equality can still change without dictionary
    mutation; keyword binding must retain ordinary lookup and applicable value
