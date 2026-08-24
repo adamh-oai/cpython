@@ -806,7 +806,8 @@ dummy_func(
              * that the string is safe to mutate.
              */
             assert(Py_REFCNT(left_o) >= 2 || !PyStackRef_IsHeapSafe(left));
-            PyObject *temp = PyStackRef_AsPyObjectSteal(*target_local);
+            /* Either operand can borrow the target local. Retire both
+             * operand handles before consuming the local's handle. */
             PyObject *right_o = PyStackRef_AsPyObjectSteal(right);
             /* gh-143403: It's critical to close this reference *before*
              * we append. Otherwise, append can move the underlying
@@ -814,6 +815,7 @@ dummy_func(
              */
             PyStackRef_CLOSE_SPECIALIZED(left, _PyUnicode_ExactDealloc);
             DEAD(left);
+            PyObject *temp = PyStackRef_AsPyObjectSteal(*target_local);
             PyUnicode_Append(&temp, right_o);
             _Py_DECREF_SPECIALIZED(right_o, _PyUnicode_ExactDealloc);
             *target_local = PyStackRef_NULL;
