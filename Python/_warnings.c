@@ -1029,6 +1029,11 @@ setup_context(Py_ssize_t stack_level,
         }
     }
 
+    if (PyErr_Occurred()) {
+        Py_XDECREF(f);
+        return 0;
+    }
+
     if (f == NULL) {
         globals = interp->sysdict;
         *filename = PyUnicode_FromString("<sys>");
@@ -1042,6 +1047,10 @@ setup_context(Py_ssize_t stack_level,
     }
 
     *module = NULL;
+    if (*filename == NULL || (*lineno < 0 && PyErr_Occurred())) {
+        Py_XDECREF(*filename);
+        return 0;
+    }
 
     /* Setup registry. */
     assert(globals != NULL);

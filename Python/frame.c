@@ -22,7 +22,12 @@ _PyFrame_Traverse(_PyInterpreterFrame *frame, visitproc visit, void *arg)
             Py_VISIT(frame->f_builtins);
         }
     }
-    _Py_VISIT_STACKREF(frame->f_funcobj);
+    /* ACTIVE source frames have only a borrowed current-parent view.
+     * Their external primary owns the function; an escaped frame must
+     * not add a GC backedge to that activation or suspended capsule. */
+    if (frame->owner != FRAME_OWNED_BY_SOAC_ACTIVE) {
+        _Py_VISIT_STACKREF(frame->f_funcobj);
+    }
     _Py_VISIT_STACKREF(frame->f_executable);
     return _PyGC_VisitFrameStack(frame, visit, arg);
 }
@@ -78,7 +83,9 @@ take_ownership(PyFrameObject *f, _PyInterpreterFrame *frame)
     assert(f->f_back == NULL);
     _PyInterpreterFrame *prev = _PyFrame_GetFirstComplete(frame->previous);
     if (prev) {
-        assert(prev->owner < FRAME_OWNED_BY_INTERPRETER);
+        assert(prev->owner < FRAME_OWNED_BY_INTERPRETER ||
+               (prev->owner == FRAME_OWNED_BY_SOAC_ACTIVE &&
+                (prev->soac_lifetime_owned_environment & SOAC_LIFETIME_SCOPE_LINKED)));
         PyObject *exc = PyErr_GetRaisedException();
         /* Link PyFrameObjects.f_back and remove link through _PyInterpreterFrame.previous */
         PyFrameObject *back = _PyFrame_GetFrameObject(prev);

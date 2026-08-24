@@ -4,6 +4,10 @@
 extern "C" {
 #endif
 
+/* Called only by the validated explicit source-lifetime Add API. */
+extern int _PyTraceBack_HereSoacLifetime(
+    PyFrameObject *frame, int instruction_offset, int source_lineno);
+
 #ifndef Py_BUILD_CORE
 #  error "this header requires Py_BUILD_CORE define"
 #endif

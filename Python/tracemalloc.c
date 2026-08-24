@@ -45,6 +45,11 @@ static int _PyTraceMalloc_TraceRef(PyObject *op, PyRefTracerEvent event,
 typedef struct tracemalloc_frame frame_t;
 typedef struct tracemalloc_traceback traceback_t;
 
+/* Actual native line numbers are signed int. This private record marker
+ * cannot collide with one and is never exported as a numeric position. */
+#define SOAC_TRACEMALLOC_UNAVAILABLE UINT_MAX
+_Static_assert(UINT_MAX > INT_MAX, "tracemalloc unavailable line marker");
+
 #define TRACEBACK_SIZE(NFRAME) \
         (sizeof(traceback_t) + sizeof(frame_t) * (NFRAME))
 
@@ -224,11 +229,18 @@ tracemalloc_get_frame(_PyInterpreterFrame *pyframe, frame_t *frame)
     assert(PyStackRef_CodeCheck(pyframe->f_executable));
     frame->filename = &_Py_STR(anon_unknown);
 
-    int lineno = PyUnstable_InterpreterFrame_GetLine(pyframe);
-    if (lineno < 0) {
-        lineno = 0;
+    if (_PyFrame_IsSoacLifetime(pyframe)) {
+        /* Allocator tracing must not set/clear any Python exception. Keep
+         * the real filename below and refuse only at an export boundary. */
+        frame->lineno = SOAC_TRACEMALLOC_UNAVAILABLE;
     }
-    frame->lineno = (unsigned int)lineno;
+    else {
+        int lineno = PyUnstable_InterpreterFrame_GetLine(pyframe);
+        if (lineno < 0) {
+            lineno = 0;
+        }
+        frame->lineno = (unsigned int)lineno;
+    }
 
     PyObject *filename = _PyFrame_GetCode(pyframe)->co_filename;
     if (filename == NULL) {
@@ -892,6 +904,11 @@ static PyObject*
 frame_to_pyobject(frame_t *frame)
 {
     assert(get_reentrant());
+    if (frame->lineno == SOAC_TRACEMALLOC_UNAVAILABLE) {
+        PyErr_SetString(PyExc_NotImplementedError,
+                        "allocation traceback contains an unavailable optimized source position");
+        return NULL;
+    }
 
     PyObject *frame_obj = PyTuple_New(2);
     if (frame_obj == NULL) {
@@ -1155,6 +1172,10 @@ _PyMem_DumpFrame(int fd, frame_t * frame)
 {
     PUTS(fd, "  File \"");
     _Py_DumpASCII(fd, frame->filename);
+    if (frame->lineno == SOAC_TRACEMALLOC_UNAVAILABLE) {
+        PUTS(fd, "\", <optimized source allocation position unavailable>\n");
+        return;
+    }
     PUTS(fd, "\", line ");
     _Py_DumpDecimal(fd, frame->lineno);
     PUTS(fd, "\n");

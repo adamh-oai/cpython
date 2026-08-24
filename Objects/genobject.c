@@ -1666,6 +1666,10 @@ compute_cr_origin(int origin_depth, _PyInterpreterFrame *current_frame)
     for (int i = 0; i < frame_count; ++i) {
         PyCodeObject *code = _PyFrame_GetCode(frame);
         int line = PyUnstable_InterpreterFrame_GetLine(frame);
+        if (line < 0 && PyErr_Occurred()) {
+            Py_DECREF(cr_origin);
+            return NULL;
+        }
         PyObject *frameinfo = Py_BuildValue("OiO", code->co_filename, line,
                                             code->co_name);
         if (!frameinfo) {

@@ -18,6 +18,9 @@ _PyFrame_IsSoacLifetime(const _PyInterpreterFrame *frame)
 enum {
     SOAC_LIFETIME_OWNS_GLOBALS = 1,
     SOAC_LIFETIME_OWNS_BUILTINS = 2,
+    /* Scope state is mutually exclusive with FINISHED environment ownership. */
+    SOAC_LIFETIME_SCOPE_LINKED = 4,
+    SOAC_LIFETIME_SCOPE_TERMINAL = 8,
 };
 
 /* Detach first: clearing a captured mapping can run finalizers that recursively
@@ -28,6 +31,7 @@ _PyFrame_ClearSoacLifetimeEnvironment(_PyInterpreterFrame *frame)
 {
     assert(_PyFrame_IsSoacLifetime(frame));
     uint16_t owned = frame->soac_lifetime_owned_environment;
+    assert(!(owned & SOAC_LIFETIME_SCOPE_LINKED));
     frame->soac_lifetime_owned_environment = 0;
     PyObject *globals = NULL;
     PyObject *builtins = NULL;
