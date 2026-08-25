@@ -2555,7 +2555,9 @@ _PyType_AllocNoTrack(PyTypeObject *type, Py_ssize_t nitems)
     if (type->tp_flags & Py_TPFLAGS_INLINE_VALUES) {
         assert(type->tp_itemsize == 0);
         size_t inline_size = _PyInlineValuesSize(type);
-        if (storage != NULL) inline_capacity = shared_keys_usable_size(CACHED_KEYS(type));
+        if (storage != NULL) {
+            inline_capacity = shared_keys_usable_size(((PyHeapTypeObject *)type)->ht_cached_keys);
+        }
         if (size > (size_t)PY_SSIZE_T_MAX - inline_size) goto size_error;
         size += inline_size;
     }
