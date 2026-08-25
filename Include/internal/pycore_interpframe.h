@@ -328,12 +328,7 @@ static inline bool _Py_NO_SANITIZE_THREAD
 _PyFrame_IsIncomplete(_PyInterpreterFrame *frame)
 {
     if (_PyFrame_IsSoacLifetime(frame)) {
-        /* Entry progress is not a fabricated instruction pointer. A native
-         * zero-prefix frame is complete at link, even before RESUME work. */
-        uint16_t flags = frame->soac_lifetime_owned_environment;
-        return (flags & SOAC_LIFETIME_SYNC_BODY) &&
-               !(flags & SOAC_LIFETIME_SYNC_RESUMED) &&
-               _PyFrame_GetCode(frame)->_co_firsttraceable > 0;
+        return false;
     }
     if (frame->owner >= FRAME_OWNED_BY_INTERPRETER) {
         return true;

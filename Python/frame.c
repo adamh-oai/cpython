@@ -28,13 +28,7 @@ _PyFrame_Traverse(_PyInterpreterFrame *frame, visitproc visit, void *arg)
     if (frame->owner != FRAME_OWNED_BY_SOAC_ACTIVE) {
         _Py_VISIT_STACKREF(frame->f_funcobj);
     }
-    /* Like an ordinary attached frame wrapper, this explicit managed
-     * view contributes no executable owner of its own. Other native
-     * token slots retain their exact normal GC visitor semantics. */
-    if (!_PyFrame_IsSoacLifetime(frame) ||
-        !(frame->soac_lifetime_owned_environment & SOAC_LIFETIME_BORROWED_CODE)) {
-        _Py_VISIT_STACKREF(frame->f_executable);
-    }
+    _Py_VISIT_STACKREF(frame->f_executable);
     return _PyGC_VisitFrameStack(frame, visit, arg);
 }
 

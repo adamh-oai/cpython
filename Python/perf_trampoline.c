@@ -130,7 +130,7 @@ any DWARF information available for them).
 */
 
 #include "Python.h"
-#include "pycore_soac_body_interval.h"
+#include "pycore_soac_observers.h"
 #include "pycore_ceval.h"         // _PyPerf_Callbacks
 #include "pycore_interpframe.h"   // _PyFrame_GetCode()
 #include "pycore_mmap.h"          // _PyAnnotateMemoryMap()

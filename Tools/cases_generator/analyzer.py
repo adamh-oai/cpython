@@ -147,8 +147,6 @@ class Flush:
         return 0
 
 
-
-
 @dataclass
 class StackItem:
     name: str
@@ -576,7 +574,6 @@ NON_ESCAPING_FUNCTIONS = (
     "_PySOAC_DataclassIsBridgeImplementation",
     "_PySOAC_UsesObjectSlotPolicy",  # immutable native catalog query; no effects
     "_PySOAC_HasOrdinaryInstanceWrites",  # actual-MRO metadata query; no effects
-    "_PySoacVMCall_IsRegisteredV1",  # identity query; only frees C records, no Python callbacks
     "PyCell_GetRef",
     "PyCell_New",
     "PyCell_SwapTakeRef",

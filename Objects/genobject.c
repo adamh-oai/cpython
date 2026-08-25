@@ -243,7 +243,6 @@ gen_dealloc(PyObject *self)
     }
     assert(gen->gi_exc_state.exc_value == NULL);
     if (_PyGen_IsSoacManaged(gen)) {
-        soac_gen_transfer_destructor_tail(gen);
     }
     _PyFrame_ClearExecutable(&gen->gi_iframe);
     Py_CLEAR(gen->gi_name);

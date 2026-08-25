@@ -1,5 +1,5 @@
 #include "Python.h"
-#include "pycore_soac_body_interval.h"
+#include "pycore_soac_observers.h"
 #include "pycore_bitutils.h"      // _Py_popcount32()
 #include "pycore_call.h"          // _PyObject_VectorcallTstate()
 #include "pycore_ceval.h"         // _PY_EVAL_EVENTS_BITS
@@ -2020,7 +2020,7 @@ _PyMonitoring_SetEvents(int tool_id, _PyMonitoringEventSet events)
 
     /* Scalar-only refusal while stopped; the Python/legacy caller
      * resolves it after releasing all mutation locks. */
-    if (events && _PySoacBody_HasProtectedInterval(interp, NULL)) {
+    if (events && _PySoacSource_HasProtectedInterval(interp, NULL)) {
         return _Py_SOAC_OBSERVER_REFUSED;
     }
     uint32_t existing_events = get_events(&interp->monitors, tool_id);
@@ -2058,8 +2058,8 @@ soac_set_local_events(PyCodeObject *code, int tool_id,
     }
 
     int protected = events && (thread_list_locked
-        ? _PySoacBody_HasProtectedIntervalThreadListLocked(interp, code)
-        : _PySoacBody_HasProtectedInterval(interp, code));
+        ? _PySoacSource_HasProtectedIntervalThreadListLocked(interp, code)
+        : _PySoacSource_HasProtectedInterval(interp, code));
     if (protected) return _Py_SOAC_OBSERVER_REFUSED;
 
     if (allocate_instrumentation_data(code)) {
@@ -2366,7 +2366,7 @@ monitoring_set_events_impl(PyObject *module, int tool_id, int event_set)
     _PyEval_StopTheWorld(interp);
     int err = _PyMonitoring_SetEvents(tool_id, event_set);
     _PyEval_StartTheWorld(interp);
-    err = _PySoacBody_ResolveObserverStatus(err);
+    err = _PySoacSource_ResolveObserverStatus(err);
     if (err) {
         return NULL;
     }
@@ -2452,7 +2452,7 @@ monitoring_set_local_events_impl(PyObject *module, int tool_id,
     _PyEval_StopTheWorld(interp);
     int err = _PyMonitoring_SetLocalEvents((PyCodeObject*)code, tool_id, event_set);
     _PyEval_StartTheWorld(interp);
-    err = _PySoacBody_ResolveObserverStatus(err);
+    err = _PySoacSource_ResolveObserverStatus(err);
     if (err) {
         return NULL;
     }
@@ -2476,9 +2476,9 @@ monitoring_restart_events_impl(PyObject *module)
     PyInterpreterState *interp = tstate->interp;
 
     _PyEval_StopTheWorld(interp);
-    if (_PySoacBody_RestartWouldObserve(interp)) {
+    if (_PySoacSource_RestartWouldObserve(interp)) {
         _PyEval_StartTheWorld(interp);
-        (void)_PySoacBody_ResolveObserverStatus(_Py_SOAC_OBSERVER_REFUSED);
+        (void)_PySoacSource_ResolveObserverStatus(_Py_SOAC_OBSERVER_REFUSED);
         return NULL;
     }
     uint32_t restart_version = global_version(interp) + MONITORING_VERSION_INCREMENT;
@@ -2720,7 +2720,6 @@ _PyMonitoring_FirePyResumeEvent(PyMonitoringState *state, PyObject *codelike, in
 }
 
 
-
 int
 _PyMonitoring_FirePyReturnEvent(PyMonitoringState *state, PyObject *codelike, int32_t offset,
                                 PyObject* retval)
@@ -2942,7 +2941,6 @@ _PyMonitoring_FireStopIterationEvent(PyMonitoringState *state, PyObject *codelik
     Py_DECREF(exc);
     return exception_event_teardown(err, NULL);
 }
-
 
 
 /* Handle legacy BRANCH event */
@@ -3210,107 +3208,20 @@ _PyInstrumentation_BranchesIterator(PyCodeObject *code)
     return (PyObject *)bi;
 }
 
-/* Append inside Python/instrumentation.c so effective monitor selection stays
- * beside its native helpers. This is a supplied-site validator, not a code
- * selector or interpreter. It never changes a lifetime frame's pseudo-PC. */
+/* Actual source-parent context, not a reconstructed native CALL site. */
 int
-_PySoac_OutgoingCallSiteV1(
-    PyThreadState *thread, PyCodeObject *code, Py_ssize_t byte_offset,
-    uint32_t kind, Py_ssize_t argument_count,
-    int *instrumented, _Py_CODEUNIT **instruction)
+_PySoacSource_CheckCallObservers(PyThreadState *thread)
 {
-    assert(thread == _PyThreadState_GET() && code != NULL);
-    *instrumented = 0;
-    *instruction = NULL;
-    _Py_LocalMonitors local = code->_co_monitoring == NULL
-        ? (_Py_LocalMonitors){0} : code->_co_monitoring->local_monitors;
-    _Py_LocalMonitors active = local_union(thread->interp->monitors, local);
-    int missing_site = byte_offset == -1;
-    for (int event = 0; event < _PY_MONITORING_LOCAL_EVENTS; event++) {
-        int requested = active.tools[event] != 0;
-        /* Instrumented EX chooses borrowed retirement even while native
-         * tracing suppresses callback delivery. Unknown cannot guess its form.
-         * For the same reason conservatively refuse an unknown CALL site with
-         * requested CALL observation, rather than invent per-site DISABLE. */
-        int needs_unknown_form = missing_site && event == PY_MONITORING_EVENT_CALL;
-        if (requested && (needs_unknown_form ||
-            (!thread->tracing && (missing_site || event != PY_MONITORING_EVENT_CALL)))) {
-            PyErr_SetString(PyExc_NotImplementedError,
-                            "outgoing source call lacks supported native observer/site information");
-            return -1;
-        }
-    }
-    if (!thread->tracing) {
-        for (int event = _PY_MONITORING_LOCAL_EVENTS;
-             event < _PY_MONITORING_UNGROUPED_EVENTS; event++) {
-            if (thread->interp->monitors.tools[event] != 0) {
-                PyErr_SetString(PyExc_NotImplementedError,
-                                "outgoing source call does not implement this source observer");
-                return -1;
-            }
-        }
-    }
-    if (missing_site) {
+    assert(thread == _PyThreadState_GET());
+    _PyInterpreterFrame *frame = thread->current_frame;
+    if (frame == NULL || frame->owner != FRAME_OWNED_BY_SOAC_ACTIVE ||
+        !(frame->soac_lifetime_owned_environment & SOAC_LIFETIME_SCOPE_LINKED)) {
         return 0;
     }
-    if (byte_offset < 0 || byte_offset % sizeof(_Py_CODEUNIT) != 0 ||
-        byte_offset >= _PyCode_NBYTES(code) ||
-        byte_offset / sizeof(_Py_CODEUNIT) > INT_MAX) {
-        PyErr_SetString(PyExc_ValueError, "invalid outgoing native call-site offset");
+    if (_PySoacSource_CodeHasObservers(thread->interp, _PyFrame_GetCode(frame))) {
+        PyErr_SetString(PyExc_NotImplementedError,
+                        "SOAC source call lacks supported observer/site information");
         return -1;
     }
-    int wanted = (int)(byte_offset / sizeof(_Py_CODEUNIT));
-    int index = 0;
-    unsigned int extended = 0;
-    int extended_count = 0;
-    _Py_CODEUNIT selected = {.cache = 0};
-    /* Native instruction lengths distinguish real instructions from inline
-     * cache words. This only validates the supplied exact emission; never use
-     * the walk to pick a first matching CALL or to infer source correspondence. */
-    while (index <= wanted) {
-        _Py_CODEUNIT unit = _Py_GetBaseCodeUnit(code, index);
-        int length = _PyInstruction_GetLength(code, index);
-        if (length <= 0 || (Py_ssize_t)index + length > Py_SIZE(code)) {
-            PyErr_SetString(PyExc_ValueError, "malformed outgoing native call-site boundary");
-            return -1;
-        }
-        if (unit.op.code == EXTENDED_ARG) {
-            if (++extended_count > 3) {
-                PyErr_SetString(PyExc_ValueError, "invalid outgoing extended argument");
-                return -1;
-            }
-            extended = (extended << 8) | unit.op.arg;
-        }
-        else {
-            if (index == wanted) {
-                selected = unit;
-                extended = (extended << 8) | unit.op.arg;
-                break;
-            }
-            extended = 0;
-            extended_count = 0;
-        }
-        index += length;
-    }
-    int opcode = kind == Py_SOAC_CALL_VM_POSITIONAL_V1 ? CALL
-        : kind == Py_SOAC_CALL_VM_KEYWORDS_V1 ? CALL_KW : CALL_FUNCTION_EX;
-    if (index != wanted || selected.op.code != opcode ||
-        wanted < code->_co_firsttraceable ||
-        (kind != Py_SOAC_CALL_VM_EXPANDED_V1 && extended != (unsigned int)argument_count)) {
-        PyErr_SetString(PyExc_ValueError,
-                        "outgoing source operation does not match its supplied native emission");
-        return -1;
-    }
-    /* A lifetime scope is skipped by instrument_all_executing_code_objects.
-     * Bring this exact code's existing monitor metadata up to date explicitly,
-     * before operand consumption. No callback is invoked by this operation. */
-    if (_Py_Instrument(code, thread->interp) < 0) {
-        return -1;
-    }
-    if (code->_co_monitoring != NULL) {
-        *instrumented = get_tools_for_instruction(
-            code, thread->interp, wanted, PY_MONITORING_EVENT_CALL) != 0;
-    }
-    *instruction = _PyCode_CODE(code) + wanted;
     return 0;
 }

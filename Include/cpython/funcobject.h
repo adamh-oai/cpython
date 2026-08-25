@@ -63,11 +63,6 @@ typedef struct {
     uint8_t func_soac_strict_owner_state;
     /* Permanent pre-seal code guard for an installed mandatory call boundary. */
     uint8_t func_soac_required_boundary;
-    /* Optional C-only native-call registration; owns no Python refs. */
-    struct _PySoacSourceEntryRecordV1 *func_soac_source_entry;
-    /* One-shot identity of the actual attached SOAC source owner. This is
-     * consistency data, NOT the legacy unchecked direct-call capability. */
-    uint64_t func_soac_source_owner_id;
 
     /* Invariant:
      *     func_closure contains the bindings for func_code->co_freevars, so
@@ -118,17 +113,6 @@ PyAPI_FUNC(int) PyFunction_CheckSoacStrictDefaults(PyObject *);
  * Get returns a borrowed reference, NULL/no error when never attached, or
  * NULL/StrictRuntimeUnavailableError after irreversible GC clearing. */
 PyAPI_FUNC(int) PyFunction_SetSoacStrictOwner(PyObject *, PyObject *);
-/* Actual compiler owner installation, before function exposure. The
- * nonzero identity is supplied by that authenticated owner's function ID;
- * it does not authenticate a body, code role, metadata or call signature.
- * Borrows both arguments and adds only the existing single owner edge.
- * Same owner plus same identity is idempotent, even after sealing. A
- * legacy identity-zero owner cannot be upgraded; no association can be
- * replaced. The old API's identical-owner no-op preserves this identity.
- * Metadata/vectorcall replacement cannot change it; terminal owner state
- * remains irreversible. Invalid input/association fails before commit. */
-PyAPI_FUNC(int) PyFunction_SetSoacStrictOwnerWithIdentityV1(
-    PyObject *function, PyObject *owner, uint64_t source_owner_identity);
 PyAPI_FUNC(PyObject *) PyFunction_GetSoacStrictOwner(PyObject *);
 /* Requires the exact already-attached, nonterminal native function owner.
  * One-way: all __code__ setter attempts fail before audit/watchers, including

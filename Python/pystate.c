@@ -2,7 +2,7 @@
 /* Thread and interpreter state structures and their interfaces */
 
 #include "Python.h"
-#include "pycore_soac_body_interval.h"
+#include "pycore_soac_observers.h"
 #include "pycore_abstract.h"      // _PyIndex_Check()
 #include "pycore_audit.h"         // _Py_AuditHookEntry
 #include "pycore_backoff.h"       // JUMP_BACKWARD_INITIAL_VALUE, SIDE_EXIT_INITIAL_VALUE
@@ -1313,7 +1313,6 @@ _PyInterpreterState_GetIDObject(PyInterpreterState *interp)
     assert(interpid < LLONG_MAX);
     return PyLong_FromLongLong(interpid);
 }
-
 
 
 void
@@ -3024,9 +3023,9 @@ _PyInterpreterState_SetEvalFrameFuncChecked(PyInterpreterState *interp,
     if (eval_frame == interp->eval_frame) return 0;
 
     _PyEval_StopTheWorld(interp);
-    if (eval_frame != NULL && _PySoacBody_HasProtectedInterval(interp, NULL)) {
+    if (eval_frame != NULL && _PySoacSource_HasProtectedInterval(interp, NULL)) {
         _PyEval_StartTheWorld(interp);
-        return _PySoacBody_ResolveObserverStatus(_Py_SOAC_OBSERVER_REFUSED);
+        return _PySoacSource_ResolveObserverStatus(_Py_SOAC_OBSERVER_REFUSED);
     }
 #ifdef _Py_TIER2
     if (eval_frame != NULL) {
@@ -3047,7 +3046,7 @@ _PyInterpreterState_SetEvalFrameFunc(PyInterpreterState *interp,
 {
     PyObject *saved = PyErr_GetRaisedException();
     int status = _PyInterpreterState_SetEvalFrameFuncChecked(interp, eval_frame);
-    _PySoacBody_FinishVoidSetter(status, saved, "_PyInterpreterState_SetEvalFrameFunc");
+    _PySoacSource_FinishVoidSetter(status, saved, "_PyInterpreterState_SetEvalFrameFunc");
 }
 
 

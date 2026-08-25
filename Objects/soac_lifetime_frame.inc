@@ -5,10 +5,7 @@
  */
 #include "pycore_gc.h"  // _PyGC_PREV_MASK_COLLECTING
 #include "pycore_traceback.h"  // _PyTraceBack_HereSoacLifetime
-#include "native_lifetime_reference_v1.h"  // ignored native22 ABI layer
-#include "pycore_soac_outgoing_v1.h"  // read-only current-scope validation
-#include "pycore_soac_body_interval.h"  // same full SyncBody carrier, READY only
-#include "pycore_soac_managed_code.h"  // shared private managed association
+#include "pycore_soac_observers.h"
 
 static int
 soac_frame_unavailable(const char *operation)
@@ -48,20 +45,11 @@ _PyFrame_GetSoacLifetimeObject(_PyInterpreterFrame *frame)
     return object;
 }
 
-/* Shared allocation for legacy and native-reference lifetime constructors.
- * The native-reference path moves the actual code-primary token.
- * Its public declarations are in native_lifetime_reference_v1.h.
- */
-_Static_assert(sizeof(PySoacRefV1) == sizeof(_PyStackRef),
-               "lifetime code handoff must move the exact native token");
-_Static_assert(_Alignof(PySoacRefV1) == _Alignof(_PyStackRef),
-               "lifetime code handoff requires native token alignment");
-
+/* A lifetime frame owns its code and may retain current source values for
+ * an escaped traceback. It never executes source bytecode. */
 #ifndef Py_GIL_DISABLED
 static PyFrameObject *
-soac_lifetime_new_code_primary(PyCodeObject *source_code,
-                               PySoacRefV1 *code_owner,
-                               const _PyStackRef *borrowed_code)
+soac_lifetime_new_code_primary(PyCodeObject *source_code)
 {
     /* _PyFrame_New_NoTrack borrows code only and does not acquire a code edge.
      * As in the legacy path, allocation cannot call Python or collect now. */
@@ -85,22 +73,7 @@ soac_lifetime_new_code_primary(PyCodeObject *source_code,
     }
     object->f_frame = frame;
 
-    /* All validation and recoverable allocation is complete. No Python can
-     * observe this still-untracked frame between Empty publication and move. */
-    assert(code_owner == NULL || borrowed_code == NULL);
-    if (borrowed_code != NULL) {
-        frame->f_executable = PyStackRef_Borrow(*borrowed_code);
-        frame->soac_lifetime_owned_environment = SOAC_LIFETIME_BORROWED_CODE;
-    }
-    else if (code_owner == NULL) {
-        frame->f_executable = PyStackRef_FromPyObjectNew((PyObject *)source_code);
-    }
-    else {
-        PySoacRefV1 moved = PySoacRef_TakeV1(code_owner);
-        /* Transport only: moved is not another semantic owner and is never
-         * independently closed. No decoding or tag-dependent policy here. */
-        memcpy(&frame->f_executable, &moved, sizeof(frame->f_executable));
-    }
+    frame->f_executable = PyStackRef_FromPyObjectNew((PyObject *)source_code);
     _PyFrame_SetExecutableView(frame, (PyObject *)source_code);
     _PyObject_GC_TRACK(object);
     PyErr_SetRaisedException(error);
@@ -121,70 +94,7 @@ PyFrame_NewSoacLifetime(PyCodeObject *source_code)
                         "source-lifetime frame requires an actual code object");
         return NULL;
     }
-    return soac_lifetime_new_code_primary(source_code, NULL, NULL);
-#endif
-}
-
-PyFrameObject *
-PyFrame_NewSoacLifetimeWithReferenceV1(PySoacRefV1 *code_owner)
-{
-#if defined(Py_GIL_DISABLED) || SIZEOF_VOID_P != 8
-    (void)code_owner;
-    PyErr_SetString(PyExc_NotImplementedError,
-                    "source-lifetime references require the selected 64-bit GIL build");
-    return NULL;
-#else
-    if (code_owner == NULL ||
-        (uintptr_t)code_owner % _Alignof(PySoacRefV1) != 0) {
-        PyErr_SetString(PyExc_ValueError,
-                        "source-lifetime code owner requires an aligned native slot");
-        return NULL;
-    }
-    PyObject *code = PySoacRef_ObjectViewV1(*code_owner);
-    if (code == NULL || !PyCode_Check(code)) {
-        PyErr_SetString(PyExc_TypeError,
-                        "source-lifetime code owner requires an actual code object");
-        return NULL;
-    }
-    if (!PySoacRef_IsHeapSafeV1(*code_owner)) {
-        PyErr_SetString(PyExc_ValueError,
-                        "source-lifetime code owner must already be heap safe");
-        return NULL;
-    }
-    return soac_lifetime_new_code_primary((PyCodeObject *)code, code_owner, NULL);
-#endif
-}
-
-
-PyFrameObject *
-PyFrame_NewSoacManagedLifetimeV1(PyObject *generator, PyObject *owner)
-{
-#if defined(Py_GIL_DISABLED) || SIZEOF_VOID_P != 8
-    (void)generator; (void)owner;
-    PyErr_SetString(PyExc_NotImplementedError,
-                    "managed lifetime references require the selected 64-bit GIL build");
-    return NULL;
-#else
-    if (generator == NULL || owner == NULL ||
-        !_PyGen_IsSoacManaged((PyGenObject *)generator)) {
-        PyErr_SetString(PyExc_TypeError,
-                        "managed lifetime requires an actual managed generator");
-        return NULL;
-    }
-    PyGenObject *gen = (PyGenObject *)generator;
-    struct _PySoacManagedGenerator *managed = gen->gi_soac_managed;
-    if (managed->code_mode != SOAC_GEN_TRANSFERRED_CODE ||
-        managed->owner != owner || managed->phase != SOAC_GEN_LIVE ||
-        gen->gi_frame_state != FRAME_EXECUTING || managed->cleanup != NULL ||
-        !PyStackRef_IsHeapSafe(gen->gi_iframe.f_executable)) {
-        PyErr_SetString(PyExc_RuntimeError,
-                        "managed lifetime requires the actual executing transferred owner");
-        return NULL;
-    }
-    /* Exact native support handle, not an owning pointer conversion. The
-     * allocator completes all recoverable work before creating the Borrow. */
-    return soac_lifetime_new_code_primary(
-        _PyFrame_GetCode(&gen->gi_iframe), NULL, &gen->gi_iframe.f_executable);
+    return soac_lifetime_new_code_primary(source_code);
 #endif
 }
 
@@ -222,37 +132,12 @@ PyFrame_AddSoacTraceback(PyFrameObject *object,
     return _PyTraceBack_HereSoacLifetime(object, instruction_offset, source_lineno);
 }
 
-/* One finish implementation, two explicitly typed input row forms. The enum
- * is selected by the API wrapper, never inferred from bits, names or objects.
- */
-typedef enum {
-    SOAC_LIFETIME_OBJECT_ROWS,
-    SOAC_LIFETIME_REFERENCE_ROWS,
-} SoacLifetimeOwnerRowKind;
-
-typedef struct {
-    SoacLifetimeOwnerRowKind kind;
-    PyObject *const *objects;
-    const PySoacRefV1 *const *references;
-} SoacLifetimeOwnerRows;
-
-#ifndef Py_GIL_DISABLED
-static PyObject *
-soac_lifetime_owner_view(const SoacLifetimeOwnerRows *rows, Py_ssize_t index)
-{
-    if (rows->kind == SOAC_LIFETIME_OBJECT_ROWS) {
-        return rows->objects[index];
-    }
-    const PySoacRefV1 *slot = rows->references[index];
-    return slot == NULL ? NULL : PySoacRef_ObjectViewV1(*slot);
-}
-#endif
-
-static int
-soac_lifetime_finish_owner_rows(
+/* Retain the actual source owners only when the frame has escaped. */
+int
+PyFrame_FinishSoacLifetimeWithEnvironment(
     PyFrameObject *object, PyObject *source_function,
     PyObject *captured_globals, PyObject *captured_builtins,
-    PyObject *source_namespace, const SoacLifetimeOwnerRows *rows, Py_ssize_t count)
+    PyObject *source_namespace, PyObject *const *source_owners, Py_ssize_t count)
 {
 #ifdef Py_GIL_DISABLED
     PyErr_SetString(PyExc_NotImplementedError,
@@ -275,7 +160,7 @@ soac_lifetime_finish_owner_rows(
         return -1;
     }
     if (frame->soac_lifetime_owned_environment &
-        ~(SOAC_LIFETIME_BORROWED_CODE | SOAC_LIFETIME_SCOPE_TERMINAL)) {
+        ~SOAC_LIFETIME_SCOPE_TERMINAL) {
         PyErr_SetString(PyExc_RuntimeError,
                         "invalid active source-lifetime ownership flags");
         return -1;
@@ -286,34 +171,18 @@ soac_lifetime_finish_owner_rows(
                         "source-lifetime namespace does not match the original code scope");
         return -1;
     }
-    const void *owner_array = rows->kind == SOAC_LIFETIME_OBJECT_ROWS
-        ? (const void *)rows->objects : (const void *)rows->references;
-    if (count != code->co_nlocalsplus || (count != 0 && owner_array == NULL)) {
+    if (count != code->co_nlocalsplus || (count != 0 && source_owners == NULL)) {
         PyErr_SetString(PyExc_ValueError,
                         "source-lifetime owners do not match the original code layout");
         return -1;
     }
-    if (rows->kind == SOAC_LIFETIME_OBJECT_ROWS &&
-        (captured_globals == NULL || captured_builtins == NULL)) {
+    if (captured_globals == NULL || captured_builtins == NULL) {
         PyErr_SetString(PyExc_ValueError,
                         "source-lifetime finish requires the captured function environment");
         return -1;
     }
-    if (rows->kind == SOAC_LIFETIME_REFERENCE_ROWS && count != 0 &&
-        (uintptr_t)rows->references % _Alignof(const PySoacRefV1 *) != 0) {
-        PyErr_SetString(PyExc_ValueError,
-                        "source-lifetime reference rows require an aligned pointer array");
-        return -1;
-    }
     for (Py_ssize_t i = 0; i < count; i++) {
-        if (rows->kind == SOAC_LIFETIME_REFERENCE_ROWS &&
-            rows->references[i] != NULL &&
-            (uintptr_t)rows->references[i] % _Alignof(PySoacRefV1) != 0) {
-            PyErr_SetString(PyExc_ValueError,
-                            "source-lifetime reference row requires an aligned native slot");
-            return -1;
-        }
-        PyObject *value = soac_lifetime_owner_view(rows, i);
+        PyObject *value = source_owners[i];
         _PyLocals_Kind kind = _PyLocals_GetKind(code->co_localspluskinds, (int)i);
         if ((kind & (CO_FAST_CELL | CO_FAST_FREE)) &&
             value != NULL && !PyCell_Check(value)) {
@@ -325,34 +194,16 @@ soac_lifetime_finish_owner_rows(
     /* Nothing below allocates a Python object, dispatches Python, decrefs,
      * or recoverably fails. Native STACKREF_DEBUG bookkeeping may use its
      * ordinary fatal-on-OOM C allocation. Decide before adding any parked
-     * references, including a self-local. Primary native tokens are unchanged. */
+     * references, including a self-local. The caller's owners are unchanged. */
     int retained = !_PyObject_IsUniquelyReferenced((PyObject *)object);
-    if (rows->kind == SOAC_LIFETIME_REFERENCE_ROWS) {
-        /* The native interval's actual function token, not a cached map
-         * pointer, supported these borrowed views. GC may already have run
-         * func_clear, even while that function remains allocated. Unpublish
-         * before every commit path, including unique and never-entered frames;
-         * never read or acquire a captured map after its support may retire.
-         * Lifetime map introspection (Python and C) already fails explicitly. */
-        frame->f_globals = NULL;
-        frame->f_builtins = NULL;
-    }
-    uint16_t code_role = frame->soac_lifetime_owned_environment &
-                         SOAC_LIFETIME_BORROWED_CODE;
-    if (retained && code_role) {
-        /* Only the real escaped-frame phase acquires its code edge.
-         * This consumes/recreates the frame child, not gen support. */
-        frame->f_executable = PyStackRef_MakeHeapSafe(frame->f_executable);
-        code_role = 0;
-    }
-    frame->soac_lifetime_owned_environment = code_role;
+    frame->soac_lifetime_owned_environment = 0;
     frame->owner = retained ? FRAME_OWNED_BY_SOAC_FINISHED
                             : FRAME_OWNED_BY_SOAC_CLEARED;
     if (!retained) {
         return 0;
     }
     frame->f_funcobj = PyStackRef_FromPyObjectNew(source_function);
-    if (rows->kind == SOAC_LIFETIME_OBJECT_ROWS) {
+    {
         frame->f_globals = captured_globals;
         frame->f_builtins = captured_builtins;
         /* Cyclic GC may already have cleared this still-allocated function, or it
@@ -375,7 +226,7 @@ soac_lifetime_finish_owner_rows(
     }
     frame->f_locals = Py_XNewRef(source_namespace);
     for (Py_ssize_t i = 0; i < count; i++) {
-        PyObject *value = soac_lifetime_owner_view(rows, i);
+        PyObject *value = source_owners[i];
         frame->localsplus[i] = value == NULL ? PyStackRef_NULL
             : PyStackRef_FromPyObjectNew(value);
     }
@@ -384,53 +235,22 @@ soac_lifetime_finish_owner_rows(
 #endif
 }
 
-int
-PyFrame_FinishSoacLifetimeWithEnvironment(
-    PyFrameObject *object, PyObject *source_function,
-    PyObject *captured_globals, PyObject *captured_builtins,
-    PyObject *source_namespace, PyObject *const *source_owners, Py_ssize_t count)
-{
-    const SoacLifetimeOwnerRows rows = {
-        .kind = SOAC_LIFETIME_OBJECT_ROWS, .objects = source_owners,
-    };
-    return soac_lifetime_finish_owner_rows(
-        object, source_function, captured_globals, captured_builtins,
-        source_namespace, &rows, count);
-}
-
-int
-PyFrame_FinishSoacLifetimeWithReferencesV1(
-    PyFrameObject *object, PyObject *source_function,
-    PyObject *captured_globals, PyObject *captured_builtins,
-    PyObject *source_namespace,
-    const PySoacRefV1 *const *source_owner_slots, Py_ssize_t count)
-{
-#if defined(Py_GIL_DISABLED) || SIZEOF_VOID_P != 8
-    (void)object;
-    (void)source_function;
-    (void)captured_globals;
-    (void)captured_builtins;
-    (void)source_namespace;
-    (void)source_owner_slots;
-    (void)count;
-    PyErr_SetString(PyExc_NotImplementedError,
-                    "source-lifetime references require the selected 64-bit GIL build");
-    return -1;
-#else
-    /* These legacy-shaped operands are intentionally not map-liveness proof.
-     * Canonical native-reference callers pass NULL; no retired pointer is read. */
-    (void)captured_globals;
-    (void)captured_builtins;
-    const SoacLifetimeOwnerRows rows = {
-        .kind = SOAC_LIFETIME_REFERENCE_ROWS, .references = source_owner_slots,
-    };
-    return soac_lifetime_finish_owner_rows(
-        object, source_function, NULL, NULL, source_namespace, &rows, count);
-#endif
-}
-
-
 /* Caller-owned native source-parent scope storage. */
+typedef struct {
+    uintptr_t version;
+    uintptr_t state;
+    uintptr_t storage;
+    uintptr_t thread;
+    uintptr_t frame;
+    uintptr_t previous;
+} SoacLifetimeScopeStateV1;
+
+enum {
+    SOAC_SCOPE_V1_LINKED = 1,
+    SOAC_SCOPE_V1_SUSPENDED = 2,
+    SOAC_SCOPE_V1_TERMINAL = 3,
+};
+
 _Static_assert(sizeof(SoacLifetimeScopeStateV1) == sizeof(PySoacLifetimeScopeV1),
                "source-parent scope word count must match its public ABI");
 _Static_assert(_Alignof(SoacLifetimeScopeStateV1) == _Alignof(PySoacLifetimeScopeV1),
@@ -475,8 +295,8 @@ PyFrame_GetSoacLifetimeScopeLayoutV1(
 }
 
 #ifndef Py_GIL_DISABLED
-int
-_PyFrame_PrepareSoacScopeV1(
+static int
+soac_scope_prepare(
     SoacLifetimeScopeStateV1 *state, uintptr_t storage,
     PyFrameObject *object, PyObject *actual_function,
     PyObject *captured_globals, PyObject *captured_builtins)
@@ -494,7 +314,7 @@ _PyFrame_PrepareSoacScopeV1(
                         "source-parent entry requires the captured environment");
         return -1;
     }
-    if ((frame->soac_lifetime_owned_environment & ~SOAC_LIFETIME_BORROWED_CODE) != 0 ||
+    if (frame->soac_lifetime_owned_environment != 0 ||
         frame->previous != NULL || object->f_back != NULL ||
         !PyStackRef_IsNull(frame->f_funcobj) ||
         frame->f_globals != NULL || frame->f_builtins != NULL ||
@@ -504,6 +324,13 @@ _PyFrame_PrepareSoacScopeV1(
         return -1;
     }
     PyThreadState *tstate = _PyThreadState_GET();
+    if (tstate->interp->eval_frame != NULL ||
+        _PySoacSource_CodeHasObservers(tstate->interp, _PyFrame_GetCode(frame)) ||
+        _PySoacSource_HasObserverReservation(tstate->interp)) {
+        PyErr_SetString(PyExc_NotImplementedError,
+                        "SOAC source-parent observer or eval-frame support is unavailable");
+        return -1;
+    }
     *state = (SoacLifetimeScopeStateV1) {
         .version = PySoac_LIFETIME_SCOPE_ABI_VERSION,
         .state = SOAC_SCOPE_V1_LINKED,
@@ -515,11 +342,11 @@ _PyFrame_PrepareSoacScopeV1(
     return 0;
 }
 
-void
-_PyFrame_LinkSoacScopeV1(
+static void
+soac_scope_link(
     const SoacLifetimeScopeStateV1 *state, void *storage,
     PyObject *actual_function, PyObject *captured_globals,
-    PyObject *captured_builtins, uint16_t extra_flags)
+    PyObject *captured_builtins)
 {
     assert(state->storage == (uintptr_t)storage);
     PyThreadState *tstate = (PyThreadState *)state->thread;
@@ -531,15 +358,13 @@ _PyFrame_LinkSoacScopeV1(
     frame->f_globals = captured_globals;
     frame->f_builtins = captured_builtins;
     frame->previous = tstate->current_frame;
-    frame->soac_lifetime_owned_environment |= SOAC_LIFETIME_SCOPE_LINKED | extra_flags;
+    frame->soac_lifetime_owned_environment = SOAC_LIFETIME_SCOPE_LINKED;
     memcpy(storage, state, sizeof(*state));
     tstate->current_frame = frame;
 }
 
-int
-_PyFrame_ValidateSoacScopeV1(
-    const SoacLifetimeScopeStateV1 *state, uintptr_t storage,
-    uint16_t extra_flags)
+static int
+soac_scope_validate(const SoacLifetimeScopeStateV1 *state, uintptr_t storage)
 {
     if (state->version != PySoac_LIFETIME_SCOPE_ABI_VERSION ||
         state->state != SOAC_SCOPE_V1_LINKED || state->storage != storage) {
@@ -560,8 +385,8 @@ _PyFrame_ValidateSoacScopeV1(
     }
     _PyInterpreterFrame *frame = tstate->current_frame;
     if (frame == NULL || frame->owner != FRAME_OWNED_BY_SOAC_ACTIVE ||
-        (frame->soac_lifetime_owned_environment & ~SOAC_LIFETIME_BORROWED_CODE) !=
-            (SOAC_LIFETIME_SCOPE_LINKED | extra_flags) ||
+        frame->soac_lifetime_owned_environment !=
+            SOAC_LIFETIME_SCOPE_LINKED ||
         (uintptr_t)frame->previous != state->previous) {
         PyErr_SetString(PyExc_RuntimeError, "invalid linked source-parent frame");
         return -1;
@@ -569,8 +394,8 @@ _PyFrame_ValidateSoacScopeV1(
     return 0;
 }
 
-void
-_PyFrame_UnlinkSoacScopeV1(
+static void
+soac_scope_unlink(
     SoacLifetimeScopeStateV1 *state, void *storage, int terminal)
 {
     PyThreadState *tstate = (PyThreadState *)state->thread;
@@ -582,9 +407,7 @@ _PyFrame_UnlinkSoacScopeV1(
     /* Validated by the caller before any recursion refund or mutation. */
     tstate->current_frame = previous;
     frame->previous = NULL;
-    frame->soac_lifetime_owned_environment =
-        (frame->soac_lifetime_owned_environment & SOAC_LIFETIME_BORROWED_CODE) |
-        (terminal ? SOAC_LIFETIME_SCOPE_TERMINAL : 0);
+    frame->soac_lifetime_owned_environment = terminal ? SOAC_LIFETIME_SCOPE_TERMINAL : 0;
     if (tstate->last_profiled_frame == frame) {
         tstate->last_profiled_frame = previous;
     }
@@ -640,10 +463,10 @@ PyFrame_EnterSoacLifetimeScopeV1(
         }
     }
     SoacLifetimeScopeStateV1 state;
-    if (_PyFrame_PrepareSoacScopeV1(&state, (uintptr_t)scope, object,
+    if (soac_scope_prepare(&state, (uintptr_t)scope, object,
             actual_function, captured_globals, captured_builtins) < 0) return -1;
-    _PyFrame_LinkSoacScopeV1(&state, scope, actual_function,
-                           captured_globals, captured_builtins, 0);
+    soac_scope_link(&state, scope, actual_function,
+                    captured_globals, captured_builtins);
     return 0;
 #endif
 }
@@ -665,60 +488,8 @@ PyFrame_LeaveSoacLifetimeScopeV1(
     }
     SoacLifetimeScopeStateV1 state;
     memcpy(&state, scope, sizeof(state));
-    if (_PyFrame_ValidateSoacScopeV1(&state, (uintptr_t)scope, 0) < 0) return -1;
-    _PyFrame_UnlinkSoacScopeV1(&state, scope, reason == PySoac_LIFETIME_SCOPE_TERMINAL);
+    if (soac_scope_validate(&state, (uintptr_t)scope) < 0) return -1;
+    soac_scope_unlink(&state, scope, reason == PySoac_LIFETIME_SCOPE_TERMINAL);
     return 0;
-#endif
-}
-
-/* Append to the existing native22 lifetime unit. Scope21 layout/Enter/Leave
- * and all existing constructor/Finish/traceback bodies remain unchanged. */
-_PyInterpreterFrame *
-_PyFrame_BorrowSoacLifetimeScopeV1(
-    const PySoacLifetimeScopeV1 *scope, size_t scope_size,
-    PyCodeObject *expected_code)
-{
-#if defined(Py_GIL_DISABLED) || SIZEOF_VOID_P != 8
-    (void)scope; (void)scope_size; (void)expected_code;
-    PyErr_SetString(PyExc_NotImplementedError,
-                    "outgoing source calls require the selected 64-bit GIL build");
-    return NULL;
-#else
-    if (scope_size == sizeof(PySoacSyncBodyIntervalV1)) {
-        return _PyFrame_BorrowSoacSyncBodyV1(
-            (const PySoacSyncBodyIntervalV1 *)(const void *)scope,
-            scope_size, expected_code);
-    }
-    /* The existing validator is read-only despite its older non-const API. */
-    if (soac_scope_storage_valid((PySoacLifetimeScopeV1 *)(void *)scope,
-                                 scope_size) < 0) {
-        return NULL;
-    }
-    SoacLifetimeScopeStateV1 state;
-    memcpy(&state, scope, sizeof(state));
-    if (state.version != PySoac_LIFETIME_SCOPE_ABI_VERSION ||
-        state.state != SOAC_SCOPE_V1_LINKED || state.storage != (uintptr_t)scope) {
-        PyErr_SetString(PyExc_RuntimeError,
-                        "outgoing call needs its original linked source scope");
-        return NULL;
-    }
-    PyThreadState *thread = _PyThreadState_GET();
-    if (state.thread != (uintptr_t)thread ||
-        state.frame != (uintptr_t)thread->current_frame) {
-        PyErr_SetString(PyExc_RuntimeError,
-                        "outgoing source call used outside its current native interval");
-        return NULL;
-    }
-    _PyInterpreterFrame *frame = thread->current_frame;
-    if (frame == NULL || frame->owner != FRAME_OWNED_BY_SOAC_ACTIVE ||
-        (frame->soac_lifetime_owned_environment & ~SOAC_LIFETIME_BORROWED_CODE) !=
-            SOAC_LIFETIME_SCOPE_LINKED ||
-        (uintptr_t)frame->previous != state.previous ||
-        _PyFrame_GetCode(frame) != expected_code) {
-        PyErr_SetString(PyExc_RuntimeError,
-                        "outgoing call does not match its captured source frame/code");
-        return NULL;
-    }
-    return frame;
 #endif
 }

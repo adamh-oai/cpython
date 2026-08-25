@@ -30,7 +30,6 @@
 #include "pycore_sliceobject.h"   // _PyBuildSlice_ConsumeRefs
 #include "pycore_soac_type.h"    // physical member policy guards
 #include "pycore_stackref.h"
-#include "pycore_soac_vm_call_v1.h"
 #include "pycore_template.h"      // _PyTemplate_Build()
 #include "pycore_tuple.h"         // _PyTuple_ITEMS()
 #include "pycore_typeobject.h"    // _PySuper_Lookup()
@@ -3920,27 +3919,7 @@ dummy_func(
                 ERROR_NO_POP();
             }
 
-            if (Py_TYPE(callable_o) == &PyFunction_Type &&
-                (frame->soac_checked_activation == NULL ||
-                 !_PySOAC_DataclassHasValueSite(frame)) &&
-                !IS_PEP523_HOOKED(tstate) &&
-                _PySoacVMCall_IsRegisteredV1(callable_o)) {
-                _PySoacVMCallV1 source_call;
-                int code_flags = ((PyCodeObject *)PyFunction_GET_CODE(callable_o))->co_flags;
-                PyObject *locals = code_flags & CO_OPTIMIZED ? NULL
-                    : Py_NewRef(PyFunction_GET_GLOBALS(callable_o));
-                _PySoacVMCall_BindVectorV1(
-                    &source_call, tstate, Py_SOAC_CALL_VM_POSITIONAL_V1,
-                    callable, locals, arguments, total_args, NULL);
-                DEAD(args);
-                DEAD(self_or_null);
-                DEAD(callable);
-                SYNC_SP();
-                res = _PySoacVMCall_FinishV1(&source_call, frame->stackpointer);
-                _PySOAC_InterpreterCallClear(&soac_call);
-                ERROR_IF(PyStackRef_IsNull(res));
-            }
-            else {
+            {
                 // Check if the call can be inlined or not. The entered branch
                 // commits this evaluator before any callback-capable binding.
                 _PyFrameEvalFunction eval_frame_before_binding;
@@ -4881,28 +4860,7 @@ dummy_func(
                 ERROR_NO_POP();
             }
 
-            if (Py_TYPE(callable_o) == &PyFunction_Type &&
-                (frame->soac_checked_activation == NULL ||
-                 !_PySOAC_DataclassHasValueSite(frame)) &&
-                !IS_PEP523_HOOKED(tstate) &&
-                _PySoacVMCall_IsRegisteredV1(callable_o)) {
-                _PySoacVMCallV1 source_call;
-                int code_flags = ((PyCodeObject *)PyFunction_GET_CODE(callable_o))->co_flags;
-                PyObject *locals = code_flags & CO_OPTIMIZED ? NULL
-                    : Py_NewRef(PyFunction_GET_GLOBALS(callable_o));
-                _PySoacVMCall_BindVectorV1(
-                    &source_call, tstate, Py_SOAC_CALL_VM_KEYWORDS_V1,
-                    callable, locals, arguments, positional_args, kwnames_o);
-                DEAD(args);
-                DEAD(self_or_null);
-                DEAD(callable);
-                PyStackRef_CLOSE(kwnames);
-                SYNC_SP();
-                res = _PySoacVMCall_FinishV1(&source_call, frame->stackpointer);
-                _PySOAC_InterpreterCallClear(&soac_call);
-                ERROR_IF(PyStackRef_IsNull(res));
-            }
-            else {
+            {
                 // Check if the call can be inlined or not. The entered branch
                 // commits this evaluator before any callback-capable binding.
                 _PyFrameEvalFunction eval_frame_before_binding;
@@ -5148,36 +5106,7 @@ dummy_func(
                     ERROR_NO_POP();
                 }
             }
-            if (opcode != INSTRUMENTED_CALL_FUNCTION_EX &&
-                Py_TYPE(func) == &PyFunction_Type &&
-                (frame->soac_checked_activation == NULL ||
-                 !_PySOAC_DataclassHasValueSite(frame)) &&
-                !IS_PEP523_HOOKED(tstate) &&
-                _PySoacVMCall_IsRegisteredV1(func)) {
-                int consistent = _PySoacVMCall_RequireOptimizedExpandedV1(func);
-                if (consistent < 0) {
-                    _PySOAC_InterpreterCallClear(&soac_call);
-                    ERROR_NO_POP();
-                }
-                /* Check above is before either container's native owned
-                 * conversion. Iterable normalization already ran at its
-                 * original _MAKE_CALLARGS_A_TUPLE position. */
-                PyObject *callargs = PyStackRef_AsPyObjectSteal(callargs_st);
-                PyObject *kwargs = PyStackRef_IsNull(kwargs_st) ? NULL
-                    : PyStackRef_AsPyObjectSteal(kwargs_st);
-                _PySoacVMCallV1 source_call;
-                _PySoacVMCall_BindExpandedV1(
-                    &source_call, tstate, func_st,
-                    PyTuple_GET_SIZE(callargs), callargs, kwargs);
-                /* BindExpanded retired key scratch, callargs and kwargs in
-                 * native order. No stale VM transport token is closed again. */
-                INPUTS_DEAD();
-                SYNC_SP();
-                result = _PySoacVMCall_FinishV1(&source_call, frame->stackpointer);
-                _PySOAC_InterpreterCallClear(&soac_call);
-                ERROR_IF(PyStackRef_IsNull(result));
-            }
-            else {
+            {
                 // DICT_MERGE is called before this opcode if there are kwargs.
                 // It converts all dict subtypes in kwargs into regular dicts.
                 PyObject *result_o;
@@ -5337,19 +5266,10 @@ dummy_func(
         op(_CHECK_IS_NOT_PY_CALLABLE_EX, (func_st, unused, unused, unused -- func_st, unused, unused, unused)) {
             PyObject *func = PyStackRef_AsPyObjectBorrow(func_st);
             EXIT_IF(Py_TYPE(func) == &PyFunction_Type && ((PyFunctionObject *)func)->vectorcall == _PyFunction_Vectorcall);
-            EXIT_IF(PyFunction_Check(func) &&
-                    ((PyFunctionObject *)func)->func_soac_source_entry != NULL &&
-                    _PySoacVMCall_IsRegisteredV1(func));
         }
 
         op(_CALL_FUNCTION_EX_NON_PY_GENERAL, (func_st, null, callargs_st, kwargs_st -- result)) {
             PyObject *func = PyStackRef_AsPyObjectBorrow(func_st);
-            /* Tuple normalization may install a source registration.
-             * Exit with its materialized tuple still live; the generic
-             * continuation must not replay the original iterable. */
-            EXIT_IF(PyFunction_Check(func) &&
-                    ((PyFunctionObject *)func)->func_soac_source_entry != NULL &&
-                    _PySoacVMCall_IsRegisteredV1(func));
             PyObject *callargs = PyStackRef_AsPyObjectBorrow(callargs_st);
             (void)null;
             assert(PyTuple_CheckExact(callargs));
