@@ -1239,6 +1239,10 @@
             break;
         }
 
+        case _CHECK_SOAC_RETURN: {
+            break;
+        }
+
         case _RETURN_VALUE: {
             JitOptRef retval;
             JitOptRef res;
@@ -1375,12 +1379,7 @@
             break;
         }
 
-        case _STORE_NAME: {
-            CHECK_STACK_BOUNDS(-1);
-            stack_pointer += -1;
-            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
-            break;
-        }
+        /* _STORE_NAME is not a viable micro-op for tier 2 */
 
         case _DELETE_NAME: {
             break;
@@ -1472,12 +1471,7 @@
             break;
         }
 
-        case _STORE_GLOBAL: {
-            CHECK_STACK_BOUNDS(-1);
-            stack_pointer += -1;
-            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
-            break;
-        }
+        /* _STORE_GLOBAL is not a viable micro-op for tier 2 */
 
         case _DELETE_GLOBAL: {
             break;
@@ -2005,6 +1999,10 @@
         }
 
         /* _LOAD_ATTR_GETATTRIBUTE_OVERRIDDEN is not a viable micro-op for tier 2 */
+
+        case _GUARD_NO_ORDINARY_INSTANCE_WRITES: {
+            break;
+        }
 
         case _GUARD_DORV_NO_DICT: {
             break;
@@ -3562,15 +3560,7 @@
             break;
         }
 
-        case _SET_FUNCTION_ATTRIBUTE: {
-            JitOptRef func_out;
-            func_out = sym_new_not_null(ctx);
-            CHECK_STACK_BOUNDS(-1);
-            stack_pointer[-2] = func_out;
-            stack_pointer += -1;
-            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
-            break;
-        }
+        /* _SET_FUNCTION_ATTRIBUTE is not a viable micro-op for tier 2 */
 
         case _RETURN_GENERATOR: {
             JitOptRef res;

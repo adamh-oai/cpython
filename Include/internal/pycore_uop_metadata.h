@@ -65,15 +65,15 @@ const uint32_t _PyUop_Flags[MAX_UOP_ID+1] = {
     [_LOAD_SMALL_INT_2] = 0,
     [_LOAD_SMALL_INT_3] = 0,
     [_LOAD_SMALL_INT] = HAS_ARG_FLAG,
-    [_SWAP_FAST_0] = HAS_LOCAL_FLAG,
-    [_SWAP_FAST_1] = HAS_LOCAL_FLAG,
-    [_SWAP_FAST_2] = HAS_LOCAL_FLAG,
-    [_SWAP_FAST_3] = HAS_LOCAL_FLAG,
-    [_SWAP_FAST_4] = HAS_LOCAL_FLAG,
-    [_SWAP_FAST_5] = HAS_LOCAL_FLAG,
-    [_SWAP_FAST_6] = HAS_LOCAL_FLAG,
-    [_SWAP_FAST_7] = HAS_LOCAL_FLAG,
-    [_SWAP_FAST] = HAS_ARG_FLAG | HAS_LOCAL_FLAG,
+    [_SWAP_FAST_0] = HAS_LOCAL_FLAG | HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG,
+    [_SWAP_FAST_1] = HAS_LOCAL_FLAG | HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG,
+    [_SWAP_FAST_2] = HAS_LOCAL_FLAG | HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG,
+    [_SWAP_FAST_3] = HAS_LOCAL_FLAG | HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG,
+    [_SWAP_FAST_4] = HAS_LOCAL_FLAG | HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG,
+    [_SWAP_FAST_5] = HAS_LOCAL_FLAG | HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG,
+    [_SWAP_FAST_6] = HAS_LOCAL_FLAG | HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG,
+    [_SWAP_FAST_7] = HAS_LOCAL_FLAG | HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG,
+    [_SWAP_FAST] = HAS_ARG_FLAG | HAS_LOCAL_FLAG | HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG,
     [_POP_TOP] = HAS_ESCAPES_FLAG | HAS_PURE_FLAG,
     [_POP_TOP_NOP] = 0,
     [_POP_TOP_INT] = 0,
@@ -139,7 +139,8 @@ const uint32_t _PyUop_Flags[MAX_UOP_ID+1] = {
     [_DELETE_SUBSCR] = HAS_ERROR_FLAG | HAS_ESCAPES_FLAG,
     [_CALL_INTRINSIC_1] = HAS_ARG_FLAG | HAS_ERROR_FLAG | HAS_ESCAPES_FLAG,
     [_CALL_INTRINSIC_2] = HAS_ARG_FLAG | HAS_ERROR_FLAG | HAS_ESCAPES_FLAG,
-    [_RETURN_VALUE] = HAS_ESCAPES_FLAG | HAS_NEEDS_GUARD_IP_FLAG,
+    [_CHECK_SOAC_RETURN] = HAS_ESCAPES_FLAG,
+    [_RETURN_VALUE] = HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG | HAS_NEEDS_GUARD_IP_FLAG,
     [_GET_AITER] = HAS_ERROR_FLAG | HAS_ESCAPES_FLAG,
     [_GET_ANEXT] = HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG,
     [_GET_AWAITABLE] = HAS_ARG_FLAG | HAS_ERROR_FLAG | HAS_ESCAPES_FLAG,
@@ -148,7 +149,6 @@ const uint32_t _PyUop_Flags[MAX_UOP_ID+1] = {
     [_POP_EXCEPT] = HAS_ESCAPES_FLAG,
     [_LOAD_COMMON_CONSTANT] = HAS_ARG_FLAG,
     [_LOAD_BUILD_CLASS] = HAS_ERROR_FLAG | HAS_ESCAPES_FLAG,
-    [_STORE_NAME] = HAS_ARG_FLAG | HAS_NAME_FLAG | HAS_ERROR_FLAG | HAS_ESCAPES_FLAG,
     [_DELETE_NAME] = HAS_ARG_FLAG | HAS_NAME_FLAG | HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG,
     [_UNPACK_SEQUENCE] = HAS_ARG_FLAG | HAS_ERROR_FLAG | HAS_ESCAPES_FLAG,
     [_UNPACK_SEQUENCE_TWO_TUPLE] = HAS_ARG_FLAG | HAS_DEOPT_FLAG | HAS_ESCAPES_FLAG,
@@ -157,7 +157,6 @@ const uint32_t _PyUop_Flags[MAX_UOP_ID+1] = {
     [_UNPACK_EX] = HAS_ARG_FLAG | HAS_ERROR_FLAG | HAS_ESCAPES_FLAG,
     [_STORE_ATTR] = HAS_ARG_FLAG | HAS_NAME_FLAG | HAS_ERROR_FLAG | HAS_ESCAPES_FLAG,
     [_DELETE_ATTR] = HAS_ARG_FLAG | HAS_NAME_FLAG | HAS_ERROR_FLAG | HAS_ESCAPES_FLAG,
-    [_STORE_GLOBAL] = HAS_ARG_FLAG | HAS_NAME_FLAG | HAS_ERROR_FLAG | HAS_ESCAPES_FLAG,
     [_DELETE_GLOBAL] = HAS_ARG_FLAG | HAS_NAME_FLAG | HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG,
     [_LOAD_LOCALS] = HAS_ERROR_FLAG,
     [_LOAD_NAME] = HAS_ARG_FLAG | HAS_NAME_FLAG | HAS_ERROR_FLAG | HAS_ESCAPES_FLAG,
@@ -171,7 +170,7 @@ const uint32_t _PyUop_Flags[MAX_UOP_ID+1] = {
     [_DELETE_DEREF] = HAS_ARG_FLAG | HAS_FREE_FLAG | HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG,
     [_LOAD_FROM_DICT_OR_DEREF] = HAS_ARG_FLAG | HAS_FREE_FLAG | HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG,
     [_LOAD_DEREF] = HAS_ARG_FLAG | HAS_LOCAL_FLAG | HAS_ERROR_FLAG | HAS_ESCAPES_FLAG,
-    [_STORE_DEREF] = HAS_ARG_FLAG | HAS_FREE_FLAG | HAS_ESCAPES_FLAG,
+    [_STORE_DEREF] = HAS_ARG_FLAG | HAS_FREE_FLAG | HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG,
     [_COPY_FREE_VARS] = HAS_ARG_FLAG,
     [_BUILD_STRING] = HAS_ARG_FLAG | HAS_ERROR_FLAG | HAS_ESCAPES_FLAG,
     [_BUILD_INTERPOLATION] = HAS_ARG_FLAG | HAS_ERROR_FLAG | HAS_ESCAPES_FLAG,
@@ -199,6 +198,7 @@ const uint32_t _PyUop_Flags[MAX_UOP_ID+1] = {
     [_CHECK_ATTR_CLASS] = HAS_EXIT_FLAG,
     [_LOAD_ATTR_CLASS] = HAS_ESCAPES_FLAG,
     [_LOAD_ATTR_PROPERTY_FRAME] = HAS_ARG_FLAG | HAS_DEOPT_FLAG,
+    [_GUARD_NO_ORDINARY_INSTANCE_WRITES] = HAS_EXIT_FLAG,
     [_GUARD_DORV_NO_DICT] = HAS_EXIT_FLAG,
     [_STORE_ATTR_INSTANCE_VALUE] = HAS_ESCAPES_FLAG,
     [_STORE_ATTR_WITH_HINT] = HAS_ARG_FLAG | HAS_NAME_FLAG | HAS_DEOPT_FLAG | HAS_ESCAPES_FLAG,
@@ -306,9 +306,8 @@ const uint32_t _PyUop_Flags[MAX_UOP_ID+1] = {
     [_CHECK_IS_PY_CALLABLE_EX] = HAS_EXIT_FLAG,
     [_PY_FRAME_EX] = HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG | HAS_SYNC_SP_FLAG,
     [_CHECK_IS_NOT_PY_CALLABLE_EX] = HAS_EXIT_FLAG,
-    [_CALL_FUNCTION_EX_NON_PY_GENERAL] = HAS_EXIT_FLAG | HAS_ERROR_FLAG | HAS_ESCAPES_FLAG,
+    [_CALL_FUNCTION_EX_NON_PY_GENERAL] = HAS_ERROR_FLAG | HAS_ESCAPES_FLAG,
     [_MAKE_FUNCTION] = HAS_ERROR_FLAG | HAS_ESCAPES_FLAG,
-    [_SET_FUNCTION_ATTRIBUTE] = HAS_ARG_FLAG | HAS_ERROR_FLAG,
     [_RETURN_GENERATOR] = HAS_ERROR_FLAG | HAS_ESCAPES_FLAG | HAS_NEEDS_GUARD_IP_FLAG,
     [_BUILD_SLICE] = HAS_ARG_FLAG | HAS_ERROR_FLAG | HAS_ESCAPES_FLAG,
     [_CONVERT_VALUE] = HAS_ARG_FLAG | HAS_ERROR_FLAG | HAS_ESCAPES_FLAG,
@@ -670,84 +669,84 @@ const _PyUopCachingInfo _PyUop_Caching[MAX_UOP_ID+1] = {
         },
     },
     [_SWAP_FAST_0] = {
-        .best = { 0, 1, 2, 3 },
+        .best = { 1, 1, 1, 1 },
         .entries = {
-            { 1, 0, _SWAP_FAST_0_r01 },
+            { -1, -1, -1 },
             { 1, 1, _SWAP_FAST_0_r11 },
-            { 2, 2, _SWAP_FAST_0_r22 },
-            { 3, 3, _SWAP_FAST_0_r33 },
+            { -1, -1, -1 },
+            { -1, -1, -1 },
         },
     },
     [_SWAP_FAST_1] = {
-        .best = { 0, 1, 2, 3 },
+        .best = { 1, 1, 1, 1 },
         .entries = {
-            { 1, 0, _SWAP_FAST_1_r01 },
+            { -1, -1, -1 },
             { 1, 1, _SWAP_FAST_1_r11 },
-            { 2, 2, _SWAP_FAST_1_r22 },
-            { 3, 3, _SWAP_FAST_1_r33 },
+            { -1, -1, -1 },
+            { -1, -1, -1 },
         },
     },
     [_SWAP_FAST_2] = {
-        .best = { 0, 1, 2, 3 },
+        .best = { 1, 1, 1, 1 },
         .entries = {
-            { 1, 0, _SWAP_FAST_2_r01 },
+            { -1, -1, -1 },
             { 1, 1, _SWAP_FAST_2_r11 },
-            { 2, 2, _SWAP_FAST_2_r22 },
-            { 3, 3, _SWAP_FAST_2_r33 },
+            { -1, -1, -1 },
+            { -1, -1, -1 },
         },
     },
     [_SWAP_FAST_3] = {
-        .best = { 0, 1, 2, 3 },
+        .best = { 1, 1, 1, 1 },
         .entries = {
-            { 1, 0, _SWAP_FAST_3_r01 },
+            { -1, -1, -1 },
             { 1, 1, _SWAP_FAST_3_r11 },
-            { 2, 2, _SWAP_FAST_3_r22 },
-            { 3, 3, _SWAP_FAST_3_r33 },
+            { -1, -1, -1 },
+            { -1, -1, -1 },
         },
     },
     [_SWAP_FAST_4] = {
-        .best = { 0, 1, 2, 3 },
+        .best = { 1, 1, 1, 1 },
         .entries = {
-            { 1, 0, _SWAP_FAST_4_r01 },
+            { -1, -1, -1 },
             { 1, 1, _SWAP_FAST_4_r11 },
-            { 2, 2, _SWAP_FAST_4_r22 },
-            { 3, 3, _SWAP_FAST_4_r33 },
+            { -1, -1, -1 },
+            { -1, -1, -1 },
         },
     },
     [_SWAP_FAST_5] = {
-        .best = { 0, 1, 2, 3 },
+        .best = { 1, 1, 1, 1 },
         .entries = {
-            { 1, 0, _SWAP_FAST_5_r01 },
+            { -1, -1, -1 },
             { 1, 1, _SWAP_FAST_5_r11 },
-            { 2, 2, _SWAP_FAST_5_r22 },
-            { 3, 3, _SWAP_FAST_5_r33 },
+            { -1, -1, -1 },
+            { -1, -1, -1 },
         },
     },
     [_SWAP_FAST_6] = {
-        .best = { 0, 1, 2, 3 },
+        .best = { 1, 1, 1, 1 },
         .entries = {
-            { 1, 0, _SWAP_FAST_6_r01 },
+            { -1, -1, -1 },
             { 1, 1, _SWAP_FAST_6_r11 },
-            { 2, 2, _SWAP_FAST_6_r22 },
-            { 3, 3, _SWAP_FAST_6_r33 },
+            { -1, -1, -1 },
+            { -1, -1, -1 },
         },
     },
     [_SWAP_FAST_7] = {
-        .best = { 0, 1, 2, 3 },
+        .best = { 1, 1, 1, 1 },
         .entries = {
-            { 1, 0, _SWAP_FAST_7_r01 },
+            { -1, -1, -1 },
             { 1, 1, _SWAP_FAST_7_r11 },
-            { 2, 2, _SWAP_FAST_7_r22 },
-            { 3, 3, _SWAP_FAST_7_r33 },
+            { -1, -1, -1 },
+            { -1, -1, -1 },
         },
     },
     [_SWAP_FAST] = {
-        .best = { 0, 1, 2, 3 },
+        .best = { 1, 1, 1, 1 },
         .entries = {
-            { 1, 0, _SWAP_FAST_r01 },
+            { -1, -1, -1 },
             { 1, 1, _SWAP_FAST_r11 },
-            { 2, 2, _SWAP_FAST_r22 },
-            { 3, 3, _SWAP_FAST_r33 },
+            { -1, -1, -1 },
+            { -1, -1, -1 },
         },
     },
     [_POP_TOP] = {
@@ -1335,6 +1334,15 @@ const _PyUopCachingInfo _PyUop_Caching[MAX_UOP_ID+1] = {
             { -1, -1, -1 },
         },
     },
+    [_CHECK_SOAC_RETURN] = {
+        .best = { 1, 1, 1, 1 },
+        .entries = {
+            { -1, -1, -1 },
+            { 1, 1, _CHECK_SOAC_RETURN_r11 },
+            { -1, -1, -1 },
+            { -1, -1, -1 },
+        },
+    },
     [_RETURN_VALUE] = {
         .best = { 1, 1, 1, 1 },
         .entries = {
@@ -1416,15 +1424,6 @@ const _PyUopCachingInfo _PyUop_Caching[MAX_UOP_ID+1] = {
             { -1, -1, -1 },
         },
     },
-    [_STORE_NAME] = {
-        .best = { 1, 1, 1, 1 },
-        .entries = {
-            { -1, -1, -1 },
-            { 0, 1, _STORE_NAME_r10 },
-            { -1, -1, -1 },
-            { -1, -1, -1 },
-        },
-    },
     [_DELETE_NAME] = {
         .best = { 0, 0, 0, 0 },
         .entries = {
@@ -1493,15 +1492,6 @@ const _PyUopCachingInfo _PyUop_Caching[MAX_UOP_ID+1] = {
         .entries = {
             { -1, -1, -1 },
             { 0, 1, _DELETE_ATTR_r10 },
-            { -1, -1, -1 },
-            { -1, -1, -1 },
-        },
-    },
-    [_STORE_GLOBAL] = {
-        .best = { 1, 1, 1, 1 },
-        .entries = {
-            { -1, -1, -1 },
-            { 0, 1, _STORE_GLOBAL_r10 },
             { -1, -1, -1 },
             { -1, -1, -1 },
         },
@@ -1875,6 +1865,15 @@ const _PyUopCachingInfo _PyUop_Caching[MAX_UOP_ID+1] = {
             { -1, -1, -1 },
         },
     },
+    [_GUARD_NO_ORDINARY_INSTANCE_WRITES] = {
+        .best = { 0, 1, 2, 3 },
+        .entries = {
+            { 1, 0, _GUARD_NO_ORDINARY_INSTANCE_WRITES_r01 },
+            { 1, 1, _GUARD_NO_ORDINARY_INSTANCE_WRITES_r11 },
+            { 2, 2, _GUARD_NO_ORDINARY_INSTANCE_WRITES_r22 },
+            { 3, 3, _GUARD_NO_ORDINARY_INSTANCE_WRITES_r33 },
+        },
+    },
     [_GUARD_DORV_NO_DICT] = {
         .best = { 0, 1, 2, 3 },
         .entries = {
@@ -2191,10 +2190,10 @@ const _PyUopCachingInfo _PyUop_Caching[MAX_UOP_ID+1] = {
         },
     },
     [_FOR_ITER_GEN_FRAME] = {
-        .best = { 0, 1, 2, 2 },
+        .best = { 2, 2, 2, 2 },
         .entries = {
-            { 3, 0, _FOR_ITER_GEN_FRAME_r03 },
-            { 3, 1, _FOR_ITER_GEN_FRAME_r13 },
+            { -1, -1, -1 },
+            { -1, -1, -1 },
             { 3, 2, _FOR_ITER_GEN_FRAME_r23 },
             { -1, -1, -1 },
         },
@@ -2853,15 +2852,6 @@ const _PyUopCachingInfo _PyUop_Caching[MAX_UOP_ID+1] = {
             { -1, -1, -1 },
             { 1, 1, _MAKE_FUNCTION_r11 },
             { -1, -1, -1 },
-            { -1, -1, -1 },
-        },
-    },
-    [_SET_FUNCTION_ATTRIBUTE] = {
-        .best = { 2, 2, 2, 2 },
-        .entries = {
-            { -1, -1, -1 },
-            { -1, -1, -1 },
-            { 1, 2, _SET_FUNCTION_ATTRIBUTE_r21 },
             { -1, -1, -1 },
         },
     },
@@ -3550,42 +3540,15 @@ const uint16_t _PyUop_Uncached[MAX_UOP_REGS_ID+1] = {
     [_LOAD_SMALL_INT_r01] = _LOAD_SMALL_INT,
     [_LOAD_SMALL_INT_r12] = _LOAD_SMALL_INT,
     [_LOAD_SMALL_INT_r23] = _LOAD_SMALL_INT,
-    [_SWAP_FAST_0_r01] = _SWAP_FAST_0,
     [_SWAP_FAST_0_r11] = _SWAP_FAST_0,
-    [_SWAP_FAST_0_r22] = _SWAP_FAST_0,
-    [_SWAP_FAST_0_r33] = _SWAP_FAST_0,
-    [_SWAP_FAST_1_r01] = _SWAP_FAST_1,
     [_SWAP_FAST_1_r11] = _SWAP_FAST_1,
-    [_SWAP_FAST_1_r22] = _SWAP_FAST_1,
-    [_SWAP_FAST_1_r33] = _SWAP_FAST_1,
-    [_SWAP_FAST_2_r01] = _SWAP_FAST_2,
     [_SWAP_FAST_2_r11] = _SWAP_FAST_2,
-    [_SWAP_FAST_2_r22] = _SWAP_FAST_2,
-    [_SWAP_FAST_2_r33] = _SWAP_FAST_2,
-    [_SWAP_FAST_3_r01] = _SWAP_FAST_3,
     [_SWAP_FAST_3_r11] = _SWAP_FAST_3,
-    [_SWAP_FAST_3_r22] = _SWAP_FAST_3,
-    [_SWAP_FAST_3_r33] = _SWAP_FAST_3,
-    [_SWAP_FAST_4_r01] = _SWAP_FAST_4,
     [_SWAP_FAST_4_r11] = _SWAP_FAST_4,
-    [_SWAP_FAST_4_r22] = _SWAP_FAST_4,
-    [_SWAP_FAST_4_r33] = _SWAP_FAST_4,
-    [_SWAP_FAST_5_r01] = _SWAP_FAST_5,
     [_SWAP_FAST_5_r11] = _SWAP_FAST_5,
-    [_SWAP_FAST_5_r22] = _SWAP_FAST_5,
-    [_SWAP_FAST_5_r33] = _SWAP_FAST_5,
-    [_SWAP_FAST_6_r01] = _SWAP_FAST_6,
     [_SWAP_FAST_6_r11] = _SWAP_FAST_6,
-    [_SWAP_FAST_6_r22] = _SWAP_FAST_6,
-    [_SWAP_FAST_6_r33] = _SWAP_FAST_6,
-    [_SWAP_FAST_7_r01] = _SWAP_FAST_7,
     [_SWAP_FAST_7_r11] = _SWAP_FAST_7,
-    [_SWAP_FAST_7_r22] = _SWAP_FAST_7,
-    [_SWAP_FAST_7_r33] = _SWAP_FAST_7,
-    [_SWAP_FAST_r01] = _SWAP_FAST,
     [_SWAP_FAST_r11] = _SWAP_FAST,
-    [_SWAP_FAST_r22] = _SWAP_FAST,
-    [_SWAP_FAST_r33] = _SWAP_FAST,
     [_POP_TOP_r10] = _POP_TOP,
     [_POP_TOP_NOP_r00] = _POP_TOP_NOP,
     [_POP_TOP_NOP_r10] = _POP_TOP_NOP,
@@ -3752,6 +3715,7 @@ const uint16_t _PyUop_Uncached[MAX_UOP_REGS_ID+1] = {
     [_DELETE_SUBSCR_r20] = _DELETE_SUBSCR,
     [_CALL_INTRINSIC_1_r11] = _CALL_INTRINSIC_1,
     [_CALL_INTRINSIC_2_r21] = _CALL_INTRINSIC_2,
+    [_CHECK_SOAC_RETURN_r11] = _CHECK_SOAC_RETURN,
     [_RETURN_VALUE_r11] = _RETURN_VALUE,
     [_GET_AITER_r11] = _GET_AITER,
     [_GET_ANEXT_r12] = _GET_ANEXT,
@@ -3763,7 +3727,6 @@ const uint16_t _PyUop_Uncached[MAX_UOP_REGS_ID+1] = {
     [_LOAD_COMMON_CONSTANT_r12] = _LOAD_COMMON_CONSTANT,
     [_LOAD_COMMON_CONSTANT_r23] = _LOAD_COMMON_CONSTANT,
     [_LOAD_BUILD_CLASS_r01] = _LOAD_BUILD_CLASS,
-    [_STORE_NAME_r10] = _STORE_NAME,
     [_DELETE_NAME_r00] = _DELETE_NAME,
     [_UNPACK_SEQUENCE_r10] = _UNPACK_SEQUENCE,
     [_UNPACK_SEQUENCE_TWO_TUPLE_r12] = _UNPACK_SEQUENCE_TWO_TUPLE,
@@ -3772,7 +3735,6 @@ const uint16_t _PyUop_Uncached[MAX_UOP_REGS_ID+1] = {
     [_UNPACK_EX_r10] = _UNPACK_EX,
     [_STORE_ATTR_r20] = _STORE_ATTR,
     [_DELETE_ATTR_r10] = _DELETE_ATTR,
-    [_STORE_GLOBAL_r10] = _STORE_GLOBAL,
     [_DELETE_GLOBAL_r00] = _DELETE_GLOBAL,
     [_LOAD_LOCALS_r01] = _LOAD_LOCALS,
     [_LOAD_LOCALS_r12] = _LOAD_LOCALS,
@@ -3838,6 +3800,10 @@ const uint16_t _PyUop_Uncached[MAX_UOP_REGS_ID+1] = {
     [_CHECK_ATTR_CLASS_r33] = _CHECK_ATTR_CLASS,
     [_LOAD_ATTR_CLASS_r11] = _LOAD_ATTR_CLASS,
     [_LOAD_ATTR_PROPERTY_FRAME_r11] = _LOAD_ATTR_PROPERTY_FRAME,
+    [_GUARD_NO_ORDINARY_INSTANCE_WRITES_r01] = _GUARD_NO_ORDINARY_INSTANCE_WRITES,
+    [_GUARD_NO_ORDINARY_INSTANCE_WRITES_r11] = _GUARD_NO_ORDINARY_INSTANCE_WRITES,
+    [_GUARD_NO_ORDINARY_INSTANCE_WRITES_r22] = _GUARD_NO_ORDINARY_INSTANCE_WRITES,
+    [_GUARD_NO_ORDINARY_INSTANCE_WRITES_r33] = _GUARD_NO_ORDINARY_INSTANCE_WRITES,
     [_GUARD_DORV_NO_DICT_r01] = _GUARD_DORV_NO_DICT,
     [_GUARD_DORV_NO_DICT_r11] = _GUARD_DORV_NO_DICT,
     [_GUARD_DORV_NO_DICT_r22] = _GUARD_DORV_NO_DICT,
@@ -3909,8 +3875,6 @@ const uint16_t _PyUop_Uncached[MAX_UOP_REGS_ID+1] = {
     [_ITER_NEXT_RANGE_r03] = _ITER_NEXT_RANGE,
     [_ITER_NEXT_RANGE_r13] = _ITER_NEXT_RANGE,
     [_ITER_NEXT_RANGE_r23] = _ITER_NEXT_RANGE,
-    [_FOR_ITER_GEN_FRAME_r03] = _FOR_ITER_GEN_FRAME,
-    [_FOR_ITER_GEN_FRAME_r13] = _FOR_ITER_GEN_FRAME,
     [_FOR_ITER_GEN_FRAME_r23] = _FOR_ITER_GEN_FRAME,
     [_INSERT_NULL_r10] = _INSERT_NULL,
     [_LOAD_SPECIAL_r00] = _LOAD_SPECIAL,
@@ -4053,7 +4017,6 @@ const uint16_t _PyUop_Uncached[MAX_UOP_REGS_ID+1] = {
     [_CHECK_IS_NOT_PY_CALLABLE_EX_r33] = _CHECK_IS_NOT_PY_CALLABLE_EX,
     [_CALL_FUNCTION_EX_NON_PY_GENERAL_r31] = _CALL_FUNCTION_EX_NON_PY_GENERAL,
     [_MAKE_FUNCTION_r11] = _MAKE_FUNCTION,
-    [_SET_FUNCTION_ATTRIBUTE_r21] = _SET_FUNCTION_ATTRIBUTE,
     [_RETURN_GENERATOR_r01] = _RETURN_GENERATOR,
     [_BUILD_SLICE_r01] = _BUILD_SLICE,
     [_CONVERT_VALUE_r11] = _CONVERT_VALUE,
@@ -4458,6 +4421,8 @@ const char *const _PyOpcode_uop_name[MAX_UOP_REGS_ID+1] = {
     [_CHECK_RECURSION_REMAINING_r11] = "_CHECK_RECURSION_REMAINING_r11",
     [_CHECK_RECURSION_REMAINING_r22] = "_CHECK_RECURSION_REMAINING_r22",
     [_CHECK_RECURSION_REMAINING_r33] = "_CHECK_RECURSION_REMAINING_r33",
+    [_CHECK_SOAC_RETURN] = "_CHECK_SOAC_RETURN",
+    [_CHECK_SOAC_RETURN_r11] = "_CHECK_SOAC_RETURN_r11",
     [_CHECK_STACK_SPACE] = "_CHECK_STACK_SPACE",
     [_CHECK_STACK_SPACE_r00] = "_CHECK_STACK_SPACE_r00",
     [_CHECK_STACK_SPACE_OPERAND] = "_CHECK_STACK_SPACE_OPERAND",
@@ -4567,8 +4532,6 @@ const char *const _PyOpcode_uop_name[MAX_UOP_REGS_ID+1] = {
     [_FORMAT_WITH_SPEC] = "_FORMAT_WITH_SPEC",
     [_FORMAT_WITH_SPEC_r21] = "_FORMAT_WITH_SPEC_r21",
     [_FOR_ITER_GEN_FRAME] = "_FOR_ITER_GEN_FRAME",
-    [_FOR_ITER_GEN_FRAME_r03] = "_FOR_ITER_GEN_FRAME_r03",
-    [_FOR_ITER_GEN_FRAME_r13] = "_FOR_ITER_GEN_FRAME_r13",
     [_FOR_ITER_GEN_FRAME_r23] = "_FOR_ITER_GEN_FRAME_r23",
     [_FOR_ITER_TIER_TWO] = "_FOR_ITER_TIER_TWO",
     [_FOR_ITER_TIER_TWO_r23] = "_FOR_ITER_TIER_TWO_r23",
@@ -4798,6 +4761,11 @@ const char *const _PyOpcode_uop_name[MAX_UOP_REGS_ID+1] = {
     [_GUARD_NOT_EXHAUSTED_TUPLE_r12] = "_GUARD_NOT_EXHAUSTED_TUPLE_r12",
     [_GUARD_NOT_EXHAUSTED_TUPLE_r22] = "_GUARD_NOT_EXHAUSTED_TUPLE_r22",
     [_GUARD_NOT_EXHAUSTED_TUPLE_r33] = "_GUARD_NOT_EXHAUSTED_TUPLE_r33",
+    [_GUARD_NO_ORDINARY_INSTANCE_WRITES] = "_GUARD_NO_ORDINARY_INSTANCE_WRITES",
+    [_GUARD_NO_ORDINARY_INSTANCE_WRITES_r01] = "_GUARD_NO_ORDINARY_INSTANCE_WRITES_r01",
+    [_GUARD_NO_ORDINARY_INSTANCE_WRITES_r11] = "_GUARD_NO_ORDINARY_INSTANCE_WRITES_r11",
+    [_GUARD_NO_ORDINARY_INSTANCE_WRITES_r22] = "_GUARD_NO_ORDINARY_INSTANCE_WRITES_r22",
+    [_GUARD_NO_ORDINARY_INSTANCE_WRITES_r33] = "_GUARD_NO_ORDINARY_INSTANCE_WRITES_r33",
     [_GUARD_THIRD_NULL] = "_GUARD_THIRD_NULL",
     [_GUARD_THIRD_NULL_r03] = "_GUARD_THIRD_NULL_r03",
     [_GUARD_THIRD_NULL_r13] = "_GUARD_THIRD_NULL_r13",
@@ -5244,8 +5212,6 @@ const char *const _PyOpcode_uop_name[MAX_UOP_REGS_ID+1] = {
     [_SETUP_ANNOTATIONS_r00] = "_SETUP_ANNOTATIONS_r00",
     [_SET_ADD] = "_SET_ADD",
     [_SET_ADD_r10] = "_SET_ADD_r10",
-    [_SET_FUNCTION_ATTRIBUTE] = "_SET_FUNCTION_ATTRIBUTE",
-    [_SET_FUNCTION_ATTRIBUTE_r21] = "_SET_FUNCTION_ATTRIBUTE_r21",
     [_SET_IP] = "_SET_IP",
     [_SET_IP_r00] = "_SET_IP_r00",
     [_SET_IP_r11] = "_SET_IP_r11",
@@ -5288,10 +5254,6 @@ const char *const _PyOpcode_uop_name[MAX_UOP_REGS_ID+1] = {
     [_STORE_ATTR_WITH_HINT_r21] = "_STORE_ATTR_WITH_HINT_r21",
     [_STORE_DEREF] = "_STORE_DEREF",
     [_STORE_DEREF_r10] = "_STORE_DEREF_r10",
-    [_STORE_GLOBAL] = "_STORE_GLOBAL",
-    [_STORE_GLOBAL_r10] = "_STORE_GLOBAL_r10",
-    [_STORE_NAME] = "_STORE_NAME",
-    [_STORE_NAME_r10] = "_STORE_NAME_r10",
     [_STORE_SLICE] = "_STORE_SLICE",
     [_STORE_SLICE_r30] = "_STORE_SLICE_r30",
     [_STORE_SUBSCR] = "_STORE_SUBSCR",
@@ -5313,50 +5275,23 @@ const char *const _PyOpcode_uop_name[MAX_UOP_REGS_ID+1] = {
     [_SWAP_3_r23] = "_SWAP_3_r23",
     [_SWAP_3_r33] = "_SWAP_3_r33",
     [_SWAP_FAST] = "_SWAP_FAST",
-    [_SWAP_FAST_r01] = "_SWAP_FAST_r01",
     [_SWAP_FAST_r11] = "_SWAP_FAST_r11",
-    [_SWAP_FAST_r22] = "_SWAP_FAST_r22",
-    [_SWAP_FAST_r33] = "_SWAP_FAST_r33",
     [_SWAP_FAST_0] = "_SWAP_FAST_0",
-    [_SWAP_FAST_0_r01] = "_SWAP_FAST_0_r01",
     [_SWAP_FAST_0_r11] = "_SWAP_FAST_0_r11",
-    [_SWAP_FAST_0_r22] = "_SWAP_FAST_0_r22",
-    [_SWAP_FAST_0_r33] = "_SWAP_FAST_0_r33",
     [_SWAP_FAST_1] = "_SWAP_FAST_1",
-    [_SWAP_FAST_1_r01] = "_SWAP_FAST_1_r01",
     [_SWAP_FAST_1_r11] = "_SWAP_FAST_1_r11",
-    [_SWAP_FAST_1_r22] = "_SWAP_FAST_1_r22",
-    [_SWAP_FAST_1_r33] = "_SWAP_FAST_1_r33",
     [_SWAP_FAST_2] = "_SWAP_FAST_2",
-    [_SWAP_FAST_2_r01] = "_SWAP_FAST_2_r01",
     [_SWAP_FAST_2_r11] = "_SWAP_FAST_2_r11",
-    [_SWAP_FAST_2_r22] = "_SWAP_FAST_2_r22",
-    [_SWAP_FAST_2_r33] = "_SWAP_FAST_2_r33",
     [_SWAP_FAST_3] = "_SWAP_FAST_3",
-    [_SWAP_FAST_3_r01] = "_SWAP_FAST_3_r01",
     [_SWAP_FAST_3_r11] = "_SWAP_FAST_3_r11",
-    [_SWAP_FAST_3_r22] = "_SWAP_FAST_3_r22",
-    [_SWAP_FAST_3_r33] = "_SWAP_FAST_3_r33",
     [_SWAP_FAST_4] = "_SWAP_FAST_4",
-    [_SWAP_FAST_4_r01] = "_SWAP_FAST_4_r01",
     [_SWAP_FAST_4_r11] = "_SWAP_FAST_4_r11",
-    [_SWAP_FAST_4_r22] = "_SWAP_FAST_4_r22",
-    [_SWAP_FAST_4_r33] = "_SWAP_FAST_4_r33",
     [_SWAP_FAST_5] = "_SWAP_FAST_5",
-    [_SWAP_FAST_5_r01] = "_SWAP_FAST_5_r01",
     [_SWAP_FAST_5_r11] = "_SWAP_FAST_5_r11",
-    [_SWAP_FAST_5_r22] = "_SWAP_FAST_5_r22",
-    [_SWAP_FAST_5_r33] = "_SWAP_FAST_5_r33",
     [_SWAP_FAST_6] = "_SWAP_FAST_6",
-    [_SWAP_FAST_6_r01] = "_SWAP_FAST_6_r01",
     [_SWAP_FAST_6_r11] = "_SWAP_FAST_6_r11",
-    [_SWAP_FAST_6_r22] = "_SWAP_FAST_6_r22",
-    [_SWAP_FAST_6_r33] = "_SWAP_FAST_6_r33",
     [_SWAP_FAST_7] = "_SWAP_FAST_7",
-    [_SWAP_FAST_7_r01] = "_SWAP_FAST_7_r01",
     [_SWAP_FAST_7_r11] = "_SWAP_FAST_7_r11",
-    [_SWAP_FAST_7_r22] = "_SWAP_FAST_7_r22",
-    [_SWAP_FAST_7_r33] = "_SWAP_FAST_7_r33",
     [_TIER2_RESUME_CHECK] = "_TIER2_RESUME_CHECK",
     [_TIER2_RESUME_CHECK_r00] = "_TIER2_RESUME_CHECK_r00",
     [_TIER2_RESUME_CHECK_r11] = "_TIER2_RESUME_CHECK_r11",
@@ -5621,6 +5556,8 @@ int _PyUop_num_popped(int opcode, int oparg)
             return 1;
         case _CALL_INTRINSIC_2:
             return 2;
+        case _CHECK_SOAC_RETURN:
+            return 0;
         case _RETURN_VALUE:
             return 1;
         case _GET_AITER:
@@ -5639,8 +5576,6 @@ int _PyUop_num_popped(int opcode, int oparg)
             return 0;
         case _LOAD_BUILD_CLASS:
             return 0;
-        case _STORE_NAME:
-            return 1;
         case _DELETE_NAME:
             return 0;
         case _UNPACK_SEQUENCE:
@@ -5656,8 +5591,6 @@ int _PyUop_num_popped(int opcode, int oparg)
         case _STORE_ATTR:
             return 2;
         case _DELETE_ATTR:
-            return 1;
-        case _STORE_GLOBAL:
             return 1;
         case _DELETE_GLOBAL:
             return 0;
@@ -5741,6 +5674,8 @@ int _PyUop_num_popped(int opcode, int oparg)
             return 1;
         case _LOAD_ATTR_PROPERTY_FRAME:
             return 1;
+        case _GUARD_NO_ORDINARY_INSTANCE_WRITES:
+            return 0;
         case _GUARD_DORV_NO_DICT:
             return 0;
         case _STORE_ATTR_INSTANCE_VALUE:
@@ -5959,8 +5894,6 @@ int _PyUop_num_popped(int opcode, int oparg)
             return 4;
         case _MAKE_FUNCTION:
             return 1;
-        case _SET_FUNCTION_ATTRIBUTE:
-            return 2;
         case _RETURN_GENERATOR:
             return 0;
         case _BUILD_SLICE:
