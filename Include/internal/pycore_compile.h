@@ -96,12 +96,6 @@ int _PyCompile_SoacSaveLocal(struct _PyCompiler *, int local_index);
 int _PyCompile_SoacMakeCell(struct _PyCompiler *, int deref_index);
 int _PyCompile_SoacRestoreComprehension(struct _PyCompiler *);
 int _PyCompile_SoacLeaveComprehension(struct _PyCompiler *);
-/* The bounded codegen invocation supplies the original result consumer.
- * The returned count is compile-local, never a source or execution identity. */
-Py_ssize_t _PyCompile_SoacScopeResultStart(struct _PyCompiler *);
-int _PyCompile_SoacScopeResultEnd(struct _PyCompiler *, Py_ssize_t first_region,
-                                 expr_ty value, expr_ty target,
-                                 _Py_SourceLocation statement, int kind);
 int _PyCompile_SoacCapture(struct _PyCompiler *, PyCodeObject *,
                           _Py_SourceLocation, int free_ordinal, int deref_index);
 int _PyCompile_SoacClassInitializer(struct _PyCompiler *, PyObject *name, int role);
@@ -110,23 +104,11 @@ int _PyCompile_SoacNameAccess(struct _PyCompiler *, _Py_SourceLocation,
                              expr_ty original, expr_context_ty, int mode, int native_index);
 int _PyCompile_SoacFixSlots(_PyCompile_CodeUnitMetadata *,
                            const int *fixed, int noffsets);
-int _PyCompile_SoacEntryCell(_PyCompile_CodeUnitMetadata *, int deref_index, uint32_t *origin);
-int _PyCompile_SoacEntryFreeVars(_PyCompile_CodeUnitMetadata *, int free_count, uint32_t *origin);
 int _PyCompile_SoacReferenceOrigin(struct _PyCompiler *, _Py_SourceLocation,
                                   const void *original, int kind, expr_context_ty);
 int _PyCompile_SoacFinalReferenceInstruction(_PyCompile_CodeUnitMetadata *,
                                             int ordinal, int opcode, int oparg,
-                                            _PySoacReadOrigins,
-                                             int target, int fallthrough);
-int _PyCompile_SoacScopeProtectionMember(_PyCompile_CodeUnitMetadata *,
-                                         int ordinal, _PySoacReadOrigins enter,
-                                         _PySoacReadOrigins leave, int handler);
-void _PyCompile_SoacScopeProtectionUncertain(_PyCompile_CodeUnitMetadata *);
-int _PyCompile_SoacScopeUnreachableAllocation(_PyCompile_CodeUnitMetadata *,
-                                              _PySoacReadOrigins, int opcode, int oparg);
-int _PyCompile_SoacScopeStaticSwap(_PyCompile_CodeUnitMetadata *,
-                                  _PySoacReadOrigins rotation, int depth,
-                                  _PySoacReadOrigins first, _PySoacReadOrigins last);
+                                            _PySoacReadOrigins);
 int _PyCompile_SoacFinishReferences(_PyCompile_CodeUnitMetadata *, int count);
 
 /* Native ownership facts in the same compile-local source catalogue. */
@@ -139,10 +121,6 @@ _PySoacScopeBindingContext _PyCompile_SoacScopeBindingContext(
     struct _PyCompiler *, int role, int generator);
 void _PyCompile_SoacRestoreScopeBindingContext(
     struct _PyCompiler *, _PySoacScopeBindingContext);
-int _PyCompile_SoacScopePhase(struct _PyCompiler *, int phase);
-int _PyCompile_SoacScopeEvent(struct _PyCompiler *, int event_kind, int auxiliary);
-int _PyCompile_SoacScopeNonIterator(struct _PyCompiler *, int generator);
-int _PyCompile_SoacRestoreLocal(struct _PyCompiler *, int local_index);
 
 /* Original source operation provenance, only for the existing opt-in product.
  * None of these compiler hooks grants runtime or source-body authority. */
@@ -176,8 +154,6 @@ int _PyCompile_SoacPushContext(struct _PyCompiler *, int owner_kind,
                               int payload, Py_ssize_t *previous);
 void _PyCompile_SoacPopContext(struct _PyCompiler *, Py_ssize_t previous);
 Py_ssize_t _PyCompile_SoacBeginUnwindContext(struct _PyCompiler *);
-int _PyCompile_SoacResolvedJump(_PyCompile_CodeUnitMetadata *, int ordinal,
-                                int original_opcode, int final_opcode, int target);
 int _PyCompile_SoacAssembledInstruction(_PyCompile_CodeUnitMetadata *,
                                       int ordinal, const _PyInstruction *,
                                       Py_ssize_t opcode_offset,

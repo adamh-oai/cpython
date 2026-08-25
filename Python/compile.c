@@ -161,26 +161,10 @@ typedef struct {
     location outer_loc;
     int kind;
     int is_async;
-    int protection;
-    int phase_steps[6];
-    int previous_phase;
     int previous_binding_role;
     int previous_binding_generator;
     SOAC_VECTOR(soac_binding_entry_op) entry_ops;
     SOAC_VECTOR(soac_binding_saved) restores;
-    /* Exact original enclosing consumer, observed after this codegen visit. */
-    int result_kind;  /* -1 explicitly unsupported; zero is keep, never proof */
-    location result_statement;
-    uint32_t result_origin;
-    /* Positive CFG reachability evidence for this exact original allocation. */
-    uint32_t unreachable_allocation;
-    /* Serialization-local proof state; only complete constructed rows set it. */
-    int lifecycle_copy_omitted;
-    int protection_complete;
-    int normal_complete;
-    int normal_group_coherent;
-    uint32_t rewritten_rotation;
-    PyObject *normal_schedule;
 } soac_binding_region;
 
 typedef struct {
@@ -210,7 +194,6 @@ typedef struct {
 /* One opt-in origin registry. The two existing instruction lanes carry IDs
  * into it; no pointer, registry index or native block label is serialized. */
 enum soac_origin_family {
-    SOAC_ORIGIN_READ = Py_SOAC_OPERATION_READ,
     SOAC_ORIGIN_STORE = Py_SOAC_OPERATION_STORE,
     SOAC_ORIGIN_CALL = Py_SOAC_OPERATION_CALL,
     SOAC_ORIGIN_PATTERN_LEAF,  /* transient constituent, not a physical Store */
@@ -253,7 +236,6 @@ typedef struct {
     PyObject *keyword_names;  /* Actual emitter tuple, not a source reconstruction. */
     int alternative;
     uint32_t call_owner;       /* preparation -> actual source Call origin */
-    Py_ssize_t scope_event;    /* lifecycle event index + 1, compile-local */
 } soac_reference_origin;
 
 typedef struct {
@@ -262,45 +244,9 @@ typedef struct {
     int oparg;
     _PySoacReadOrigins origins;
     Py_ssize_t opcode_offset;
-    int handler_ordinal;
-    int handler_depth;
-    int handler_lasti;
-    int target;
-    int fallthrough;
     Py_ssize_t first_byte;
     Py_ssize_t end_byte;
 } soac_reference_instruction;
-
-typedef struct {
-    int ordinal;
-    uint32_t enter;
-    uint32_t leave;
-    int handler;
-} soac_scope_protection_member;
-
-typedef struct {
-    uint32_t rotation;
-    int depth;
-    _PySoacReadOrigins first;
-    _PySoacReadOrigins last;
-} soac_scope_static_swap;
-
-/* Same compile-local origin lanes; lifecycle markers occupy only lanes which
- * have no original source operation. No new instruction-layout field. */
-#define SOAC_ORIGIN_SCOPE_EVENT 5
-#define SOAC_ORIGIN_SCOPE_RESULT 6
-
-typedef struct {
-    Py_ssize_t region;
-    int phase;
-    int step;
-    int kind;
-    Py_ssize_t slot;
-    Py_ssize_t owner;
-    int auxiliary;
-    uint32_t origin;
-    int alternative;
-} soac_scope_event;
 
 typedef struct {
     Py_ssize_t region;
@@ -329,11 +275,8 @@ typedef struct _PySoacCodeUnitBindings {
     SOAC_VECTOR(soac_binding_capture) captures;
     SOAC_VECTOR(soac_binding_export) exports;
     SOAC_VECTOR(soac_binding_access) accesses;
-    int scope_phase;
     int scope_binding_role;
     int scope_binding_generator;
-    SOAC_VECTOR(soac_scope_event) scope_events;
-    SOAC_VECTOR(Py_ssize_t) scope_prefix;
     SOAC_VECTOR(soac_scope_source_binding) scope_source_bindings;
     int reference_instruction_count;
     Py_ssize_t active_emission_context;
@@ -343,19 +286,9 @@ typedef struct _PySoacCodeUnitBindings {
     Py_ssize_t assembled_code_size;
     SOAC_VECTOR(soac_reference_origin) reference_origins;
     SOAC_VECTOR(soac_reference_instruction) reference_instructions;
-    SOAC_VECTOR(soac_scope_protection_member) scope_protection_members;
-    SOAC_VECTOR(soac_scope_static_swap) scope_static_swaps;
-    int scope_protection_uncertain;
 } soac_code_bindings;
 
 static soac_reference_origin *soac_operation_at(soac_code_bindings *, uint32_t);
-static int soac_new_scope_event(soac_code_bindings *, Py_ssize_t, int, int,
-                                Py_ssize_t, Py_ssize_t, int, int, int, uint32_t *);
-static int soac_record_scope_event(compiler *, int, Py_ssize_t, Py_ssize_t, int);
-static int soac_same_scope_event(soac_code_bindings *, soac_reference_origin *,
-                                 soac_code_bindings *, soac_reference_origin *);
-static int soac_scope_expected_opcode(const soac_scope_event *);
-
 struct _PySoacBindingCollector {
     SOAC_VECTOR(soac_code_bindings *) units;
 };
@@ -408,12 +341,9 @@ soac_binding_collector_free(soac_binding_collector *collector)
             soac_binding_region *region = &unit->regions.items[j];
             PyMem_Free(region->entry_ops.items);
             PyMem_Free(region->restores.items);
-            Py_XDECREF(region->normal_schedule);
         }
         PyMem_Free(unit->slots.items);
         PyMem_Free(unit->owners.items);
-        PyMem_Free(unit->scope_events.items);
-        PyMem_Free(unit->scope_prefix.items);
         PyMem_Free(unit->scope_source_bindings.items);
         PyMem_Free(unit->initializers.items);
         PyMem_Free(unit->regions.items);
@@ -432,8 +362,6 @@ soac_binding_collector_free(soac_binding_collector *collector)
         PyMem_Free(unit->emission_contexts.items);
         PyMem_Free(unit->reference_origins.items);
         PyMem_Free(unit->reference_instructions.items);
-        PyMem_Free(unit->scope_protection_members.items);
-        PyMem_Free(unit->scope_static_swaps.items);
         Py_XDECREF(unit->code);
         PyMem_Free(unit);
     }
@@ -554,7 +482,6 @@ soac_register_code_unit(compiler *c, struct compiler_unit *u)
     unit->origin = u->u_ste;
     unit->final_id = -1;
     unit->active_region = -1;
-    unit->scope_phase = Py_SOAC_SCOPE_PHASE_BODY;
     unit->scope_binding_role = unit->scope_binding_generator = -1;
     unit->reference_instruction_count = -1;
     unit->active_emission_context = -1;
@@ -672,14 +599,12 @@ _PyCompile_SoacEnterComprehension(compiler *c, expr_ty expression,
         .representative = unit->regions.count, .final_id = -1,
         .expression = expression, .outer_loc = SRC_LOCATION_FROM_AST(first->iter), .kind = kind,
         .is_async = original->ste_coroutine,
-        .previous_phase = unit->scope_phase,
         .previous_binding_role = unit->scope_binding_role,
         .previous_binding_generator = unit->scope_binding_generator,
     };
     Py_ssize_t id = unit->regions.count;
     RETURN_IF_ERROR(SOAC_PUSH(unit->regions, region));
     unit->active_region = id;
-    unit->scope_phase = Py_SOAC_SCOPE_PHASE_ISOLATION;
     unit->scope_binding_role = unit->scope_binding_generator = -1;
     return SUCCESS;
 }
@@ -691,7 +616,7 @@ _PyCompile_SoacSaveLocal(compiler *c, int local_index)
     if (unit == NULL) {
         return SUCCESS;
     }
-    if (unit->active_region < 0 || unit->scope_phase != Py_SOAC_SCOPE_PHASE_ISOLATION) {
+    if (unit->active_region < 0) {
         return soac_binding_error("comprehension save outside its actual entry prefix");
     }
     Py_ssize_t slot_id;
@@ -702,7 +627,7 @@ _PyCompile_SoacSaveLocal(compiler *c, int local_index)
                                   Py_SOAC_CLASS_OWNER_SAVED_SLOT, &owner));
     soac_binding_entry_op op = {Py_SOAC_CLASS_OP_SAVE_CLEAR, slot_id, owner};
     RETURN_IF_ERROR(SOAC_PUSH(region->entry_ops, op));
-    return soac_record_scope_event(c, Py_SOAC_SCOPE_SAVE_CLEAR, slot_id, owner, -1);
+    return SUCCESS;
 }
 
 int
@@ -712,7 +637,7 @@ _PyCompile_SoacMakeCell(compiler *c, int deref_index)
     if (unit == NULL) {
         return SUCCESS;
     }
-    if (unit->active_region < 0 || unit->scope_phase != Py_SOAC_SCOPE_PHASE_ISOLATION) {
+    if (unit->active_region < 0) {
         return soac_binding_error("replacement cell outside its actual entry prefix");
     }
     Py_ssize_t slot_id;
@@ -723,7 +648,7 @@ _PyCompile_SoacMakeCell(compiler *c, int deref_index)
                                   Py_SOAC_CLASS_OWNER_FRESH_CELL, &owner));
     soac_binding_entry_op op = {Py_SOAC_CLASS_OP_MAKE_CELL, slot_id, owner};
     RETURN_IF_ERROR(SOAC_PUSH(region->entry_ops, op));
-    return soac_record_scope_event(c, Py_SOAC_SCOPE_REGION_CELL, slot_id, owner, -1);
+    return SUCCESS;
 }
 
 int
@@ -762,7 +687,6 @@ _PyCompile_SoacLeaveComprehension(compiler *c)
         return soac_binding_error("unbalanced comprehension ownership region");
     }
     soac_binding_region *region = &unit->regions.items[unit->active_region];
-    unit->scope_phase = region->previous_phase;
     unit->scope_binding_role = region->previous_binding_role;
     unit->scope_binding_generator = region->previous_binding_generator;
     unit->active_region = region->parent;
@@ -867,9 +791,8 @@ _PyCompile_SoacFixSlots(_PyCompile_CodeUnitMetadata *umd,
     /* Native prepare_localsplus is the sole authority for deref remapping. */
     for (Py_ssize_t i = 0; i < unit->reference_origins.count; i++) {
         soac_reference_origin *origin = &unit->reference_origins.items[i];
-        if ((origin->family == SOAC_ORIGIN_STORE &&
-             (origin->initial_opcode == STORE_DEREF || origin->initial_opcode == DELETE_DEREF)) ||
-            (origin->family == SOAC_ORIGIN_SCOPE_EVENT && origin->initial_opcode == MAKE_CELL)) {
+        if (origin->family == SOAC_ORIGIN_STORE &&
+            (origin->initial_opcode == STORE_DEREF || origin->initial_opcode == DELETE_DEREF)) {
             if (origin->initial_slot < 0 || origin->initial_slot >= noffsets) {
                 return soac_binding_error("source cell Store has no native slot remapping");
             }
@@ -891,52 +814,6 @@ _PyCompile_SoacFixSlots(_PyCompile_CodeUnitMetadata *umd,
     return SUCCESS;
 }
 
-int
-_PyCompile_SoacEntryCell(_PyCompile_CodeUnitMetadata *umd, int deref_index,
-                       uint32_t *origin)
-{
-    *origin = 0;
-    soac_code_bindings *unit = umd->u_soac_bindings;
-    if (unit == NULL) {
-        return SUCCESS;
-    }
-    if (deref_index < 0 || deref_index >= unit->cell_count) {
-        return soac_binding_error("entry MAKE_CELL is not a native cell row");
-    }
-    Py_ssize_t slot;
-    RETURN_IF_ERROR(soac_binding_slot_for(unit, 1, deref_index, &slot));
-    return soac_new_scope_event(unit, -1, Py_SOAC_SCOPE_PHASE_ENTRY,
-        Py_SOAC_SCOPE_ENTRY_CELL, slot, unit->slots.items[slot].entry_owner,
-        -1, MAKE_CELL, deref_index, origin);
-}
-
-int
-_PyCompile_SoacEntryFreeVars(_PyCompile_CodeUnitMetadata *umd, int free_count,
-                           uint32_t *origin)
-{
-    *origin = 0;
-    soac_code_bindings *unit = umd->u_soac_bindings;
-    if (unit == NULL) {
-        return SUCCESS;
-    }
-    if (free_count != unit->free_count || free_count <= 0) {
-        return soac_binding_error("entry COPY_FREE_VARS count mismatch");
-    }
-    RETURN_IF_ERROR(soac_new_scope_event(unit, -1, Py_SOAC_SCOPE_PHASE_ENTRY,
-        Py_SOAC_SCOPE_COPY_FREE, -1, -1, free_count, COPY_FREE_VARS, free_count, origin));
-    /* Native insertion was at instruction zero. Move only metadata to that
-     * exact prefix order; all slots were cleared/bound before this prefix. */
-    Py_ssize_t count = unit->scope_prefix.count;
-    Py_ssize_t copied = unit->scope_prefix.items[count - 1];
-    for (Py_ssize_t i = count - 1; i > 0; i--) {
-        unit->scope_prefix.items[i] = unit->scope_prefix.items[i - 1];
-    }
-    unit->scope_prefix.items[0] = copied;
-    for (Py_ssize_t i = 0; i < count; i++) {
-        unit->scope_events.items[unit->scope_prefix.items[i]].step = (int)i;
-    }
-    return SUCCESS;
-}
 
 static PyObject *
 soac_optional_id(Py_ssize_t id)
@@ -1131,23 +1008,12 @@ soac_same_region_shape(soac_code_bindings *unit,
     if (!soac_same_location(left->loc, right->loc) ||
         !soac_same_location(left->outer_loc, right->outer_loc) ||
         left->expression != right->expression || left->kind != right->kind ||
-        left->is_async != right->is_async || left->protection != right->protection ||
-        left->result_kind != right->result_kind ||
+        left->is_async != right->is_async ||
         left->entry_ops.count != right->entry_ops.count ||
         left->restores.count != right->restores.count ||
         soac_region_representative(unit, left->parent) !=
             soac_region_representative(unit, right->parent)) {
         return 0;
-    }
-    if (left->result_kind > 0) {
-        soac_reference_origin *a = soac_operation_at(unit, left->result_origin);
-        soac_reference_origin *b = soac_operation_at(unit, right->result_origin);
-        if (a == NULL || b == NULL || a->origin != b->origin || a->family != b->family ||
-            a->kind != b->kind || a->context != b->context || a->phase != b->phase ||
-            !soac_same_location(a->loc, b->loc) ||
-            !soac_same_location(left->result_statement, right->result_statement)) {
-            return 0;
-        }
     }
     for (Py_ssize_t i = 0; i < left->entry_ops.count; i++) {
         soac_binding_entry_op *a = &left->entry_ops.items[i];
@@ -1220,21 +1086,6 @@ static int
 soac_same_region_scope_data(soac_code_bindings *unit, Py_ssize_t left, Py_ssize_t right)
 {
     Py_ssize_t i = 0, j = 0;
-    for (;;) {
-        while (i < unit->scope_events.count && unit->scope_events.items[i].region != left) i++;
-        while (j < unit->scope_events.count && unit->scope_events.items[j].region != right) j++;
-        if (i == unit->scope_events.count || j == unit->scope_events.count) {
-            if (i != unit->scope_events.count || j != unit->scope_events.count) return 0;
-            break;
-        }
-        soac_scope_event *a = &unit->scope_events.items[i++];
-        soac_scope_event *b = &unit->scope_events.items[j++];
-        if (!soac_same_scope_event(unit, soac_operation_at(unit, a->origin),
-                                  unit, soac_operation_at(unit, b->origin))) {
-            return 0;
-        }
-    }
-    i = j = 0;
     for (;;) {
         while (i < unit->scope_source_bindings.count && unit->scope_source_bindings.items[i].region != left) i++;
         while (j < unit->scope_source_bindings.count && unit->scope_source_bindings.items[j].region != right) j++;
@@ -1555,87 +1406,6 @@ soac_attach_operation(compiler *c, uint32_t id)
     return SUCCESS;
 }
 
-Py_ssize_t
-_PyCompile_SoacScopeResultStart(compiler *c)
-{
-    soac_code_bindings *unit = c->u->u_metadata.u_soac_bindings;
-    return unit == NULL ? -1 : unit->regions.count;
-}
-
-int
-_PyCompile_SoacScopeResultEnd(compiler *c, Py_ssize_t first_region,
-                              expr_ty value, expr_ty target,
-                              location statement, int kind)
-{
-    soac_code_bindings *unit = c->u->u_metadata.u_soac_bindings;
-    if (unit == NULL || first_region < 0 ||
-        (value->kind != ListComp_kind && value->kind != SetComp_kind &&
-         value->kind != DictComp_kind)) {
-        return SUCCESS;
-    }
-    if (first_region > unit->regions.count) {
-        return soac_binding_error("result consumer has no original codegen visit");
-    }
-    Py_ssize_t selected = -1;
-    for (Py_ssize_t i = first_region; i < unit->regions.count; i++) {
-        if (unit->regions.items[i].expression == value) {
-            if (selected >= 0) {
-                /* No order-based choice between repeated visits. */
-                for (Py_ssize_t j = first_region; j < unit->regions.count; j++) {
-                    if (unit->regions.items[j].expression == value) {
-                        unit->regions.items[j].result_kind = -1;
-                    }
-                }
-                return SUCCESS;
-            }
-            selected = i;
-        }
-    }
-    if (selected < 0) {
-        return SUCCESS;  /* No eager region was emitted by this visit. */
-    }
-    soac_binding_region *region = &unit->regions.items[selected];
-    region->result_kind = -1;
-    if (kind < 0) {
-        return SUCCESS;  /* Explicit chained/other receiving operation. */
-    }
-    instr_sequence *seq = c->u->u_instr_sequence;
-    if (seq->s_used == 0 || !soac_operation_location(statement)) {
-        return soac_binding_error("result consumer has no actual native operation");
-    }
-    _PyInstruction *instruction = &seq->s_instrs[seq->s_used - 1];
-    uint32_t id;
-    if (kind == Py_SOAC_SCOPE_RESULT_DISCARD) {
-        if (target != NULL || instruction->i_opcode != POP_TOP || instruction->i_oparg != 0) {
-            return soac_binding_error("original expression discard is not its actual POP_TOP");
-        }
-        soac_reference_origin origin = {
-            .origin = value, .loc = statement, .kind = kind,
-            .family = SOAC_ORIGIN_SCOPE_RESULT, .initial_opcode = POP_TOP,
-            .initial_slot = 0, .emission_context = unit->active_emission_context,
-            .keyword_constant = -1,
-        };
-        RETURN_IF_ERROR(soac_push_operation(unit, origin, &id));
-        RETURN_IF_ERROR(soac_attach_operation(c, id));
-    }
-    else if (kind == Py_SOAC_SCOPE_RESULT_PUBLISH) {
-        id = instruction->i_soac_origins.lane[0];
-        soac_reference_origin *origin = soac_operation_at(unit, id);
-        if (target == NULL || target->kind != Name_kind || origin == NULL ||
-            origin->family != SOAC_ORIGIN_STORE || origin->origin != target ||
-            origin->kind != Py_SOAC_BINDING_NAME || origin->phase != Py_SOAC_BINDING_PUBLISH ||
-            origin->context != Store || instruction->i_soac_origins.lane[1] != 0) {
-            return soac_binding_error("result publication lost its actual original Name Store");
-        }
-    }
-    else {
-        return soac_binding_error("unknown original comprehension result consumer");
-    }
-    region->result_kind = kind;
-    region->result_statement = statement;
-    region->result_origin = id;
-    return SUCCESS;
-}
 
 static asdl_comprehension_seq *
 soac_scope_generators(const soac_binding_region *region)
@@ -1648,216 +1418,6 @@ soac_scope_generators(const soac_binding_region *region)
     }
 }
 
-static int
-soac_validate_scope_event_producer(soac_code_bindings *unit,
-                                   const soac_scope_event *event, int opcode, int oparg)
-{
-    int kind = event->kind, phase = event->phase;
-    int prefix = kind == Py_SOAC_SCOPE_COPY_FREE || kind == Py_SOAC_SCOPE_ENTRY_CELL;
-    int isolation = kind == Py_SOAC_SCOPE_SAVE_CLEAR || kind == Py_SOAC_SCOPE_REGION_CELL ||
-        kind == Py_SOAC_SCOPE_PROTECT_ENTER || kind == Py_SOAC_SCOPE_ENTRY_ROTATION;
-    int cleanup = kind == Py_SOAC_SCOPE_DISCARD_RESULT || kind == Py_SOAC_SCOPE_ERROR_ENTRY;
-    int restore = kind == Py_SOAC_SCOPE_RESTORE_SLOT || kind == Py_SOAC_SCOPE_RESTORE_ROTATION;
-    int expected_phase = prefix ? Py_SOAC_SCOPE_PHASE_ENTRY : isolation ? Py_SOAC_SCOPE_PHASE_ISOLATION :
-        cleanup ? Py_SOAC_SCOPE_PHASE_ERROR_CLEANUP : kind == Py_SOAC_SCOPE_PROPAGATE ?
-        Py_SOAC_SCOPE_PHASE_ERROR_RESTORE : Py_SOAC_SCOPE_PHASE_BODY;
-    if (restore ? (phase != Py_SOAC_SCOPE_PHASE_NORMAL_RESTORE && phase != Py_SOAC_SCOPE_PHASE_ERROR_RESTORE)
-                : phase != expected_phase) {
-        return soac_binding_error("scope event has a different native emitter phase");
-    }
-    int needs_slot = kind == Py_SOAC_SCOPE_ENTRY_CELL || kind == Py_SOAC_SCOPE_SAVE_CLEAR ||
-        kind == Py_SOAC_SCOPE_REGION_CELL || kind == Py_SOAC_SCOPE_RESTORE_SLOT;
-    if (needs_slot != (event->slot >= 0) || needs_slot != (event->owner >= 0) ||
-        event->slot >= unit->slots.count || event->owner >= unit->owners.count) {
-        return soac_binding_error("scope event has an invalid native owner payload");
-    }
-    if (needs_slot) {
-        soac_binding_owner *owner = &unit->owners.items[event->owner];
-        int expected_owner = kind == Py_SOAC_SCOPE_ENTRY_CELL ? Py_SOAC_CLASS_OWNER_ENTRY :
-            kind == Py_SOAC_SCOPE_REGION_CELL ? Py_SOAC_CLASS_OWNER_FRESH_CELL : Py_SOAC_CLASS_OWNER_SAVED_SLOT;
-        if (owner->kind != expected_owner || owner->slot != event->slot || owner->region != event->region) {
-            return soac_binding_error("scope event disagrees with its actual slot owner");
-        }
-    }
-    soac_binding_region *region = event->region < 0 ? NULL : &unit->regions.items[event->region];
-    int auxiliary = event->auxiliary;
-    if (kind == Py_SOAC_SCOPE_COPY_FREE) {
-        if (auxiliary <= 0 || auxiliary != unit->free_count) {
-            return soac_binding_error("scope COPY_FREE_VARS has a different native free count");
-        }
-    }
-    else if (kind == Py_SOAC_SCOPE_PROTECT_ENTER) {
-        if (auxiliary <= 0) {
-            return soac_binding_error("scope protection has no native saved slots");
-        }
-    }
-    else if (kind == Py_SOAC_SCOPE_BUILD_COLLECTION) {
-        if (auxiliary != region->kind) {
-            return soac_binding_error("scope collection kind differs from its original expression");
-        }
-    }
-    else if (kind == Py_SOAC_SCOPE_GET_ITER || kind == Py_SOAC_SCOPE_GET_AITER ||
-             kind == Py_SOAC_SCOPE_COMPLETION_VALUE_RETIRE ||
-             kind == Py_SOAC_SCOPE_ITERATOR_RETIRE || kind == Py_SOAC_SCOPE_ITERATOR_ADVANCE) {
-        asdl_comprehension_seq *generators = soac_scope_generators(region);
-        if (auxiliary < 0 || auxiliary >= asdl_seq_LEN(generators) ||
-            !!((comprehension_ty)asdl_seq_GET(generators, auxiliary))->is_async !=
-                (kind == Py_SOAC_SCOPE_GET_AITER)) {
-            return soac_binding_error("scope iterator event has a different original generator");
-        }
-    }
-    else if (kind >= Py_SOAC_SCOPE_ERROR_ENTRY && kind <= Py_SOAC_SCOPE_COLLECTION_ROTATION) {
-        if (auxiliary < 2 ||
-            ((kind == Py_SOAC_SCOPE_ERROR_ENTRY || kind == Py_SOAC_SCOPE_COLLECTION_ROTATION) && auxiliary != 2)) {
-            return soac_binding_error("scope rotation has a different native stack operand");
-        }
-    }
-    else if (auxiliary != -1) {
-        return soac_binding_error("scope event has an unexpected auxiliary payload");
-    }
-    int expected_opcode = kind == Py_SOAC_SCOPE_PROTECT_ENTER ? SETUP_FINALLY :
-        kind == Py_SOAC_SCOPE_PROTECT_EXIT ? POP_BLOCK :
-        kind == Py_SOAC_SCOPE_RESTORE_SLOT ? STORE_FAST_MAYBE_NULL : soac_scope_expected_opcode(event);
-    if (kind == Py_SOAC_SCOPE_GET_ITER && opcode == -1 && oparg == -1) {
-        return SUCCESS;  /* Explicit non-iterator lowering; no physical receipt. */
-    }
-    if (opcode != expected_opcode) {
-        return soac_binding_error("scope event does not observe its actual native instruction");
-    }
-    if (!needs_slot && kind != Py_SOAC_SCOPE_PROTECT_ENTER && kind != Py_SOAC_SCOPE_ITERATOR_ADVANCE) {
-        int expected_operand = kind == Py_SOAC_SCOPE_COPY_FREE ||
-            (kind >= Py_SOAC_SCOPE_ERROR_ENTRY && kind <= Py_SOAC_SCOPE_COLLECTION_ROTATION)
-            ? auxiliary : 0;
-        if (oparg != expected_operand) {
-            return soac_binding_error("scope event does not observe its actual native operand");
-        }
-    }
-    return SUCCESS;
-}
-
-static int
-soac_new_scope_event(soac_code_bindings *unit, Py_ssize_t region,
-                     int phase, int kind, Py_ssize_t slot, Py_ssize_t owner,
-                     int auxiliary, int opcode, int oparg, uint32_t *out)
-{
-    *out = 0;
-    if (unit == NULL) {
-        return SUCCESS;
-    }
-    if (phase < Py_SOAC_SCOPE_PHASE_ENTRY || phase > Py_SOAC_SCOPE_PHASE_ERROR_RESTORE ||
-        kind < Py_SOAC_SCOPE_COPY_FREE || kind > Py_SOAC_SCOPE_ITERATOR_ADVANCE ||
-        ((phase == Py_SOAC_SCOPE_PHASE_ENTRY) != (region < 0)) ||
-        region < -1 || region >= unit->regions.count) {
-        return soac_binding_error("invalid native scope event producer");
-    }
-    soac_binding_region *scope = region < 0 ? NULL : &unit->regions.items[region];
-    int step;
-    if (scope == NULL) {
-        if (unit->scope_prefix.count >= INT_MAX) {
-            return soac_binding_error("native entry prefix is too large");
-        }
-        step = (int)unit->scope_prefix.count;
-    }
-    else {
-        if (scope->phase_steps[phase] == INT_MAX) {
-            return soac_binding_error("native comprehension phase is too large");
-        }
-        step = scope->phase_steps[phase]++;
-    }
-    soac_scope_event event = {
-        region, phase, step, kind, slot, owner, auxiliary, 0, 0,
-    };
-    RETURN_IF_ERROR(soac_validate_scope_event_producer(unit, &event, opcode, oparg));
-    Py_ssize_t event_index = unit->scope_events.count;
-    RETURN_IF_ERROR(SOAC_PUSH(unit->scope_events, event));
-    soac_reference_origin origin = {
-        .origin = scope == NULL ? (const void *)unit->origin : scope->expression,
-        .loc = scope == NULL ? unit->loc : scope->loc,
-        .kind = kind, .family = SOAC_ORIGIN_SCOPE_EVENT, .phase = phase,
-        .initial_opcode = opcode, .initial_slot = oparg,
-        .emission_context = scope == NULL ? -1 : unit->active_emission_context,
-        .keyword_constant = -1, .scope_event = event_index + 1,
-    };
-    RETURN_IF_ERROR(soac_push_operation(unit, origin, out));
-    unit->scope_events.items[event_index].origin = *out;
-    if (scope == NULL) {
-        RETURN_IF_ERROR(SOAC_PUSH(unit->scope_prefix, event_index));
-    }
-    return SUCCESS;
-}
-
-static int
-soac_record_scope_event(compiler *c, int kind, Py_ssize_t slot,
-                        Py_ssize_t owner, int auxiliary)
-{
-    soac_code_bindings *unit = c->u->u_metadata.u_soac_bindings;
-    if (unit == NULL || unit->active_region < 0) {
-        return SUCCESS;
-    }
-    instr_sequence *seq = c->u->u_instr_sequence;
-    if (seq->s_used == 0) {
-        return soac_binding_error("scope event precedes its native instruction");
-    }
-    _PyInstruction *instruction = &seq->s_instrs[seq->s_used - 1];
-    uint32_t origin;
-    RETURN_IF_ERROR(soac_new_scope_event(unit, unit->active_region, unit->scope_phase,
-        kind, slot, owner, auxiliary, instruction->i_opcode, instruction->i_oparg, &origin));
-    return soac_attach_operation(c, origin);
-}
-
-int
-_PyCompile_SoacScopeEvent(compiler *c, int kind, int auxiliary)
-{
-    soac_code_bindings *unit = c->u->u_metadata.u_soac_bindings;
-    if (unit == NULL || unit->active_region < 0) {
-        return SUCCESS;
-    }
-    if (kind == Py_SOAC_SCOPE_PROTECT_ENTER) {
-        unit->regions.items[unit->active_region].protection =
-            Py_SOAC_SCOPE_FINALLY_AFTER_PREFIX;
-    }
-    return soac_record_scope_event(c, kind, -1, -1, auxiliary);
-}
-
-int
-_PyCompile_SoacScopePhase(compiler *c, int phase)
-{
-    soac_code_bindings *unit = c->u->u_metadata.u_soac_bindings;
-    if (unit == NULL || unit->active_region < 0) {
-        return SUCCESS;
-    }
-    if (phase < Py_SOAC_SCOPE_PHASE_ISOLATION || phase > Py_SOAC_SCOPE_PHASE_ERROR_RESTORE) {
-        return soac_binding_error("invalid native comprehension phase");
-    }
-    unit->scope_phase = phase;
-    return SUCCESS;
-}
-
-int
-_PyCompile_SoacScopeNonIterator(compiler *c, int generator)
-{
-    soac_code_bindings *unit = c->u->u_metadata.u_soac_bindings;
-    if (unit == NULL || unit->active_region < 0) {
-        return SUCCESS;
-    }
-    asdl_comprehension_seq *generators = soac_scope_generators(&unit->regions.items[unit->active_region]);
-    if (generator <= 0 || generator >= asdl_seq_LEN(generators)) {
-        return soac_binding_error("non-iterator lowering has no actual inner generator");
-    }
-    comprehension_ty original = asdl_seq_GET(generators, generator);
-    asdl_expr_seq *elements = original->iter->kind == List_kind ? original->iter->v.List.elts :
-        original->iter->kind == Tuple_kind ? original->iter->v.Tuple.elts : NULL;
-    if (original->is_async || asdl_seq_LEN(elements) != 1 ||
-        ((expr_ty)asdl_seq_GET(elements, 0))->kind == Starred_kind) {
-        return soac_binding_error("non-iterator lowering disagrees with the selected native branch");
-    }
-    uint32_t origin;
-    RETURN_IF_ERROR(soac_new_scope_event(unit, unit->active_region, unit->scope_phase,
-        Py_SOAC_SCOPE_GET_ITER, -1, -1, generator, -1, -1, &origin));
-    Py_ssize_t event = soac_operation_at(unit, origin)->scope_event - 1;
-    unit->scope_events.items[event].alternative = Py_SOAC_SCOPE_GAP_NONITERATOR;
-    return SUCCESS;
-}
 
 _PySoacScopeBindingContext
 _PyCompile_SoacScopeBindingContext(compiler *c, int role, int generator)
@@ -1883,72 +1443,6 @@ _PyCompile_SoacRestoreScopeBindingContext(compiler *c, _PySoacScopeBindingContex
     }
 }
 
-int
-_PyCompile_SoacRestoreLocal(compiler *c, int local_index)
-{
-    soac_code_bindings *unit = c->u->u_metadata.u_soac_bindings;
-    if (unit == NULL || unit->active_region < 0) {
-        return SUCCESS;
-    }
-    if (unit->scope_phase != Py_SOAC_SCOPE_PHASE_NORMAL_RESTORE &&
-        unit->scope_phase != Py_SOAC_SCOPE_PHASE_ERROR_RESTORE) {
-        return soac_binding_error("native snapshot restore has no actual path");
-    }
-    Py_ssize_t slot;
-    RETURN_IF_ERROR(soac_local_binding_slot(&c->u->u_metadata, local_index, &slot));
-    soac_binding_region *region = &unit->regions.items[unit->active_region];
-    Py_ssize_t owner = -1;
-    for (Py_ssize_t i = 0; i < region->entry_ops.count; i++) {
-        soac_binding_entry_op *op = &region->entry_ops.items[i];
-        if (op->role == Py_SOAC_CLASS_OP_SAVE_CLEAR && op->slot == slot) {
-            if (owner >= 0) {
-                return soac_binding_error("ambiguous native snapshot restore");
-            }
-            owner = op->owner;
-        }
-    }
-    if (owner < 0) {
-        return soac_binding_error("native restore has no saved physical slot");
-    }
-    return soac_record_scope_event(c, Py_SOAC_SCOPE_RESTORE_SLOT, slot, owner, -1);
-}
-
-static soac_scope_event *
-soac_scope_event_at(soac_code_bindings *unit, const soac_reference_origin *origin)
-{
-    if (origin == NULL || origin->family != SOAC_ORIGIN_SCOPE_EVENT) {
-        return NULL;
-    }
-    assert(origin->scope_event > 0 && origin->scope_event <= unit->scope_events.count);
-    return &unit->scope_events.items[origin->scope_event - 1];
-}
-
-static int
-soac_same_scope_event(soac_code_bindings *left, soac_reference_origin *a,
-                      soac_code_bindings *right, soac_reference_origin *b)
-{
-    soac_scope_event *x = soac_scope_event_at(left, a);
-    soac_scope_event *y = soac_scope_event_at(right, b);
-    if (x == NULL || y == NULL) {
-        return x == y;
-    }
-    if (x->phase != y->phase || x->step != y->step || x->kind != y->kind ||
-        x->auxiliary != y->auxiliary || x->alternative != y->alternative ||
-        (x->slot < 0) != (y->slot < 0) || (x->owner < 0) != (y->owner < 0) ||
-        (x->region < 0) != (y->region < 0)) {
-        return 0;
-    }
-    if (x->slot >= 0 && left->slots.items[x->slot].final_index !=
-                         right->slots.items[y->slot].final_index) {
-        return 0;
-    }
-    if (x->owner >= 0 && left->owners.items[x->owner].kind !=
-                          right->owners.items[y->owner].kind) {
-        return 0;
-    }
-    return x->region < 0 || left->regions.items[x->region].origin ==
-                            right->regions.items[y->region].origin;
-}
 
 int
 _PyCompile_SoacPushContext(compiler *c, int owner_kind,
@@ -2047,19 +1541,6 @@ soac_call_form(int opcode)
     }
 }
 
-static int
-soac_fast_read_form(int opcode)
-{
-    switch (opcode) {
-        case LOAD_FAST: return Py_SOAC_READ_FAST_DUPLICATE;
-        case LOAD_FAST_CHECK: return Py_SOAC_READ_FAST_CHECKED_DUPLICATE;
-        case LOAD_FAST_BORROW: return Py_SOAC_READ_FAST_BORROW;
-        case LOAD_FAST_LOAD_FAST: return Py_SOAC_READ_FAST_PAIR_DUPLICATE;
-        case LOAD_FAST_BORROW_LOAD_FAST_BORROW: return Py_SOAC_READ_FAST_PAIR_BORROW;
-        case STORE_FAST_LOAD_FAST: return Py_SOAC_READ_STORE_FAST_LOAD_FAST;
-        default: return -1;
-    }
-}
 
 int
 _PyCompile_SoacBindingOrigin(compiler *c, location source_loc,
@@ -2078,18 +1559,13 @@ _PyCompile_SoacBindingOrigin(compiler *c, location source_loc,
     }
     _PyInstruction *instruction = &seq->s_instrs[seq->s_used - 1];
     int opcode = instruction->i_opcode;
-    if (context == Load && opcode != LOAD_FAST) {
-        /* Non-FAST loads retain their existing cell/namespace operations. */
-        return SUCCESS;
-    }
-    if ((context == Load && kind != Py_SOAC_BINDING_NAME) ||
-        (context != Load && soac_store_form(opcode) < 0)) {
+    if ((context != Store && context != Del) || soac_store_form(opcode) < 0) {
         return soac_binding_error("source binding disagrees with native operation");
     }
     soac_reference_origin origin = {
         .origin = original, .loc = source_loc, .kind = kind,
         .context = context, .phase = phase,
-        .family = context == Load ? SOAC_ORIGIN_READ : SOAC_ORIGIN_STORE,
+        .family = SOAC_ORIGIN_STORE,
         .initial_opcode = opcode, .initial_slot = instruction->i_oparg,
         .emission_context = unit->active_emission_context,
         .keyword_constant = -1,
@@ -2438,136 +1914,25 @@ error:
     return ERROR;
 }
 
-int
-_PyCompile_SoacScopeUnreachableAllocation(_PyCompile_CodeUnitMetadata *umd,
-                                           _PySoacReadOrigins origins,
-                                           int opcode, int oparg)
-{
-    soac_code_bindings *unit = umd->u_soac_bindings;
-    if (unit == NULL) {
-        return SUCCESS;
-    }
-    if (origins.lane[0] > unit->reference_origins.count ||
-        origins.lane[1] > unit->reference_origins.count) {
-        return soac_binding_error("unreachable allocation has an invalid original operation");
-    }
-    soac_reference_origin *origin = soac_operation_at(unit, origins.lane[0]);
-    soac_scope_event *event = soac_scope_event_at(unit, origin);
-    if (event == NULL) {
-        return SUCCESS;  /* A non-lifecycle collection or call preparation. */
-    }
-    if (origins.lane[1] != 0 || event->kind != Py_SOAC_SCOPE_BUILD_COLLECTION ||
-        event->region < 0 || event->region >= unit->regions.count ||
-        origin->initial_opcode != opcode || origin->initial_slot != oparg) {
-        return soac_binding_error("unreachable collection differs from its original allocation");
-    }
-    RETURN_IF_ERROR(soac_validate_scope_event_producer(unit, event, opcode, oparg));
-    soac_binding_region *region = &unit->regions.items[event->region];
-    if (region->unreachable_allocation != 0 &&
-        region->unreachable_allocation != event->origin) {
-        return soac_binding_error("unreachable collection has two original allocation identities");
-    }
-    region->unreachable_allocation = event->origin;
-    return SUCCESS;
-}
-
-void
-_PyCompile_SoacScopeProtectionUncertain(_PyCompile_CodeUnitMetadata *umd)
-{
-    if (umd->u_soac_bindings != NULL) {
-        umd->u_soac_bindings->scope_protection_uncertain = 1;
-    }
-}
-
-int
-_PyCompile_SoacScopeProtectionMember(_PyCompile_CodeUnitMetadata *umd, int ordinal,
-                                     _PySoacReadOrigins enter,
-                                     _PySoacReadOrigins leave, int handler)
-{
-    soac_code_bindings *unit = umd->u_soac_bindings;
-    if (unit == NULL) {
-        return SUCCESS;
-    }
-    if (ordinal < 0 || ordinal >= unit->reference_instructions.count ||
-        enter.lane[0] > unit->reference_origins.count ||
-        enter.lane[1] > unit->reference_origins.count ||
-        leave.lane[0] > unit->reference_origins.count ||
-        leave.lane[1] > unit->reference_origins.count) {
-        return soac_binding_error("invalid native protected instruction observation");
-    }
-    soac_reference_origin *original = soac_operation_at(unit, enter.lane[0]);
-    if (original == NULL && enter.lane[1] == 0) {
-        return SUCCESS;  /* Ordinary enclosing/nested native handler. */
-    }
-    soac_scope_event *begin = soac_scope_event_at(unit, original);
-    soac_reference_origin *terminal = soac_operation_at(unit, leave.lane[0]);
-    soac_scope_event *end = soac_scope_event_at(unit, terminal);
-    if (begin == NULL || end == NULL || enter.lane[1] != 0 || leave.lane[1] != 0 ||
-        begin->kind != Py_SOAC_SCOPE_PROTECT_ENTER || end->kind != Py_SOAC_SCOPE_PROTECT_EXIT ||
-        begin->region != end->region || original->emission_context != terminal->emission_context ||
-        original->initial_opcode != SETUP_FINALLY || terminal->initial_opcode != POP_BLOCK ||
-        handler < 0) {
-        unit->scope_protection_uncertain = 1;
-        return SUCCESS;
-    }
-    soac_scope_protection_member member = {ordinal, enter.lane[0], leave.lane[0], handler};
-    return SOAC_PUSH(unit->scope_protection_members, member);
-}
-
-int
-_PyCompile_SoacScopeStaticSwap(_PyCompile_CodeUnitMetadata *umd,
-                              _PySoacReadOrigins rotation, int depth,
-                              _PySoacReadOrigins first, _PySoacReadOrigins last)
-{
-    soac_code_bindings *unit = umd->u_soac_bindings;
-    if (unit == NULL) {
-        return SUCCESS;
-    }
-    if (rotation.lane[0] > unit->reference_origins.count ||
-        rotation.lane[1] > unit->reference_origins.count ||
-        first.lane[0] > unit->reference_origins.count ||
-        first.lane[1] > unit->reference_origins.count ||
-        last.lane[0] > unit->reference_origins.count ||
-        last.lane[1] > unit->reference_origins.count) {
-        return soac_binding_error("static SWAP has a foreign native origin");
-    }
-    soac_reference_origin *origin = soac_operation_at(unit, rotation.lane[0]);
-    soac_scope_event *event = soac_scope_event_at(unit, origin);
-    if (event == NULL || event->kind != Py_SOAC_SCOPE_RESTORE_ROTATION ||
-        event->phase != Py_SOAC_SCOPE_PHASE_NORMAL_RESTORE ||
-        rotation.lane[1] != 0 || origin->initial_opcode != SWAP ||
-        origin->initial_slot != depth || event->auxiliary != depth) {
-        return SUCCESS;  /* No proof for another/elided SWAP transformation. */
-    }
-    soac_scope_static_swap receipt = {rotation.lane[0], depth, first, last};
-    return SOAC_PUSH(unit->scope_static_swaps, receipt);
-}
 
 int
 _PyCompile_SoacFinalReferenceInstruction(_PyCompile_CodeUnitMetadata *umd,
                                          int ordinal, int opcode, int oparg,
-                                         _PySoacReadOrigins origins,
-                                         int target, int fallthrough)
+                                         _PySoacReadOrigins origins)
 {
     soac_code_bindings *unit = umd->u_soac_bindings;
-    if (unit == NULL) {
-        return SUCCESS;
-    }
-    if (unit->reference_instruction_count >= 0 ||
-        ordinal != unit->reference_instructions.count || target < -1 || fallthrough < -1 ||
-        origins.lane[0] > unit->reference_origins.count ||
-        origins.lane[1] > unit->reference_origins.count) {
+    if (unit == NULL) return SUCCESS;
+    if (unit->reference_instruction_count >= 0 || ordinal != unit->reference_instructions.count ||
+        origins.lane[0] > unit->reference_origins.count || origins.lane[1] > unit->reference_origins.count) {
         return soac_binding_error("invalid final source operation provenance");
     }
-    /* Dense opt-in observation is required to prove complete handler intervals
-     * and every callback-capable operation on a normal cleanup path. */
+    /* Native ordinals identify interpreter publication/CALL sites; this is
+     * neither a SOAC execution schedule nor a lifetime/handler recipe. */
     soac_reference_instruction instruction = {
         .ordinal = ordinal, .opcode = opcode, .oparg = oparg, .origins = origins,
-        .opcode_offset = -1, .handler_ordinal = -1, .target = target,
-        .fallthrough = fallthrough, .first_byte = -1, .end_byte = -1,
+        .opcode_offset = -1, .first_byte = -1, .end_byte = -1,
     };
-    RETURN_IF_ERROR(SOAC_PUSH(unit->reference_instructions, instruction));
-    return SUCCESS;
+    return SOAC_PUSH(unit->reference_instructions, instruction);
 }
 
 int
@@ -2584,38 +1949,10 @@ _PyCompile_SoacFinishReferences(_PyCompile_CodeUnitMetadata *umd, int count)
     if (count != unit->reference_instructions.count) {
         return soac_binding_error("native instruction observations are not dense");
     }
-    for (Py_ssize_t i = 0; i < unit->reference_instructions.count; i++) {
-        soac_reference_instruction *instruction = &unit->reference_instructions.items[i];
-        if (instruction->target >= count || instruction->fallthrough >= count) {
-            return soac_binding_error("native instruction has a foreign final CFG edge");
-        }
-    }
     unit->reference_instruction_count = count;
     return SUCCESS;
 }
 
-int
-_PyCompile_SoacResolvedJump(_PyCompile_CodeUnitMetadata *umd, int ordinal,
-                            int original_opcode, int final_opcode, int target)
-{
-    soac_code_bindings *unit = umd->u_soac_bindings;
-    if (unit == NULL) {
-        return SUCCESS;
-    }
-    if (ordinal < 0 || ordinal >= unit->reference_instruction_count || target < 0 ||
-        target >= unit->reference_instruction_count ||
-        (original_opcode != JUMP && original_opcode != JUMP_NO_INTERRUPT) ||
-        (final_opcode != JUMP_FORWARD && final_opcode != JUMP_BACKWARD &&
-         final_opcode != JUMP_BACKWARD_NO_INTERRUPT)) {
-        return soac_binding_error("invalid actual native jump-resolution observation");
-    }
-    soac_reference_instruction *instruction = &unit->reference_instructions.items[ordinal];
-    if (instruction->opcode != original_opcode || instruction->target != target) {
-        return soac_binding_error("native jump resolution lost its original CFG correspondence");
-    }
-    instruction->opcode = final_opcode;
-    return SUCCESS;
-}
 
 int
 _PyCompile_SoacAssembledInstruction(_PyCompile_CodeUnitMetadata *umd,
@@ -2636,31 +1973,23 @@ _PyCompile_SoacAssembledInstruction(_PyCompile_CodeUnitMetadata *umd,
         return soac_binding_error("native assembler lost final instruction correspondence");
     }
     soac_reference_instruction *expected = &unit->reference_instructions.items[ordinal];
-    if (expected->ordinal != ordinal || expected->opcode != instruction->i_opcode ||
+    if (expected->ordinal != ordinal ||
         expected->origins.lane[0] != instruction->i_soac_origins.lane[0] ||
         expected->origins.lane[1] != instruction->i_soac_origins.lane[1]) {
         return soac_binding_error("assembled source operation differs from final native scan");
     }
-    if (expected->target >= 0) {
-        /* resolve_jump_offsets keeps the exact final target ordinal separately
-         * while replacing the label operand with the assembled displacement. */
-        if (!OPCODE_HAS_JUMP(instruction->i_opcode) || instruction->i_target != expected->target) {
-            return soac_binding_error("assembled native jump has a different CFG target");
+    if (expected->origins.lane[0] || expected->origins.lane[1]) {
+        if (expected->opcode != instruction->i_opcode || expected->oparg != instruction->i_oparg) {
+            return soac_binding_error("assembled tagged operation changed its native form or operand");
         }
     }
-    else if (OPCODE_HAS_JUMP(instruction->i_opcode) || expected->oparg != instruction->i_oparg) {
-        return soac_binding_error("assembled source operation has a different native operand");
-    }
+    /* Ordinary jump resolution may change untagged opcodes/operands. The
+     * actual assembler supplies their final identity, not a reconstructed CFG. */
+    expected->opcode = instruction->i_opcode;
     expected->oparg = instruction->i_oparg;
     expected->opcode_offset = opcode_offset;
     expected->first_byte = first_byte;
     expected->end_byte = end_byte;
-    const _PyExceptHandlerInfo *handler = &instruction->i_except_handler_info;
-    expected->handler_ordinal = handler->h_label;
-    if (handler->h_label >= 0) {
-        expected->handler_lasti = handler->h_preserve_lasti;
-        expected->handler_depth = handler->h_startdepth - 1 - handler->h_preserve_lasti;
-    }
     unit->assembled_reference_cursor++;
     unit->assembled_instruction_count++;
     return SUCCESS;
@@ -2782,9 +2111,6 @@ soac_same_final_origin(soac_code_bindings *left, soac_reference_origin *a,
             return same;
         }
     }
-    if (a->family == SOAC_ORIGIN_SCOPE_EVENT) {
-        return soac_same_scope_event(left, a, right, b);
-    }
     if (a->family == SOAC_ORIGIN_CALL_PREPARATION) {
         return soac_same_operation_identity(left, soac_operation_at(left, a->call_owner),
                                             right, soac_operation_at(right, b->call_owner));
@@ -2799,11 +2125,7 @@ soac_same_final_references(soac_code_bindings *left, soac_code_bindings *right)
         left->reference_instruction_count != right->reference_instruction_count ||
         left->assembled_code_size != right->assembled_code_size ||
         left->reference_origins.count != right->reference_origins.count ||
-        left->reference_instructions.count != right->reference_instructions.count ||
-        left->regions.count != right->regions.count ||
-        left->scope_protection_uncertain != right->scope_protection_uncertain ||
-        left->scope_protection_members.count != right->scope_protection_members.count ||
-        left->scope_static_swaps.count != right->scope_static_swaps.count) {
+        left->reference_instructions.count != right->reference_instructions.count) {
         return 0;
     }
     for (Py_ssize_t i = 0; i < left->reference_origins.count; i++) {
@@ -2818,65 +2140,13 @@ soac_same_final_references(soac_code_bindings *left, soac_code_bindings *right)
         soac_reference_instruction *b = &right->reference_instructions.items[i];
         if (a->ordinal != b->ordinal || a->opcode != b->opcode ||
             a->oparg != b->oparg || a->opcode_offset != b->opcode_offset ||
-            a->handler_ordinal != b->handler_ordinal || a->handler_depth != b->handler_depth ||
-            a->handler_lasti != b->handler_lasti || a->target != b->target ||
-            a->fallthrough != b->fallthrough || a->first_byte != b->first_byte ||
+            a->first_byte != b->first_byte ||
             a->end_byte != b->end_byte) {
             return 0;
         }
         for (int lane = 0; lane < 2; lane++) {
             int same = soac_same_final_origin(left, soac_operation_at(left, a->origins.lane[lane]),
                                               right, soac_operation_at(right, b->origins.lane[lane]));
-            if (same <= 0) {
-                return same;
-            }
-        }
-    }
-    for (Py_ssize_t i = 0; i < left->regions.count; i++) {
-        soac_binding_region *a = &left->regions.items[i];
-        soac_binding_region *b = &right->regions.items[i];
-        if (a->result_kind != b->result_kind ||
-            (a->result_kind > 0 && !soac_same_location(a->result_statement, b->result_statement))) {
-            return 0;
-        }
-        int same = soac_same_final_origin(left, soac_operation_at(left, a->result_origin),
-                                         right, soac_operation_at(right, b->result_origin));
-        if (same <= 0) {
-            return same;
-        }
-        same = soac_same_final_origin(left, soac_operation_at(left, a->unreachable_allocation),
-                                     right, soac_operation_at(right, b->unreachable_allocation));
-        if (same <= 0) {
-            return same;
-        }
-    }
-    for (Py_ssize_t i = 0; i < left->scope_protection_members.count; i++) {
-        soac_scope_protection_member *a = &left->scope_protection_members.items[i];
-        soac_scope_protection_member *b = &right->scope_protection_members.items[i];
-        if (a->ordinal != b->ordinal || a->handler != b->handler) {
-            return 0;
-        }
-        int enter = soac_same_final_origin(left, soac_operation_at(left, a->enter),
-                                          right, soac_operation_at(right, b->enter));
-        int leave = soac_same_final_origin(left, soac_operation_at(left, a->leave),
-                                          right, soac_operation_at(right, b->leave));
-        if (enter <= 0 || leave <= 0) {
-            return enter < 0 || leave < 0 ? ERROR : 0;
-        }
-    }
-    for (Py_ssize_t i = 0; i < left->scope_static_swaps.count; i++) {
-        soac_scope_static_swap *a = &left->scope_static_swaps.items[i];
-        soac_scope_static_swap *b = &right->scope_static_swaps.items[i];
-        if (a->depth != b->depth) {
-            return 0;
-        }
-        uint32_t first[] = {a->rotation, a->first.lane[0], a->first.lane[1],
-                            a->last.lane[0], a->last.lane[1]};
-        uint32_t second[] = {b->rotation, b->first.lane[0], b->first.lane[1],
-                             b->last.lane[0], b->last.lane[1]};
-        for (size_t lane = 0; lane < Py_ARRAY_LENGTH(first); lane++) {
-            int same = soac_same_final_origin(left, soac_operation_at(left, first[lane]),
-                                             right, soac_operation_at(right, second[lane]));
             if (same <= 0) {
                 return same;
             }
@@ -3015,7 +2285,6 @@ soac_operation_origin_row(soac_binding_collector *collector, soac_code_bindings 
     }
     PyObject *payload;
     switch (origin->family) {
-        case SOAC_ORIGIN_READ: payload = soac_source_span(origin->loc); break;
         case SOAC_ORIGIN_STORE: payload = soac_binding_origin_row(origin); break;
         case SOAC_ORIGIN_CALL: payload = soac_call_origin_row(collector, unit, origin); break;
         default:
@@ -3114,32 +2383,6 @@ soac_operand_row(int domain, int index)
     return row;
 }
 
-static int
-soac_is_original_fast_read(soac_reference_origin *origin)
-{
-    return origin != NULL && origin->family == SOAC_ORIGIN_READ &&
-        origin->kind == Py_SOAC_BINDING_NAME && origin->context == Load &&
-        origin->initial_opcode == LOAD_FAST;
-}
-
-static int
-soac_is_original_fast_store(soac_reference_origin *origin)
-{
-    return origin != NULL && origin->family == SOAC_ORIGIN_STORE &&
-        origin->context == Store && origin->initial_opcode == STORE_FAST;
-}
-
-static int
-soac_read_lane(int form, int lane)
-{
-    if (form < 0) {
-        return 0;
-    }
-    if (form == Py_SOAC_READ_STORE_FAST_LOAD_FAST) {
-        return lane == 1;
-    }
-    return lane == 0 || form >= Py_SOAC_READ_FAST_PAIR_DUPLICATE;
-}
 
 static int
 soac_store_lane(int form, int lane)
@@ -3159,33 +2402,6 @@ soac_original_store_matches(soac_reference_origin *origin, int form, int lane)
     return soac_store_form(origin->initial_opcode) == form;
 }
 
-static int
-soac_check_original_read_slot(soac_code_bindings *unit,
-                              soac_reference_origin *origin, int slot)
-{
-    if (slot != origin->initial_slot ||
-        !(_PyLocals_GetKind(unit->code->co_localspluskinds, slot) & CO_FAST_LOCAL)) {
-        return soac_binding_error("source FAST receipt disagrees with actual local slot");
-    }
-    if (unit->scope_kind == Py_SOAC_SCOPE_CLASS) {
-        int found = 0;
-        for (Py_ssize_t i = 0; i < unit->accesses.count; i++) {
-            soac_binding_access *access = &unit->accesses.items[i];
-            if (access->origin == origin->origin && access->context == Py_SOAC_CLASS_ACCESS_LOAD &&
-                access->mode == Py_SOAC_CLASS_ACCESS_RAW_SLOT) {
-                if (unit->slots.items[access->slot].final_index != slot ||
-                    !soac_same_location(access->loc, origin->loc)) {
-                    return soac_binding_error("class access/read receipts disagree");
-                }
-                found = 1;
-            }
-        }
-        if (!found) {
-            return soac_binding_error("class FAST read lacks its original access recipe");
-        }
-    }
-    return SUCCESS;
-}
 
 static int
 soac_check_original_store_slot(soac_code_bindings *unit,
@@ -3335,17 +2551,12 @@ soac_physical_operation_gaps(soac_binding_collector *collector, soac_code_bindin
 {
     for (Py_ssize_t i = 0; i < unit->reference_instructions.count; i++) {
         soac_reference_instruction *instruction = &unit->reference_instructions.items[i];
-        int read = soac_fast_read_form(instruction->opcode);
         int store = soac_store_form(instruction->opcode);
         int call = soac_call_form(instruction->opcode);
         for (int lane = 0; lane < 2; lane++) {
             soac_reference_origin *origin = soac_operation_at(unit, instruction->origins.lane[lane]);
-            if (soac_read_lane(read, lane) && !soac_is_original_fast_read(origin)) {
-                RETURN_IF_ERROR(soac_operation_gap(collector, unit, gaps, Py_SOAC_READ_GAP_MISSING_ORIGIN,
-                    NULL, instruction->ordinal, lane, instruction->opcode, -2));
-            }
             if (soac_store_lane(store, lane) && !soac_original_store_matches(origin, store, lane)) {
-                RETURN_IF_ERROR(soac_operation_gap(collector, unit, gaps, Py_SOAC_READ_GAP_MISSING_STORE,
+                RETURN_IF_ERROR(soac_operation_gap(collector, unit, gaps, Py_SOAC_OPERATION_GAP_MISSING_STORE,
                     NULL, instruction->ordinal, lane, instruction->opcode, -2));
             }
         }
@@ -3372,8 +2583,7 @@ soac_operation_emissions(soac_binding_collector *collector, soac_code_bindings *
 {
     soac_reference_origin *original = &unit->reference_origins.items[representative];
     PyObject *emissions = PyList_New(0), *first_key = NULL;
-    soac_reference_origin *first_preceding = NULL;
-    int unsupported = 0, divergent = 0, alternative = 0, have_preceding = 0;
+    int unsupported = 0, divergent = 0, alternative = 0;
     if (emissions == NULL) {
         return NULL;
     }
@@ -3406,57 +2616,7 @@ soac_operation_emissions(soac_binding_collector *collector, soac_code_bindings *
                 goto error;
             }
             int form = -1;
-            if (origin->family == SOAC_ORIGIN_READ) {
-                form = soac_fast_read_form(instruction->opcode);
-                if (!soac_read_lane(form, lane)) {
-                    form = -1;
-                }
-                if (form >= 0) {
-                    int first, second;
-                    if (soac_reference_slots(unit, instruction, form >= Py_SOAC_READ_FAST_PAIR_DUPLICATE,
-                            &first, &second) < 0 ||
-                        soac_check_original_read_slot(unit, origin, lane == 0 ? first : second) < 0) {
-                        Py_DECREF(context);
-                        goto error;
-                    }
-                    int paired = form == Py_SOAC_READ_STORE_FAST_LOAD_FAST;
-                    soac_reference_origin *preceding = paired
-                        ? soac_operation_at(unit, instruction->origins.lane[0]) : NULL;
-                    /* Scope receipts do not change wire3 source-operation gaps
-                     * or grant a compiler restore the identity of a source Store. */
-                    if (preceding != NULL && preceding->family == SOAC_ORIGIN_SCOPE_EVENT) {
-                        preceding = NULL;
-                    }
-                    PyObject *other = soac_optional_id(second);
-                    PyObject *binding = soac_binding_origin_row(soac_is_original_fast_store(preceding) ? preceding : NULL);
-                    if (other != NULL && binding != NULL) {
-                        emission = Py_BuildValue("(iiiOiOO)", instruction->ordinal, form,
-                            first, other, lane, binding, context);
-                        int borrow = form == Py_SOAC_READ_FAST_BORROW || form == Py_SOAC_READ_FAST_PAIR_BORROW;
-                        key = Py_BuildValue("(iiiiO)", borrow, lane == 0 ? first : second,
-                            paired, paired ? first : -1, binding);
-                    }
-                    Py_XDECREF(other);
-                    Py_XDECREF(binding);
-                    if (paired) {
-                        if (have_preceding) {
-                            int same = soac_same_operation_identity(unit, first_preceding, unit, preceding);
-                            if (same < 0) {
-                                Py_DECREF(context);
-                                Py_XDECREF(emission);
-                                Py_XDECREF(key);
-                                goto error;
-                            }
-                            divergent |= !same;
-                        }
-                        else {
-                            first_preceding = preceding;
-                            have_preceding = 1;
-                        }
-                    }
-                }
-            }
-            else if (origin->family == SOAC_ORIGIN_STORE) {
+            if (origin->family == SOAC_ORIGIN_STORE) {
                 form = soac_store_form(instruction->opcode);
                 if (!soac_original_store_matches(origin, form, lane)) {
                     form = -1;
@@ -3513,7 +2673,7 @@ soac_operation_emissions(soac_binding_collector *collector, soac_code_bindings *
             Py_DECREF(context);
             if (form < 0) {
                 unsupported = 1;
-                if (soac_operation_gap(collector, unit, gaps, Py_SOAC_READ_GAP_UNSUPPORTED,
+                if (soac_operation_gap(collector, unit, gaps, Py_SOAC_OPERATION_GAP_UNSUPPORTED,
                         origin, instruction->ordinal, lane, instruction->opcode, origin->emission_context) < 0) {
                     goto error;
                 }
@@ -3546,11 +2706,11 @@ soac_operation_emissions(soac_binding_collector *collector, soac_code_bindings *
         }
     }
     if (PyList_GET_SIZE(emissions) == 0 && !unsupported && !alternative &&
-        soac_operation_gap(collector, unit, gaps, Py_SOAC_READ_GAP_ELIMINATED, original,
+        soac_operation_gap(collector, unit, gaps, Py_SOAC_OPERATION_GAP_ELIMINATED, original,
                            -1, -1, -1, -2) < 0) {
         goto error;
     }
-    if (divergent && soac_operation_gap(collector, unit, gaps, Py_SOAC_READ_GAP_DIVERGENT,
+    if (divergent && soac_operation_gap(collector, unit, gaps, Py_SOAC_OPERATION_GAP_DIVERGENT,
                                       original, -1, -1, -1, -2) < 0) {
         goto error;
     }
@@ -3567,10 +2727,10 @@ error:
 static PyObject *
 soac_reference_table(soac_binding_collector *collector, soac_code_bindings *unit)
 {
-    PyObject *rows[3] = {PyList_New(0), PyList_New(0), PyList_New(0)};
+    PyObject *rows[2] = {PyList_New(0), PyList_New(0)};
     PyObject *gaps = PyList_New(0), *result = NULL;
     Py_ssize_t *representatives = NULL;
-    if (rows[0] == NULL || rows[1] == NULL || rows[2] == NULL || gaps == NULL ||
+    if (rows[0] == NULL || rows[1] == NULL || gaps == NULL ||
         soac_check_assembled_operations(unit) < 0 ||
         soac_physical_operation_gaps(collector, unit, gaps) < 0) {
         goto done;
@@ -3628,19 +2788,17 @@ soac_reference_table(soac_binding_collector *collector, soac_code_bindings *unit
             PyTuple_Pack(2, PyTuple_GET_ITEM(source, 1), emissions);
         Py_XDECREF(source);
         Py_XDECREF(emissions);
-        if (soac_append_owned(rows[origin->family], row) < 0) {
+        if (soac_append_owned(rows[origin->family - SOAC_ORIGIN_STORE], row) < 0) {
             goto done;
         }
     }
-    PyObject *reads = PyList_AsTuple(rows[0]);
-    PyObject *stores = reads == NULL ? NULL : PyList_AsTuple(rows[1]);
-    PyObject *calls = stores == NULL ? NULL : PyList_AsTuple(rows[2]);
+    PyObject *stores = PyList_AsTuple(rows[0]);
+    PyObject *calls = stores == NULL ? NULL : PyList_AsTuple(rows[1]);
     PyObject *missing = calls == NULL ? NULL : PyList_AsTuple(gaps);
     if (missing != NULL) {
-        result = Py_BuildValue("(ninOOOOO)", unit->final_id, unit->reference_instruction_count,
-            unit->assembled_code_size, unit->code->co_names, reads, stores, calls, missing);
+        result = Py_BuildValue("(ninOOOO)", unit->final_id, unit->reference_instruction_count,
+            unit->assembled_code_size, unit->code->co_names, stores, calls, missing);
     }
-    Py_XDECREF(reads);
     Py_XDECREF(stores);
     Py_XDECREF(calls);
     Py_XDECREF(missing);
@@ -3648,7 +2806,6 @@ done:
     PyMem_Free(representatives);
     Py_XDECREF(rows[0]);
     Py_XDECREF(rows[1]);
-    Py_XDECREF(rows[2]);
     Py_XDECREF(gaps);
     return result;
 }
@@ -3659,9 +2816,8 @@ soac_validate_scope_slots(soac_code_bindings *unit)
     PyCodeObject *code = unit->code;
     if (code == NULL || unit->final_id < 0 || unit->active_region >= 0 ||
         unit->slots.count != code->co_nlocalsplus ||
-        unit->cell_count != code->co_ncellvars || unit->free_count != code->co_nfreevars ||
-        unit->scope_prefix.count != unit->cell_count + (unit->free_count != 0)) {
-        return soac_binding_error("incomplete final native scope layout or prefix");
+        unit->cell_count != code->co_ncellvars || unit->free_count != code->co_nfreevars) {
+        return soac_binding_error("incomplete final native scope layout");
     }
     Py_ssize_t parameters = _PyCode_NumFrameParameters(code);
     if (parameters < 0 || parameters > code->co_nlocalsplus ||
@@ -3693,37 +2849,6 @@ soac_validate_scope_slots(soac_code_bindings *unit)
             }
         }
     }
-    int cells = 0, frees = 0;
-    for (Py_ssize_t i = 0; i < unit->scope_prefix.count; i++) {
-        soac_scope_event *event = &unit->scope_events.items[unit->scope_prefix.items[i]];
-        if (event->phase != Py_SOAC_SCOPE_PHASE_ENTRY || event->region >= 0 || event->step != i) {
-            return soac_binding_error("native prefix event has a foreign order or region");
-        }
-        if (event->kind == Py_SOAC_SCOPE_COPY_FREE) {
-            if (i != 0 || event->auxiliary != unit->free_count || frees++) {
-                return soac_binding_error("native COPY_FREE_VARS prefix is inconsistent");
-            }
-        }
-        else if (event->kind == Py_SOAC_SCOPE_ENTRY_CELL) {
-            if (event->slot < 0 || event->owner < 0 ||
-                event->owner != unit->slots.items[event->slot].entry_owner) {
-                return soac_binding_error("native MAKE_CELL prefix has no current-slot owner");
-            }
-            cells++;
-            for (Py_ssize_t j = 0; j < i; j++) {
-                soac_scope_event *previous = &unit->scope_events.items[unit->scope_prefix.items[j]];
-                if (previous->kind == Py_SOAC_SCOPE_ENTRY_CELL && previous->slot == event->slot) {
-                    return soac_binding_error("duplicate native entry MAKE_CELL");
-                }
-            }
-        }
-        else {
-            return soac_binding_error("non-prefix event in native frame initialization");
-        }
-    }
-    if (cells != unit->cell_count || frees != (unit->free_count != 0)) {
-        return soac_binding_error("native prefix does not cover its cell/free layout");
-    }
     return SUCCESS;
 }
 
@@ -3752,329 +2877,6 @@ soac_scope_seed_rows(soac_code_bindings *unit)
     return rows;
 }
 
-static int
-soac_scope_gap(soac_code_bindings *unit, PyObject *gaps, int reason,
-               Py_ssize_t region, const soac_scope_event *event,
-               int ordinal, int lane, int opcode, Py_ssize_t context)
-{
-    PyObject *region_id = soac_optional_id(region < 0 ? -1 : unit->regions.items[region].final_id);
-    PyObject *key = event == NULL ? Py_NewRef(Py_None) :
-        Py_BuildValue("(ii)", event->phase, event->step);
-    PyObject *index = soac_optional_id(ordinal);
-    PyObject *which = soac_optional_id(lane);
-    PyObject *operation = soac_optional_id(opcode);
-    PyObject *continuation = soac_context_row(unit, context);
-    PyObject *row = region_id == NULL || key == NULL || index == NULL || which == NULL ||
-        operation == NULL || continuation == NULL ? NULL :
-        Py_BuildValue("(iOOOOOO)", reason, region_id, key, index, which, operation, continuation);
-    Py_XDECREF(region_id);
-    Py_XDECREF(key);
-    Py_XDECREF(index);
-    Py_XDECREF(which);
-    Py_XDECREF(operation);
-    Py_XDECREF(continuation);
-    if (row == NULL) {
-        return ERROR;
-    }
-    int found = PySequence_Contains(gaps, row);
-    if (found < 0) {
-        Py_DECREF(row);
-        return ERROR;
-    }
-    if (found) {
-        Py_DECREF(row);
-        return SUCCESS;
-    }
-    return soac_append_owned(gaps, row);
-}
-
-static int
-soac_scope_expected_opcode(const soac_scope_event *event)
-{
-    switch (event->kind) {
-        case Py_SOAC_SCOPE_COPY_FREE: return COPY_FREE_VARS;
-        case Py_SOAC_SCOPE_ENTRY_CELL:
-        case Py_SOAC_SCOPE_REGION_CELL: return MAKE_CELL;
-        case Py_SOAC_SCOPE_SAVE_CLEAR: return LOAD_FAST_AND_CLEAR;
-        case Py_SOAC_SCOPE_BUILD_COLLECTION:
-            switch (event->auxiliary) {
-                case Py_SOAC_EAGER_LIST: return BUILD_LIST;
-                case Py_SOAC_EAGER_SET: return BUILD_SET;
-                case Py_SOAC_EAGER_DICT: return BUILD_MAP;
-                default: return -1;
-            }
-        case Py_SOAC_SCOPE_GET_ITER: return GET_ITER;
-        case Py_SOAC_SCOPE_GET_AITER: return GET_AITER;
-        case Py_SOAC_SCOPE_COMPLETION_VALUE_RETIRE: return END_FOR;
-        case Py_SOAC_SCOPE_ITERATOR_RETIRE: return POP_ITER;
-        case Py_SOAC_SCOPE_ITERATOR_ADVANCE: return FOR_ITER;
-        case Py_SOAC_SCOPE_DISCARD_RESULT: return POP_TOP;
-        case Py_SOAC_SCOPE_RESTORE_SLOT: return STORE_FAST;
-        case Py_SOAC_SCOPE_PROPAGATE: return RERAISE;
-        case Py_SOAC_SCOPE_ERROR_ENTRY:
-        case Py_SOAC_SCOPE_RESTORE_ROTATION:
-        case Py_SOAC_SCOPE_ENTRY_ROTATION:
-        case Py_SOAC_SCOPE_COLLECTION_ROTATION: return SWAP;
-        /* These pseudo boundaries have no executable opcode receipt. */
-        case Py_SOAC_SCOPE_PROTECT_ENTER:
-        case Py_SOAC_SCOPE_PROTECT_EXIT: return -1;
-    }
-    return -1;
-}
-
-static int
-soac_scope_emission_form(soac_code_bindings *unit, soac_scope_event *event,
-                         soac_reference_instruction *instruction, int lane,
-                         int *first, int *second)
-{
-    *first = instruction->oparg;
-    *second = -1;
-    int form = Py_SOAC_SCOPE_FORM_DIRECT;
-    if (event->kind == Py_SOAC_SCOPE_RESTORE_SLOT &&
-        (instruction->opcode == STORE_FAST_STORE_FAST || instruction->opcode == STORE_FAST_LOAD_FAST)) {
-        if (instruction->opcode == STORE_FAST_LOAD_FAST && lane != 0) {
-            return -1;
-        }
-        if (soac_reference_slots(unit, instruction, 1, first, second) < 0) {
-            return -2;
-        }
-        form = instruction->opcode == STORE_FAST_STORE_FAST
-            ? Py_SOAC_SCOPE_FORM_STORE_PAIR : Py_SOAC_SCOPE_FORM_STORE_LOAD;
-    }
-    else if (lane != 0 || instruction->opcode != soac_scope_expected_opcode(event)) {
-        return -1;
-    }
-    if (event->slot >= 0 &&
-        (lane == 0 ? *first : *second) != unit->slots.items[event->slot].final_index) {
-        return -1;
-    }
-    if (event->kind == Py_SOAC_SCOPE_COPY_FREE && *first != event->auxiliary) {
-        return -1;
-    }
-    if (event->kind >= Py_SOAC_SCOPE_ERROR_ENTRY && event->kind <= Py_SOAC_SCOPE_COLLECTION_ROTATION &&
-        *first != event->auxiliary) {
-        return -1;
-    }
-    if ((event->kind == Py_SOAC_SCOPE_BUILD_COLLECTION || event->kind == Py_SOAC_SCOPE_GET_ITER ||
-         event->kind == Py_SOAC_SCOPE_GET_AITER || event->kind == Py_SOAC_SCOPE_DISCARD_RESULT ||
-         event->kind == Py_SOAC_SCOPE_PROPAGATE ||
-         event->kind == Py_SOAC_SCOPE_COMPLETION_VALUE_RETIRE ||
-         event->kind == Py_SOAC_SCOPE_ITERATOR_RETIRE) && *first != 0) {
-        return -1;
-    }
-    return form;
-}
-
-static int
-soac_scope_event_in_group(soac_code_bindings *unit, soac_scope_event *event,
-                          soac_scope_event *candidate)
-{
-    if (event->phase != candidate->phase || event->step != candidate->step ||
-        soac_region_representative(unit, event->region) !=
-            soac_region_representative(unit, candidate->region)) {
-        return 0;
-    }
-    return soac_same_scope_event(unit, soac_operation_at(unit, event->origin),
-                                unit, soac_operation_at(unit, candidate->origin));
-}
-
-#include "soac_scope_lifecycle_v5.inc"
-
-static PyObject *
-soac_scope_event_emissions(soac_code_bindings *unit, soac_scope_event *event, PyObject *gaps)
-{
-    PyObject *rows = PyList_New(0), *first_key = NULL;
-    int unsupported = 0, alternative = 0, divergent = 0;
-    if (rows == NULL) {
-        return NULL;
-    }
-    for (Py_ssize_t i = 0; i < unit->scope_events.count; i++) {
-        soac_scope_event *candidate = &unit->scope_events.items[i];
-        if (candidate->alternative && soac_scope_event_in_group(unit, event, candidate)) {
-            alternative = 1;
-            soac_reference_origin *origin = soac_operation_at(unit, candidate->origin);
-            if (soac_scope_gap(unit, gaps, candidate->alternative, event->region,
-                    event, -1, -1, -1, origin->emission_context) < 0) {
-                goto error;
-            }
-        }
-    }
-    int boundary = event->kind == Py_SOAC_SCOPE_PROTECT_ENTER ||
-                   event->kind == Py_SOAC_SCOPE_PROTECT_EXIT;
-    if (boundary && !soac_scope_event_has_lifecycle_proof(unit, event) &&
-        soac_scope_gap(unit, gaps, Py_SOAC_SCOPE_GAP_PROTECTION,
-            event->region, event, -1, -1, -1, -2) < 0) {
-        goto error;
-    }
-    for (Py_ssize_t i = 0; i < unit->reference_instructions.count; i++) {
-        soac_reference_instruction *instruction = &unit->reference_instructions.items[i];
-        for (int lane = 0; lane < 2; lane++) {
-            soac_reference_origin *origin = soac_operation_at(unit, instruction->origins.lane[lane]);
-            soac_scope_event *candidate = soac_scope_event_at(unit, origin);
-            if (candidate == NULL || !soac_scope_event_in_group(unit, event, candidate) || boundary) {
-                continue;
-            }
-            if (instruction->opcode == NOP) {
-                continue;
-            }
-            int first, second;
-            int form = soac_scope_emission_form(unit, candidate, instruction, lane, &first, &second);
-            if (form == -2) {
-                goto error;
-            }
-            if (form < 0) {
-                unsupported = 1;
-                if (soac_scope_gap(unit, gaps, Py_SOAC_SCOPE_GAP_UNSUPPORTED, event->region,
-                        event, instruction->ordinal, lane, instruction->opcode,
-                        origin->emission_context) < 0) {
-                    goto error;
-                }
-                continue;
-            }
-            if (instruction->opcode_offset < 0 || instruction->opcode_offset >= unit->assembled_code_size) {
-                soac_binding_error("native scope event lost its assembler position");
-                goto error;
-            }
-            PyObject *other = soac_optional_id(second);
-            PyObject *handler = NULL;
-            if (instruction->handler_ordinal < 0) {
-                handler = Py_NewRef(Py_None);
-            }
-            else if (instruction->handler_ordinal >= unit->reference_instruction_count ||
-                     instruction->handler_depth < 0 ||
-                     (instruction->handler_lasti != 0 && instruction->handler_lasti != 1)) {
-                soac_binding_error("scope event has invalid actual native handler metadata");
-            }
-            else {
-                handler = Py_BuildValue("(iii)", instruction->handler_ordinal,
-                    instruction->handler_depth, instruction->handler_lasti);
-            }
-            PyObject *context = soac_context_row(unit, origin->emission_context);
-            PyObject *row = other == NULL || handler == NULL || context == NULL ? NULL :
-                Py_BuildValue("(iiiiOinOO)", instruction->ordinal, lane, form, first,
-                    other, instruction->opcode, instruction->opcode_offset, handler, context);
-            /* A validated FOR_ITER displacement is a physical location, not an
-             * owner operand. This exception requires both exact target entries
-             * and a complete equal owner schedule for every original copy. */
-            int semantic_first = event->kind == Py_SOAC_SCOPE_ITERATOR_ADVANCE &&
-                soac_scope_event_has_lifecycle_proof(unit, event) ? 0 : first;
-            PyObject *key = other == NULL ? NULL :
-                Py_BuildValue("(iiiO)", lane, form, semantic_first, other);
-            Py_XDECREF(other);
-            Py_XDECREF(handler);
-            Py_XDECREF(context);
-            if (row == NULL || key == NULL) {
-                Py_XDECREF(row);
-                Py_XDECREF(key);
-                goto error;
-            }
-            if (first_key == NULL) {
-                first_key = Py_NewRef(key);
-            }
-            else {
-                int same = PyObject_RichCompareBool(first_key, key, Py_EQ);
-                if (same < 0) {
-                    Py_DECREF(row);
-                    Py_DECREF(key);
-                    goto error;
-                }
-                divergent |= !same;
-            }
-            Py_DECREF(key);
-            if (soac_append_owned(rows, row) < 0 ||
-                (origin->emission_context == -2 && soac_scope_gap(unit, gaps,
-                    Py_SOAC_SCOPE_GAP_CONTEXT, event->region, event, instruction->ordinal,
-                    lane, instruction->opcode, -2) < 0) ||
-                (form != Py_SOAC_SCOPE_FORM_DIRECT && soac_scope_gap(unit, gaps,
-                    Py_SOAC_SCOPE_GAP_PAIRED_RESTORE, event->region, event, instruction->ordinal,
-                    lane, instruction->opcode, origin->emission_context) < 0)) {
-                goto error;
-            }
-        }
-    }
-    if (PyList_GET_SIZE(rows) == 0 && !unsupported && !alternative && !boundary &&
-        !soac_scope_event_has_lifecycle_proof(unit, event) &&
-        soac_scope_gap(unit, gaps, Py_SOAC_SCOPE_GAP_ELIMINATED,
-            event->region, event, -1, -1, -1, -2) < 0) {
-        goto error;
-    }
-    if (divergent && soac_scope_gap(unit, gaps, Py_SOAC_SCOPE_GAP_DIVERGENT,
-            event->region, event, -1, -1, -1, -2) < 0) {
-        goto error;
-    }
-    PyObject *result = PyList_AsTuple(rows);
-    Py_DECREF(rows);
-    Py_XDECREF(first_key);
-    return result;
-error:
-    Py_DECREF(rows);
-    Py_XDECREF(first_key);
-    return NULL;
-}
-
-static PyObject *
-soac_scope_event_row(soac_code_bindings *unit, soac_scope_event *event, PyObject *gaps)
-{
-    PyObject *slot = soac_optional_id(event->slot < 0 ? -1 : unit->slots.items[event->slot].final_index);
-    PyObject *owner = soac_optional_id(event->owner < 0 ? -1 : unit->owners.items[event->owner].final_id);
-    PyObject *auxiliary = soac_optional_id(event->auxiliary);
-    PyObject *emissions = slot == NULL || owner == NULL || auxiliary == NULL ? NULL :
-        soac_scope_event_emissions(unit, event, gaps);
-    PyObject *row = emissions == NULL ? NULL : Py_BuildValue("(iiiOOOO)",
-        event->phase, event->step, event->kind, slot, owner, auxiliary, emissions);
-    Py_XDECREF(slot);
-    Py_XDECREF(owner);
-    Py_XDECREF(auxiliary);
-    Py_XDECREF(emissions);
-    return row;
-}
-
-static PyObject *
-soac_scope_prefix_rows(soac_code_bindings *unit, PyObject *gaps)
-{
-    PyObject *rows = PyTuple_New(unit->scope_prefix.count);
-    if (rows == NULL) {
-        return NULL;
-    }
-    for (Py_ssize_t i = 0; i < unit->scope_prefix.count; i++) {
-        soac_scope_event *event = &unit->scope_events.items[unit->scope_prefix.items[i]];
-        PyObject *row = soac_scope_event_row(unit, event, gaps);
-        if (row == NULL) {
-            Py_DECREF(rows);
-            return NULL;
-        }
-        PyTuple_SET_ITEM(rows, i, row);
-    }
-    return rows;
-}
-
-static int
-soac_scope_physical_gaps(soac_code_bindings *unit, PyObject *gaps)
-{
-    for (Py_ssize_t i = 0; i < unit->reference_instructions.count; i++) {
-        soac_reference_instruction *instruction = &unit->reference_instructions.items[i];
-        int needs_prefix = instruction->opcode == MAKE_CELL ||
-            instruction->opcode == COPY_FREE_VARS || instruction->opcode == LOAD_FAST_AND_CLEAR;
-        int store = soac_store_form(instruction->opcode);
-        for (int lane = 0; lane < 2; lane++) {
-            soac_reference_origin *origin = soac_operation_at(unit, instruction->origins.lane[lane]);
-            soac_scope_event *event = soac_scope_event_at(unit, origin);
-            int needs_restore = store >= Py_SOAC_STORE_FAST && store <= Py_SOAC_STORE_FAST_THEN_LOAD &&
-                soac_store_lane(store, lane) && !soac_original_store_matches(origin, store, lane);
-            if (((needs_prefix && lane == 0) || needs_restore) && event == NULL &&
-                soac_scope_gap(unit, gaps, Py_SOAC_SCOPE_GAP_MISSING_ORIGIN, -1,
-                    NULL, instruction->ordinal, lane, instruction->opcode, -2) < 0) {
-                return ERROR;
-            }
-        }
-    }
-    if ((unit->code->co_flags & (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR)) &&
-        soac_scope_gap(unit, gaps, Py_SOAC_SCOPE_GAP_SUSPENSION, -1,
-            NULL, -1, -1, -1, -2) < 0) {
-        return ERROR;
-    }
-    return SUCCESS;
-}
 
 static PyObject *
 soac_scope_source_binding_rows(soac_code_bindings *unit, Py_ssize_t region)
@@ -4153,7 +2955,7 @@ error:
 }
 
 static PyObject *
-soac_scope_region_rows(soac_code_bindings *unit, PyObject *gaps)
+soac_scope_region_rows(soac_code_bindings *unit)
 {
     PyObject *rows = PyTuple_New(unit->final_region_count);
     if (rows == NULL) {
@@ -4171,10 +2973,8 @@ soac_scope_region_rows(soac_code_bindings *unit, PyObject *gaps)
         PyObject *ops = PyTuple_New(region->entry_ops.count);
         PyObject *restores = PyTuple_New(region->restores.count);
         PyObject *bindings = soac_scope_source_binding_rows(unit, i);
-        PyObject *events = PyList_New(0);
-        PyObject *lifecycle = NULL;
         if (parent == NULL || span == NULL || span == Py_None || outer == NULL || outer == Py_None ||
-            ops == NULL || restores == NULL || bindings == NULL || events == NULL || !region->restored) {
+            ops == NULL || restores == NULL || bindings == NULL || !region->restored) {
             if (!PyErr_Occurred()) {
                 soac_binding_error("incomplete native eager-comprehension region");
             }
@@ -4198,26 +2998,9 @@ soac_scope_region_rows(soac_code_bindings *unit, PyObject *gaps)
             }
             PyTuple_SET_ITEM(restores, j, row);
         }
-        lifecycle = soac_scope_lifecycle_rows(unit, i, gaps);
-        if (lifecycle == NULL) {
-            goto region_error;
-        }
-        for (Py_ssize_t j = 0; j < unit->scope_events.count; j++) {
-            soac_scope_event *event = &unit->scope_events.items[j];
-            if (event->region == i && soac_append_owned(events,
-                    soac_scope_event_row(unit, event, gaps)) < 0) {
-                goto region_error;
-            }
-        }
-        if (region->is_async && soac_scope_gap(unit, gaps, Py_SOAC_SCOPE_GAP_SUSPENSION,
-                i, NULL, -1, -1, -1, -2) < 0) {
-            goto region_error;
-        }
-        PyObject *event_tuple = PyList_AsTuple(events);
-        PyObject *row = event_tuple == NULL ? NULL : Py_BuildValue("(nOiOOiiOOOOO)",
+        PyObject *row = Py_BuildValue("(nOiOOiiOOO)",
             region->final_id, parent, region->kind, span, outer, region->is_async,
-            region->protection, ops, restores, bindings, event_tuple, lifecycle);
-        Py_XDECREF(event_tuple);
+            region->restores.count != 0, ops, restores, bindings);
         if (row == NULL) {
             goto region_error;
         }
@@ -4227,8 +3010,6 @@ soac_scope_region_rows(soac_code_bindings *unit, PyObject *gaps)
         Py_DECREF(ops);
         Py_DECREF(restores);
         Py_DECREF(bindings);
-        Py_DECREF(events);
-        Py_DECREF(lifecycle);
         PyTuple_SET_ITEM(rows, region->final_id, row);
         continue;
 region_error:
@@ -4238,8 +3019,6 @@ region_error:
         Py_XDECREF(ops);
         Py_XDECREF(restores);
         Py_XDECREF(bindings);
-        Py_XDECREF(events);
-        Py_XDECREF(lifecycle);
         Py_DECREF(rows);
         return NULL;
     }
@@ -4289,57 +3068,39 @@ soac_validate_scope_regions(soac_code_bindings *unit)
 {
     for (Py_ssize_t i = 0; i < unit->regions.count; i++) {
         soac_binding_region *region = &unit->regions.items[i];
-        Py_ssize_t saved = 0, entries = 0, normal = 0, exceptional = 0;
-        int phase_steps[6] = {0}, kinds[Py_SOAC_SCOPE_ITERATOR_ADVANCE + 1] = {0};
+        Py_ssize_t saved = 0;
+        if (!region->restored || region->parent >= i) {
+            return soac_binding_error("native comprehension has an inconsistent lexical boundary");
+        }
         for (Py_ssize_t j = 0; j < region->entry_ops.count; j++) {
-            saved += region->entry_ops.items[j].role == Py_SOAC_CLASS_OP_SAVE_CLEAR;
+            soac_binding_entry_op *entry = &region->entry_ops.items[j];
+            if (entry->slot < 0 || entry->slot >= unit->slots.count ||
+                entry->owner < 0 || entry->owner >= unit->owners.count) {
+                return soac_binding_error("native comprehension has an invalid slot or owner");
+            }
+            soac_binding_owner *owner = &unit->owners.items[entry->owner];
+            int expected = entry->role == Py_SOAC_CLASS_OP_SAVE_CLEAR
+                ? Py_SOAC_CLASS_OWNER_SAVED_SLOT : Py_SOAC_CLASS_OWNER_FRESH_CELL;
+            if ((entry->role != Py_SOAC_CLASS_OP_SAVE_CLEAR && entry->role != Py_SOAC_CLASS_OP_MAKE_CELL) ||
+                owner->slot != entry->slot || owner->region != i || owner->kind != expected) {
+                return soac_binding_error("native comprehension binding differs from its lexical owner");
+            }
+            saved += entry->role == Py_SOAC_CLASS_OP_SAVE_CLEAR;
         }
-        if (!region->restored || region->parent >= i ||
-            region->protection != (saved ? Py_SOAC_SCOPE_FINALLY_AFTER_PREFIX : Py_SOAC_SCOPE_NO_PRIVATE_HANDLER) ||
-            saved != region->restores.count) {
-            return soac_binding_error("native comprehension has an inconsistent isolation boundary");
+        if (saved != region->restores.count) {
+            return soac_binding_error("native comprehension lost a lexical snapshot restore");
         }
-        for (Py_ssize_t j = 0; j < unit->scope_events.count; j++) {
-            soac_scope_event *event = &unit->scope_events.items[j];
-            if (event->region != i) {
-                continue;
+        for (Py_ssize_t j = 0; j < region->restores.count; j++) {
+            soac_binding_saved *restore = &region->restores.items[j];
+            Py_ssize_t operation = soac_saved_operation(region, restore->owner);
+            if (operation < 0 || region->entry_ops.items[operation].slot != restore->slot) {
+                return soac_binding_error("native comprehension restores a foreign saved slot");
             }
-            if (event->phase < 1 || event->phase > 5 ||
-                event->step != phase_steps[event->phase]++ || event->kind < 0 || event->kind > Py_SOAC_SCOPE_ITERATOR_ADVANCE) {
-                return soac_binding_error("native comprehension events lost their actual phase order");
-            }
-            kinds[event->kind]++;
-            if (event->kind == Py_SOAC_SCOPE_SAVE_CLEAR || event->kind == Py_SOAC_SCOPE_REGION_CELL) {
-                if (entries >= region->entry_ops.count) {
-                    return soac_binding_error("native comprehension prefix has an extra owner operation");
-                }
-                soac_binding_entry_op *entry = &region->entry_ops.items[entries++];
-                int role = event->kind == Py_SOAC_SCOPE_SAVE_CLEAR ? Py_SOAC_CLASS_OP_SAVE_CLEAR : Py_SOAC_CLASS_OP_MAKE_CELL;
-                if (entry->role != role || entry->slot != event->slot || entry->owner != event->owner) {
-                    return soac_binding_error("native comprehension prefix disagrees with its owner sequence");
+            for (Py_ssize_t prior = 0; prior < j; prior++) {
+                if (region->restores.items[prior].owner == restore->owner) {
+                    return soac_binding_error("native comprehension restores an owner twice");
                 }
             }
-            else if (event->kind == Py_SOAC_SCOPE_RESTORE_SLOT) {
-                Py_ssize_t *position = event->phase == Py_SOAC_SCOPE_PHASE_NORMAL_RESTORE ? &normal : &exceptional;
-                if (*position >= region->restores.count) {
-                    return soac_binding_error("native comprehension path has an extra snapshot restore");
-                }
-                soac_binding_saved *restore = &region->restores.items[(*position)++];
-                if (restore->slot != event->slot || restore->owner != event->owner) {
-                    return soac_binding_error("native comprehension path has a different restore order");
-                }
-            }
-            else if (event->kind == Py_SOAC_SCOPE_PROTECT_ENTER && event->auxiliary != saved) {
-                return soac_binding_error("native comprehension protection has a different saved depth");
-            }
-        }
-        if (entries != region->entry_ops.count || normal != saved || exceptional != saved ||
-            kinds[Py_SOAC_SCOPE_BUILD_COLLECTION] != 1 || kinds[Py_SOAC_SCOPE_COLLECTION_ROTATION] != 1 ||
-            kinds[Py_SOAC_SCOPE_PROTECT_ENTER] != !!saved || kinds[Py_SOAC_SCOPE_PROTECT_EXIT] != !!saved ||
-            kinds[Py_SOAC_SCOPE_ERROR_ENTRY] != !!saved || kinds[Py_SOAC_SCOPE_DISCARD_RESULT] != !!saved ||
-            kinds[Py_SOAC_SCOPE_PROPAGATE] != !!saved || kinds[Py_SOAC_SCOPE_ENTRY_ROTATION] != !!saved ||
-            kinds[Py_SOAC_SCOPE_RESTORE_ROTATION] != 2 * !!saved) {
-            return soac_binding_error("native comprehension is missing an actual lifecycle path");
         }
     }
     return SUCCESS;
@@ -4349,46 +3110,30 @@ static PyObject *
 soac_scope_recipe(soac_binding_collector *collector, soac_code_bindings *unit)
 {
     if (soac_validate_scope_slots(unit) < 0 || soac_validate_scope_regions(unit) < 0 ||
-        soac_normalize_class_bindings(unit) < 0) {
-        return NULL;
-    }
-    PyObject *gaps = PyList_New(0), *gap_tuple = NULL, *result = NULL;
-    PyObject *seeds = NULL, *prefix = NULL, *owners = NULL, *regions = NULL;
-    PyObject *captures = NULL, *accesses = NULL, *actions = NULL;
-    if (gaps == NULL || soac_scope_physical_gaps(unit, gaps) < 0) {
-        goto done;
-    }
-    seeds = soac_scope_seed_rows(unit);
-    prefix = seeds == NULL ? NULL : soac_scope_prefix_rows(unit, gaps);
-    owners = prefix == NULL ? NULL : soac_owner_rows(unit);
-    regions = owners == NULL ? NULL : soac_scope_region_rows(unit, gaps);
-    captures = regions == NULL ? NULL : soac_capture_rows(collector, unit);
-    accesses = captures == NULL ? NULL : soac_access_rows(unit);
-    actions = accesses == NULL ? NULL : soac_scope_class_actions(unit);
-    gap_tuple = actions == NULL ? NULL : PyList_AsTuple(gaps);
-    if (gap_tuple != NULL) {
-        result = Py_BuildValue("(nOOOOOOOO)", unit->final_id, seeds, prefix,
-            owners, regions, captures, accesses, actions, gap_tuple);
-    }
-done:
+        soac_normalize_class_bindings(unit) < 0) return NULL;
+    PyObject *seeds = soac_scope_seed_rows(unit);
+    PyObject *owners = seeds == NULL ? NULL : soac_owner_rows(unit);
+    PyObject *regions = owners == NULL ? NULL : soac_scope_region_rows(unit);
+    PyObject *captures = regions == NULL ? NULL : soac_capture_rows(collector, unit);
+    PyObject *accesses = captures == NULL ? NULL : soac_access_rows(unit);
+    PyObject *actions = accesses == NULL ? NULL : soac_scope_class_actions(unit);
+    PyObject *result = actions == NULL ? NULL : Py_BuildValue("(nOOOOOO)",
+        unit->final_id, seeds, owners, regions, captures, accesses, actions);
     Py_XDECREF(seeds);
-    Py_XDECREF(prefix);
     Py_XDECREF(owners);
     Py_XDECREF(regions);
     Py_XDECREF(captures);
     Py_XDECREF(accesses);
     Py_XDECREF(actions);
-    Py_XDECREF(gap_tuple);
-    Py_XDECREF(gaps);
     return result;
 }
 
 static PyObject *
 soac_binding_details(soac_binding_collector *collector, PyCodeObject *root)
 {
-    PyObject *nodes = PyList_New(0), *recipes = PyList_New(0), *reads = PyList_New(0);
+    PyObject *nodes = PyList_New(0), *recipes = PyList_New(0), *operations = PyList_New(0);
     PyObject *result = NULL;
-    if (nodes == NULL || recipes == NULL || reads == NULL ||
+    if (nodes == NULL || recipes == NULL || operations == NULL ||
         soac_collect_final_tree(collector, root, NULL, nodes) < 0) {
         goto done;
     }
@@ -4396,24 +3141,24 @@ soac_binding_details(soac_binding_collector *collector, PyCodeObject *root)
         PyCodeObject *code = (PyCodeObject *)PyTuple_GET_ITEM(PyList_GET_ITEM(nodes, id), 2);
         soac_code_bindings *unit = soac_unit_for_code(collector, code);
         if (unit == NULL || soac_append_owned(recipes, soac_scope_recipe(collector, unit)) < 0 ||
-            soac_append_owned(reads, soac_reference_table(collector, unit)) < 0) {
+            soac_append_owned(operations, soac_reference_table(collector, unit)) < 0) {
             goto done;
         }
     }
     PyObject *node_tuple = PyList_AsTuple(nodes);
     PyObject *recipe_tuple = node_tuple == NULL ? NULL : PyList_AsTuple(recipes);
-    PyObject *read_tuple = recipe_tuple == NULL ? NULL : PyList_AsTuple(reads);
-    if (read_tuple != NULL) {
+    PyObject *operation_tuple = recipe_tuple == NULL ? NULL : PyList_AsTuple(operations);
+    if (operation_tuple != NULL) {
         result = Py_BuildValue("(iOOO)", Py_SOAC_CLASS_BINDINGS_SCHEMA,
-                               node_tuple, recipe_tuple, read_tuple);
+                               node_tuple, recipe_tuple, operation_tuple);
     }
     Py_XDECREF(node_tuple);
     Py_XDECREF(recipe_tuple);
-    Py_XDECREF(read_tuple);
+    Py_XDECREF(operation_tuple);
 done:
     Py_XDECREF(nodes);
     Py_XDECREF(recipes);
-    Py_XDECREF(reads);
+    Py_XDECREF(operations);
     return result;
 }
 

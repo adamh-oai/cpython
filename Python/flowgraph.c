@@ -37,23 +37,6 @@ typedef struct _PyCfgInstruction {
     struct _PyCfgBasicblock *i_except; /* target block when exception is raised */
 } cfg_instr;
 
-/* Private compile-only receipts. They refer to existing instruction origins,
- * not Python values or another source-identity namespace. */
-typedef struct _PySoacCfgStaticSwap {
-    struct _PySoacCfgStaticSwap *next;
-    _PySoacReadOrigins rotation;
-    int depth;
-    _PySoacReadOrigins first;
-    _PySoacReadOrigins last;
-} soac_cfg_static_swap;
-
-typedef struct _PySoacCfgUnreachableAllocation {
-    struct _PySoacCfgUnreachableAllocation *next;
-    _PySoacReadOrigins origins;
-    int opcode;
-    int oparg;
-} soac_cfg_unreachable_allocation;
-
 typedef struct _PyCfgBasicblock {
     /* Each basicblock in a compilation unit is linked via b_list in the
        reverse order that the block are allocated.  b_list points to the next
@@ -64,18 +47,6 @@ typedef struct _PyCfgBasicblock {
     _PyJumpTargetLabel b_label;
     /* Exception stack at start of block, used by assembler to create the exception handling table */
     struct _PyCfgExceptStack *b_exceptstack;
-    /* Actual handler ancestry, retained before pseudo SETUP/POP are erased.
-     * An instruction's existing i_except transports this through native CFG
-     * rewrites. Ambiguous ancestry is never turned into a protected interval. */
-    struct _PyCfgBasicblock *b_soac_outer_handler;
-    _PySoacReadOrigins b_soac_setup_origins;
-    _PySoacReadOrigins b_soac_leave_origins;
-    unsigned b_soac_handler_seen : 1;
-    unsigned b_soac_leave_seen : 1;
-    unsigned b_soac_handler_ambiguous : 1;
-    int b_soac_final_ordinal;
-    soac_cfg_static_swap *b_soac_static_swaps;
-    soac_cfg_unreachable_allocation *b_soac_unreachable_allocations;
     /* pointer to an array of instructions, initially NULL */
     cfg_instr *b_instr;
     /* If b_next is non-NULL, it is a pointer to the next
@@ -292,14 +263,6 @@ copy_basicblock(cfg_builder *g, basicblock *block)
     if (basicblock_append_instructions(result, block) < 0) {
         return NULL;
     }
-    result->b_soac_outer_handler = block->b_soac_outer_handler;
-    result->b_soac_setup_origins = block->b_soac_setup_origins;
-    result->b_soac_leave_origins = block->b_soac_leave_origins;
-    result->b_soac_handler_seen = block->b_soac_handler_seen;
-    result->b_soac_leave_seen = block->b_soac_leave_seen;
-    result->b_soac_handler_ambiguous = block->b_soac_handler_ambiguous;
-    /* The original block remains in g_block_list and owns rewrite receipts.
-     * Multiple physical copies of one origin are separately checked at export. */
     return result;
 }
 
@@ -497,18 +460,6 @@ _PyCfgBuilder_Free(cfg_builder *g)
     while (b != NULL) {
         if (b->b_instr) {
             PyMem_Free((void *)b->b_instr);
-        }
-        soac_cfg_static_swap *swap = b->b_soac_static_swaps;
-        while (swap != NULL) {
-            soac_cfg_static_swap *next_swap = swap->next;
-            PyMem_Free(swap);
-            swap = next_swap;
-        }
-        soac_cfg_unreachable_allocation *allocation = b->b_soac_unreachable_allocations;
-        while (allocation != NULL) {
-            soac_cfg_unreachable_allocation *next_allocation = allocation->next;
-            PyMem_Free(allocation);
-            allocation = next_allocation;
         }
         basicblock *next = b->b_list;
         PyMem_Free((void *)b);
@@ -942,42 +893,6 @@ error:
     return stackdepth;
 }
 
-static int
-soac_same_origins(_PySoacReadOrigins a, _PySoacReadOrigins b)
-{
-    return a.lane[0] == b.lane[0] && a.lane[1] == b.lane[1];
-}
-
-static void
-soac_observe_handler_push(struct _PyCfgExceptStack *stack, cfg_instr *setup)
-{
-    basicblock *target = setup->i_target;
-    basicblock *outer = except_stack_top(stack);
-    if (target->b_soac_handler_seen &&
-        (target->b_soac_outer_handler != outer ||
-         !soac_same_origins(target->b_soac_setup_origins, setup->i_soac_origins))) {
-        target->b_soac_handler_ambiguous = 1;
-    }
-    if (!target->b_soac_handler_seen) {
-        target->b_soac_outer_handler = outer;
-        target->b_soac_setup_origins = setup->i_soac_origins;
-        target->b_soac_handler_seen = 1;
-    }
-}
-
-static void
-soac_observe_handler_pop(struct _PyCfgExceptStack *stack, cfg_instr *pop)
-{
-    basicblock *target = except_stack_top(stack);
-    if (target->b_soac_leave_seen &&
-        !soac_same_origins(target->b_soac_leave_origins, pop->i_soac_origins)) {
-        target->b_soac_handler_ambiguous = 1;
-    }
-    if (!target->b_soac_leave_seen) {
-        target->b_soac_leave_origins = pop->i_soac_origins;
-        target->b_soac_leave_seen = 1;
-    }
-}
 
 static int
 label_exception_targets(basicblock *entryblock) {
@@ -1009,7 +924,6 @@ label_exception_targets(basicblock *entryblock) {
         for (int i = 0; i < b->b_iused; i++) {
             cfg_instr *instr = &b->b_instr[i];
             if (is_block_push(instr)) {
-                soac_observe_handler_push(except_stack, instr);
                 if (!instr->i_target->b_visited) {
                     struct _PyCfgExceptStack *copy = copy_except_stack(except_stack);
                     if (copy == NULL) {
@@ -1023,7 +937,6 @@ label_exception_targets(basicblock *entryblock) {
                 handler = push_except_block(except_stack, instr);
             }
             else if (instr->i_opcode == POP_BLOCK) {
-                soac_observe_handler_pop(except_stack, instr);
                 handler = pop_except_block(except_stack);
                 INSTR_SET_OP0(instr, NOP);
             }
@@ -1135,28 +1048,6 @@ remove_unreachable(basicblock *entryblock) {
     /* Delete unreachable instructions */
     for (basicblock *b = entryblock; b != NULL; b = b->b_next) {
        if (b->b_predecessors == 0) {
-            /* Observe only the actual native reachability decision, before its
-             * instructions are erased. Missing final origins are not this proof.
-             * Untagged ordinary compilation allocates no metadata receipts. */
-            for (int i = 0; i < b->b_iused; i++) {
-                cfg_instr *instruction = &b->b_instr[i];
-                int opcode = instruction->i_opcode;
-                if ((opcode != BUILD_LIST && opcode != BUILD_SET && opcode != BUILD_MAP) ||
-                    (instruction->i_soac_origins.lane[0] == 0 &&
-                     instruction->i_soac_origins.lane[1] == 0)) {
-                    continue;
-                }
-                soac_cfg_unreachable_allocation *receipt = PyMem_Malloc(sizeof(*receipt));
-                if (receipt == NULL) {
-                    PyErr_NoMemory();
-                    return ERROR;
-                }
-                *receipt = (soac_cfg_unreachable_allocation){
-                    b->b_soac_unreachable_allocations, instruction->i_soac_origins,
-                    opcode, instruction->i_oparg,
-                };
-                b->b_soac_unreachable_allocations = receipt;
-            }
             b->b_iused = 0;
             b->b_except_handler = 0;
        }
@@ -2260,20 +2151,7 @@ apply_static_swaps(basicblock *block, int i)
             }
         }
 
-        // Success! Preserve the actual transformation, before mutating it.
-        // Ordinary compilation has no origins and allocates no receipt.
-        if (swap->i_soac_origins.lane[0] || swap->i_soac_origins.lane[1]) {
-            soac_cfg_static_swap *receipt = PyMem_Malloc(sizeof(*receipt));
-            if (receipt == NULL) {
-                PyErr_NoMemory();
-                return ERROR;
-            }
-            *receipt = (soac_cfg_static_swap){
-                block->b_soac_static_swaps, swap->i_soac_origins, swap->i_oparg,
-                block->b_instr[j].i_soac_origins, block->b_instr[k].i_soac_origins,
-            };
-            block->b_soac_static_swaps = receipt;
-        }
+        // Success!
         INSTR_SET_OP0(swap, NOP);
         cfg_instr temp = block->b_instr[j];
         block->b_instr[j] = block->b_instr[k];
@@ -3390,7 +3268,6 @@ end:
 }
 
 
-
 static int
 add_checks_for_loads_of_uninitialized_variables(basicblock *entryblock,
                                                 int nlocals,
@@ -3897,12 +3774,6 @@ insert_prefix_instructions(_PyCompile_CodeUnitMetadata *umd, basicblock *entrybl
                 PyMem_RawFree(sorted);
                 return ERROR;
             }
-            uint32_t soac_origin = 0;
-            if (_PyCompile_SoacEntryCell(umd, oldindex, &soac_origin) < 0) {
-                PyMem_RawFree(sorted);
-                return ERROR;
-            }
-            entryblock->b_instr[ncellsused].i_soac_origins.lane[0] = soac_origin;
             ncellsused += 1;
         }
         PyMem_RawFree(sorted);
@@ -3917,9 +3788,6 @@ insert_prefix_instructions(_PyCompile_CodeUnitMetadata *umd, basicblock *entrybl
             .i_except = NULL,
         };
         RETURN_IF_ERROR(basicblock_insert_instruction(entryblock, 0, &copy_frees));
-        uint32_t soac_origin = 0;
-        RETURN_IF_ERROR(_PyCompile_SoacEntryFreeVars(umd, nfreevars, &soac_origin));
-        entryblock->b_instr[0].i_soac_origins.lane[0] = soac_origin;
     }
 
     return SUCCESS;
@@ -4145,63 +4013,20 @@ _PyCfg_OptimizedCfgToInstructionSequence(cfg_builder *g,
      */
     RETURN_IF_ERROR(optimize_load_fast(g));
 
-    /* Observe actual final lanes only after native DUP/Borrow selection.
-     * This does not modify the CFG, locations, or instruction scheduling. */
+    /* Preserve the final native publication/CALL origin lanes for interpreter
+     * enforcement. This does not prescribe a SOAC lifetime schedule. */
     if (umd->u_soac_bindings != NULL) {
-        for (basicblock *b = g->g_block_list; b != NULL; b = b->b_list) {
-            b->b_soac_final_ordinal = -1;
-            for (soac_cfg_static_swap *swap = b->b_soac_static_swaps;
-                 swap != NULL; swap = swap->next) {
-                RETURN_IF_ERROR(_PyCompile_SoacScopeStaticSwap(umd, swap->rotation,
-                    swap->depth, swap->first, swap->last));
-            }
-            for (soac_cfg_unreachable_allocation *allocation = b->b_soac_unreachable_allocations;
-                 allocation != NULL; allocation = allocation->next) {
-                RETURN_IF_ERROR(_PyCompile_SoacScopeUnreachableAllocation(umd,
-                    allocation->origins, allocation->opcode, allocation->oparg));
-            }
-        }
-        int count = 0;
-        for (basicblock *b = g->g_entryblock; b != NULL; b = b->b_next) {
-            if (b->b_iused > INT_MAX - count) {
-                PyErr_SetString(PyExc_OverflowError, "native reference CFG is too large");
-                return ERROR;
-            }
-            b->b_soac_final_ordinal = count;
-            count += b->b_iused;
-        }
         int ordinal = 0;
         for (basicblock *b = g->g_entryblock; b != NULL; b = b->b_next) {
+            if (b->b_iused > INT_MAX - ordinal) {
+                PyErr_SetString(PyExc_OverflowError, "native source CFG is too large");
+                return ERROR;
+            }
             for (int i = 0; i < b->b_iused; i++, ordinal++) {
                 cfg_instr *instruction = &b->b_instr[i];
-                int target = HAS_TARGET(instruction->i_opcode)
-                    ? instruction->i_target->b_soac_final_ordinal : -1;
-                int fallthrough = i + 1 < b->b_iused ? ordinal + 1 :
-                    BB_HAS_FALLTHROUGH(b) && b->b_next != NULL
-                    ? b->b_next->b_soac_final_ordinal : -1;
-                if (fallthrough == count) {
-                    fallthrough = -1;
-                }
                 RETURN_IF_ERROR(_PyCompile_SoacFinalReferenceInstruction(
                     umd, ordinal, instruction->i_opcode, instruction->i_oparg,
-                    instruction->i_soac_origins, target, fallthrough));
-                /* Enumerate the actual full private ancestry, including below
-                 * nested ordinary handlers. No source-range envelope. */
-                basicblock *handler = instruction->i_except;
-                int depth = 0;
-                while (handler != NULL && depth++ <= CO_MAXBLOCKS) {
-                    if (!handler->b_soac_handler_seen ||
-                        handler->b_soac_handler_ambiguous) {
-                        _PyCompile_SoacScopeProtectionUncertain(umd);
-                    }
-                    RETURN_IF_ERROR(_PyCompile_SoacScopeProtectionMember(
-                        umd, ordinal, handler->b_soac_setup_origins,
-                        handler->b_soac_leave_origins, handler->b_soac_final_ordinal));
-                    handler = handler->b_soac_outer_handler;
-                }
-                if (handler != NULL) {
-                    _PyCompile_SoacScopeProtectionUncertain(umd);
-                }
+                    instruction->i_soac_origins));
             }
         }
         RETURN_IF_ERROR(_PyCompile_SoacFinishReferences(umd, ordinal));

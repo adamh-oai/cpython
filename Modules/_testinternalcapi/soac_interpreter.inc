@@ -1308,7 +1308,7 @@ soac_ip_definition_parent_matches(SoacInterpreterFixture *fixture,
     int same = PyObject_RichCompareBool(
         PyTuple_GET_ITEM(PyTuple_GET_ITEM(nodes, parent), 5), declaration, Py_EQ);
     if (same <= 0) return same;
-    PyObject *calls = PyTuple_GET_ITEM(table, 6);
+    PyObject *calls = PyTuple_GET_ITEM(table, 5);
     if (!soac_ip_tuple(calls, -1))
         return soac_ip_error("fixture generic parent CALL table malformed");
     int found = 0;
@@ -1351,11 +1351,11 @@ soac_ip_read_sites(SoacInterpreterFixture *fixture, PyObject *nodes, PyObject *t
     }
     for (Py_ssize_t i = 0; i < fixture->node_count; i++) {
         PyObject *table = PyTuple_GET_ITEM(tables, i);
-        if (!soac_ip_tuple(table, 8) ||
+        if (!soac_ip_tuple(table, 7) ||
             PyLong_AsSsize_t(PyTuple_GET_ITEM(table, 0)) != i) {
             return soac_ip_error("fixture operation table has wrong code identity");
         }
-        PyObject *stores = PyTuple_GET_ITEM(table, 5);
+        PyObject *stores = PyTuple_GET_ITEM(table, 4);
         if (!soac_ip_tuple(stores, -1)) return soac_ip_error("fixture Store table is not a tuple");
         for (Py_ssize_t j = 0; j < PyTuple_GET_SIZE(stores); j++) {
             PyObject *row = PyTuple_GET_ITEM(stores, j);
@@ -1428,7 +1428,7 @@ static int
 soac_ip_read_calls(SoacInterpreterFixture *fixture, PyObject *nodes, PyObject *tables)
 {
     for (Py_ssize_t n = 0; n < fixture->node_count; n++) {
-        PyObject *calls = PyTuple_GET_ITEM(PyTuple_GET_ITEM(tables, n), 6);
+        PyObject *calls = PyTuple_GET_ITEM(PyTuple_GET_ITEM(tables, n), 5);
         if (!soac_ip_tuple(calls, -1)) return soac_ip_error("fixture CALL table malformed");
         for (Py_ssize_t r = 0; r < PyTuple_GET_SIZE(calls); r++) {
             PyObject *row = PyTuple_GET_ITEM(calls, r);
@@ -1460,7 +1460,7 @@ soac_ip_read_calls(SoacInterpreterFixture *fixture, PyObject *nodes, PyObject *t
                 return soac_ip_error("fixture CALL child/detail invalid");
             Py_ssize_t decorators = 0;
             for (Py_ssize_t parent = 0; parent < fixture->node_count; parent++) {
-                PyObject *other_calls = PyTuple_GET_ITEM(PyTuple_GET_ITEM(tables, parent), 6);
+                PyObject *other_calls = PyTuple_GET_ITEM(PyTuple_GET_ITEM(tables, parent), 5);
                 for (Py_ssize_t k = 0; k < PyTuple_GET_SIZE(other_calls); k++) {
                     PyObject *other = PyTuple_GET_ITEM(PyTuple_GET_ITEM(other_calls, k), 0);
                     if (PyLong_AsLong(PyTuple_GET_ITEM(other, 0)) != Py_SOAC_CALL_DECORATOR) continue;
@@ -1558,7 +1558,7 @@ soac_interpreter_fixture(PyObject *self, PyObject *args)
     }
     PyObject *catalog = PyTuple_GET_ITEM(details, 2);
     if (!soac_ip_tuple(catalog, 4) ||
-        PyLong_AsLong(PyTuple_GET_ITEM(catalog, 0)) != 5) {
+        PyLong_AsLong(PyTuple_GET_ITEM(catalog, 0)) != Py_SOAC_CLASS_BINDINGS_SCHEMA) {
         soac_ip_error("interpreter fixture requires exact native Details schema 5");
         return NULL;
     }

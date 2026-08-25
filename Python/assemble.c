@@ -761,14 +761,13 @@ resolve_jump_offsets(instr_sequence *instrs)
 }
 
 static int
-resolve_unconditional_jumps(instr_sequence *instrs, _PyCompile_CodeUnitMetadata *umd)
+resolve_unconditional_jumps(instr_sequence *instrs)
 {
     /* Resolve directions of unconditional jumps */
 
     for (int i = 0; i < instrs->s_used; i++) {
         instruction *instr = &instrs->s_instrs[i];
         bool is_forward = (instr->i_oparg > i);
-        int original_opcode = instr->i_opcode;
         switch(instr->i_opcode) {
             case JUMP:
                 assert(is_pseudo_target(JUMP, JUMP_FORWARD));
@@ -787,10 +786,6 @@ resolve_unconditional_jumps(instr_sequence *instrs, _PyCompile_CodeUnitMetadata 
                     Py_UNREACHABLE();
                 }
         }
-        if (umd->u_soac_bindings != NULL && original_opcode != instr->i_opcode) {
-            RETURN_IF_ERROR(_PyCompile_SoacResolvedJump(umd, i, original_opcode,
-                instr->i_opcode, instr->i_oparg));
-        }
     }
     return SUCCESS;
 }
@@ -803,7 +798,7 @@ _PyAssemble_MakeCodeObject(_PyCompile_CodeUnitMetadata *umd, PyObject *const_cac
     if (_PyInstructionSequence_ApplyLabelMap(instrs) < 0) {
         return NULL;
     }
-    if (resolve_unconditional_jumps(instrs, umd) < 0) {
+    if (resolve_unconditional_jumps(instrs) < 0) {
         return NULL;
     }
     if (resolve_jump_offsets(instrs) < 0) {

@@ -53,60 +53,37 @@ typedef struct {
 PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSource(
     const char *source, Py_ssize_t length, PyObject *filename, int optimize);
 
-/* Compile the same authenticated source once, returning (code, strings,
- * (5, unchanged_CodeNodes, ScopeBindingRecipes, unchanged_OperationTables)).
- * One exact immutable scope recipe belongs to every retained native code node.
- * This is native compiler/binder data, not projection or execution authority.
- * All containers are exact immutable tuples. Unchanged nodes are
- * (id,parent_id,exact_code,scope_kind,symtable_kind,source_span).
- * Unchanged strings entries are (line,column,end_line,end_column,text) for
- * future-stringized annotations in the same native AST. Spans use native
- * UTF-8 byte columns; None means unavailable, never an invented location.
+/* Compile authenticated source once, returning (code, strings,
+ * (6, CodeNodes, ScopeBindingRecipes, OperationTables)). All containers are
+ * exact immutable tuples. This compiler output supplies source correspondence;
+ * the caller separately authenticates and admits actual runtime objects.
+ * node=(id,parent_id,exact_code,scope_kind,symtable_kind,source_span)
+ * strings=(line,column,end_line,end_column,text) for native future annotations.
+ * Spans use native UTF-8 byte columns; None means unavailable.
  *
- * scope=(code_id, slot_seeds, entry_prefix, owners, regions, captures,
- *        accesses, class_actions_or_None, gaps)
- * seed=(final_slot, native_kind, FrameCleared0/BoundParameter1, ordinal_or_None)
- * owner=(id, kind, final_slot, native_kind, region_or_None)
- * region=(id,parent,kind,source_span,outer_iterable_span,is_async,protection,
- *         entry_ops,restores,source_bindings,events,lifecycle)
- * event=(phase,step,kind,slot_or_None,owner_or_None,auxiliary_or_None,emissions)
- * emission=(ordinal,lane,form,first_operand,second_or_None,native_opcode,
- *           actual_opcode_byte_offset,handler_or_None,wire3_context_or_None)
- * handler=(target_ordinal,unwind_depth,preserve_lasti)
+ * scope=(code_id,slot_seeds,owners,regions,captures,accesses,class_actions_or_None)
+ * seed=(final_slot,native_kind,FrameCleared0/BoundParameter1,ordinal_or_None)
+ * owner=(id,kind,final_slot,native_kind,region_or_None)
+ * region=(id,parent,kind,source_span,outer_iterable_span,is_async,has_saved_slots,
+ *         entry_ops,restores,source_bindings)
  * capture=(child_id,creation_span,free_ordinal,current_slot,region_or_None)
  * access=(original_Name_span,context,mode,current_slot,region_or_None)
- * class_actions=(header_initializers,exports), absent outside native classes
- * scope_gap=(reason,region_or_None,event_key_or_None,ordinal_or_None,
- *            lane_or_None,native_opcode_or_None,context_or_None)
+ * class_actions=(header_initializers,exports), absent outside native classes.
  *
- * Seeds describe successful native binding; actual TakeBinding tokens still
- * have to move into the corresponding runtime primaries. MAKE_CELL uses the
- * actual current value. SaveClear/MakeCell precede the private restoration
- * handler, so partial prefix failure does not acquire an invented rollback.
- * OperationTable compiler-origin and fused-restore gaps remain unchanged.
- * Native source-operation tuple/tag definitions below retain wire3 meanings.
- * lifecycle=(protections,normal_completions)
- * protection=(allocation_ordinal,context,enter_key,exit_key,handler_ordinal,spans)
- * span=(first_ordinal,end_ordinal,first_byte,end_byte,effective_handler)
- * normal=(allocation_ordinal,context,consumer,entries,trace,rewritten_rotations)
- * entry=(generic0/generator1,advance_ordinal,first_ordinal)
- * trace_step=(kind,event_key_or_None,actual_scope_emission)
- * Span ends are exclusive; byte extents include EXTENDED_ARG and inline caches.
- * Normal generator completion closes its return value at END_FOR before
- * POP_ITER. Generic exhaustion skips END_FOR after consuming StopIteration.
- * Exact lifecycle tuple/tag constraints are specified by joint SCHEMA-5.md.
+ * Scope rows preserve actual lexical binding and source ownership. There is
+ * no exported prefix, opcode/lifetime schedule, handler-protection proof,
+ * fused-read recipe or normal-completion trace. SOAC owns its cleanup policy.
+ * OperationTables remain independently required by interpreter enforcement:
+ * they identify actual definition publication and class/decorator CALL sites.
  */
 PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSourceDetails(
     const char *source, Py_ssize_t length, PyObject *filename, int optimize);
 
 /* Fixed wire values, independent of internal compiler enum numbering. */
-#define Py_SOAC_CLASS_BINDINGS_SCHEMA 5
+#define Py_SOAC_CLASS_BINDINGS_SCHEMA 6
 /* Source-operation receipts share the SAME final code-node tree.
  * table = (code_id, instruction_count, code_size_bytes, exact_native_names,
- *          reads, stores, calls, gaps)
- * read = (original_Name_span, emissions)
- * read_emission = (ordinal, form, first_slot, second_slot_or_None, lane,
- *                  preceding_binding_or_None, semantic_context_or_None)
+ *          stores, calls, gaps)
  * store = (binding_origin, emissions)
  * binding_origin = (kind, original_AST_span, phase, detail_or_None)
  * store_emission = (ordinal, form, first_operand, second_operand_or_None,
@@ -122,20 +99,14 @@ PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSourceDetails(
  *                    transfer_span_or_None, payload_kind), or None if unproven
  * gap = (reason, operation_origin_or_None, ordinal_or_None, lane_or_None,
  *        native_opcode_or_None, context_or_None)
- * operation_origin = (family, original_Name_span / binding_origin / call_origin)
+ * operation_origin = (family, binding_origin / call_origin)
  *
  * Final ordinals precede EXTENDED_ARG expansion. CALL opcode byte offsets come
  * from the native assembler, never from line tables or disassembly matching.
  * All source emissions survive as rows or explicit gaps. Missing/ambiguous
- * receipts grant neither execution authority nor a default reference policy.
- * The fixed tags below define wire3; no earlier-wire decoder fallback exists. */
+ * receipts grant no execution authority. The tags retain Store/CALL source
+ * meanings in wire6; no earlier-wire decoder fallback exists. */
 
-#define Py_SOAC_READ_FAST_DUPLICATE 0
-#define Py_SOAC_READ_FAST_CHECKED_DUPLICATE 1
-#define Py_SOAC_READ_FAST_BORROW 2
-#define Py_SOAC_READ_FAST_PAIR_DUPLICATE 3
-#define Py_SOAC_READ_FAST_PAIR_BORROW 4
-#define Py_SOAC_READ_STORE_FAST_LOAD_FAST 5
 #define Py_SOAC_BINDING_NAME 0
 #define Py_SOAC_BINDING_FUNCTION 1
 #define Py_SOAC_BINDING_ASYNC_FUNCTION 2
@@ -143,18 +114,10 @@ PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSourceDetails(
 #define Py_SOAC_BINDING_IMPORT_ALIAS 4
 #define Py_SOAC_BINDING_IMPORT_FROM_ALIAS 5
 #define Py_SOAC_BINDING_EXCEPT_ALIAS 6
-#define Py_SOAC_READ_GAP_ELIMINATED 0
-#define Py_SOAC_READ_GAP_UNSUPPORTED 1
-#define Py_SOAC_READ_GAP_MISSING_ORIGIN 2
-#define Py_SOAC_READ_GAP_MISSING_STORE 3
-#define Py_SOAC_READ_GAP_DIVERGENT 4
-/* Wire3: exact tuples and tags are specified by the joint SCHEMA-V3.md.
- * Operation tables extend the SAME final CodeNode catalogue; no execution
- * selector, instruction interpreter or second source namespace is exposed.
- * table=(code_id, instruction_count, code_size_bytes, native_names,
- *        reads, stores, calls, gaps)
- */
-#define Py_SOAC_OPERATION_READ 0
+#define Py_SOAC_OPERATION_GAP_ELIMINATED 0
+#define Py_SOAC_OPERATION_GAP_UNSUPPORTED 1
+#define Py_SOAC_OPERATION_GAP_MISSING_STORE 3
+#define Py_SOAC_OPERATION_GAP_DIVERGENT 4
 #define Py_SOAC_OPERATION_STORE 1
 #define Py_SOAC_OPERATION_CALL 2
 #define Py_SOAC_BINDING_TYPEVAR 7
@@ -283,66 +246,14 @@ PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSourceDetails(
 #define Py_SOAC_CLASS_ACCESS_CELL_VALUE 1
 #define Py_SOAC_CLASS_ACCESS_NAMESPACE_OR_CELL 2
 
-/* Wire5: one shared ownership-data recipe per retained native CodeNode.
- * These tags describe native compiler/binder facts, never execution grants. */
+/* Wire6 lexical scope/compiler tags, never execution grants. */
 #define Py_SOAC_SCOPE_SEED_CLEARED 0
 #define Py_SOAC_SCOPE_SEED_PARAMETER 1
 #define Py_SOAC_EAGER_LIST 0
 #define Py_SOAC_EAGER_SET 1
 #define Py_SOAC_EAGER_DICT 2
-#define Py_SOAC_SCOPE_NO_PRIVATE_HANDLER 0
-#define Py_SOAC_SCOPE_FINALLY_AFTER_PREFIX 1
 #define Py_SOAC_SCOPE_BINDING_TARGET 0
 #define Py_SOAC_SCOPE_BINDING_WALRUS 1
-#define Py_SOAC_SCOPE_PHASE_ENTRY 0
-#define Py_SOAC_SCOPE_PHASE_ISOLATION 1
-#define Py_SOAC_SCOPE_PHASE_BODY 2
-#define Py_SOAC_SCOPE_PHASE_ERROR_CLEANUP 3
-#define Py_SOAC_SCOPE_PHASE_NORMAL_RESTORE 4
-#define Py_SOAC_SCOPE_PHASE_ERROR_RESTORE 5
-#define Py_SOAC_SCOPE_COPY_FREE 0
-#define Py_SOAC_SCOPE_ENTRY_CELL 1
-#define Py_SOAC_SCOPE_SAVE_CLEAR 2
-#define Py_SOAC_SCOPE_REGION_CELL 3
-#define Py_SOAC_SCOPE_PROTECT_ENTER 4
-#define Py_SOAC_SCOPE_BUILD_COLLECTION 5
-#define Py_SOAC_SCOPE_GET_ITER 6
-#define Py_SOAC_SCOPE_GET_AITER 7
-#define Py_SOAC_SCOPE_DISCARD_RESULT 8
-#define Py_SOAC_SCOPE_RESTORE_SLOT 9
-#define Py_SOAC_SCOPE_PROPAGATE 10
-#define Py_SOAC_SCOPE_PROTECT_EXIT 11
-#define Py_SOAC_SCOPE_ERROR_ENTRY 12
-#define Py_SOAC_SCOPE_RESTORE_ROTATION 13
-#define Py_SOAC_SCOPE_ENTRY_ROTATION 14
-#define Py_SOAC_SCOPE_COLLECTION_ROTATION 15
-#define Py_SOAC_SCOPE_COMPLETION_VALUE_RETIRE 16
-#define Py_SOAC_SCOPE_ITERATOR_RETIRE 17
-#define Py_SOAC_SCOPE_ITERATOR_ADVANCE 18
-#define Py_SOAC_SCOPE_FORM_DIRECT 0
-#define Py_SOAC_SCOPE_FORM_STORE_PAIR 1
-#define Py_SOAC_SCOPE_FORM_STORE_LOAD 2
-#define Py_SOAC_SCOPE_GAP_ELIMINATED 0
-#define Py_SOAC_SCOPE_GAP_UNSUPPORTED 1
-#define Py_SOAC_SCOPE_GAP_MISSING_ORIGIN 2
-#define Py_SOAC_SCOPE_GAP_PROTECTION 3
-#define Py_SOAC_SCOPE_GAP_DIVERGENT 4
-#define Py_SOAC_SCOPE_GAP_CONTEXT 5
-#define Py_SOAC_SCOPE_GAP_SUSPENSION 6
-#define Py_SOAC_SCOPE_GAP_PAIRED_RESTORE 7
-#define Py_SOAC_SCOPE_GAP_NONITERATOR 8
-#define Py_SOAC_SCOPE_GAP_NORMAL_COMPLETION 9
-#define Py_SOAC_SCOPE_RESULT_KEEP 0
-#define Py_SOAC_SCOPE_RESULT_DISCARD 1
-#define Py_SOAC_SCOPE_RESULT_PUBLISH 2
-#define Py_SOAC_SCOPE_ENTRY_GENERIC_EXHAUSTION 0
-#define Py_SOAC_SCOPE_ENTRY_GENERATOR_COMPLETION 1
-#define Py_SOAC_SCOPE_TRACE_TRANSPORT 0
-#define Py_SOAC_SCOPE_TRACE_RESTORE 1
-#define Py_SOAC_SCOPE_TRACE_RESULT 2
-#define Py_SOAC_SCOPE_TRACE_COMPLETION_VALUE 3
-#define Py_SOAC_SCOPE_TRACE_ITERATOR 4
-
 /* Execute SETUP_ANNOTATIONS against the explicit actual local namespace. */
 PyAPI_FUNC(int) PySoac_SetupAnnotations(PyObject *locals);
 
