@@ -458,6 +458,17 @@ _PyTypeState_CheckMemberAccess(PyObject *object, const PyMemberDef *view)
     Py_ssize_t tail_offset = (char *)tail - (char *)object;
     if (width != 0 && view->offset < tail_offset + (Py_ssize_t)sizeof(*tail) &&
         (width < 0 || view->offset + width > tail_offset)) goto unsafe_view;
+#if _Py_TYPE_STATE_SUPPORTED
+    Py_ssize_t flags_offset = offsetof(PyObject, ob_flags);
+    if (width != 0 && view->offset < flags_offset + (Py_ssize_t)sizeof(object->ob_flags) &&
+        (width < 0 || view->offset + width > flags_offset)) goto unsafe_view;
+    if (Py_TYPE(object)->tp_flags & Py_TPFLAGS_INLINE_VALUES) {
+        Py_ssize_t extent_offset = (char *)_PyObject_InlineValues(object) - (char *)object +
+                                   offsetof(PyDictValues, soac_allocated_capacity);
+        if (width != 0 && view->offset < extent_offset + 1 &&
+            (width < 0 || view->offset + width > extent_offset)) goto unsafe_view;
+    }
+#endif
     for (Py_ssize_t i = 0; i < state->slot_count; ++i) {
         Py_ssize_t offset = state->slots[i].offset;
         if (width != 0 && view->offset < offset + (Py_ssize_t)sizeof(PyObject *) &&

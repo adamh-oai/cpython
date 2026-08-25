@@ -447,6 +447,49 @@ soac_type_state_negative_refcount(PyObject *self, PyObject *object)
 }
 
 static PyObject *
+soac_type_state_write_member(PyObject *self, PyObject *args)
+{
+#if !_Py_TYPE_STATE_SUPPORTED
+    PyErr_SetString(PyExc_NotImplementedError, "member probe requires the supported GIL layout");
+    return NULL;
+#else
+    PyObject *object, *value;
+    const char *target;
+    if (!PyArg_ParseTuple(args, "OsO:soac_type_state_write_member", &object, &target, &value)) return NULL;
+    if (!_PyObject_HasTypeStateSlot(object) || PyObject_GetTypeState(object) == NULL) {
+        if (!PyErr_Occurred()) PyErr_SetString(PyExc_TypeError, "member probe requires an actual stateful allocation");
+        return NULL;
+    }
+    PyMemberDef view = {.name = "test-layout-view", .flags = 0};
+    if (strcmp(target, "flags") == 0) {
+        view.type = Py_T_USHORT;
+        view.offset = offsetof(PyObject, ob_flags);
+    }
+    else if (strcmp(target, "inline_extent") == 0 &&
+             (Py_TYPE(object)->tp_flags & Py_TPFLAGS_INLINE_VALUES)) {
+        view.type = Py_T_UBYTE;
+        view.offset = (char *)_PyObject_InlineValues(object) - (char *)object +
+                      offsetof(PyDictValues, soac_allocated_capacity);
+    }
+    else if (strcmp(target, "ordinary_slot") == 0) {
+        const PyMemberDef *member = Py_TYPE(object)->tp_members;
+        while (member != NULL && member->name != NULL && strcmp(member->name, target) != 0) ++member;
+        if (member == NULL || member->name == NULL) {
+            PyErr_SetString(PyExc_TypeError, "member probe has no actual ordinary slot");
+            return NULL;
+        }
+        view = *member;
+    }
+    else {
+        PyErr_SetString(PyExc_ValueError, "unknown or unavailable member probe target");
+        return NULL;
+    }
+    if (PyMember_SetOne((char *)object, &view, value) < 0) return NULL;
+    Py_RETURN_NONE;
+#endif
+}
+
+static PyObject *
 probe_soac_type_state_lookups(PyObject *self, PyObject *args)
 {
 #if !_Py_TYPE_STATE_SUPPORTED

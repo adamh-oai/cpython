@@ -3935,6 +3935,7 @@ static PyMethodDef module_functions[] = {
     {"probe_soac_type_state_private_escape", probe_soac_type_state_private_escape, METH_VARARGS},
     {"soac_type_state_clear", soac_type_state_clear, METH_O},
     {"soac_type_state_negative_refcount", soac_type_state_negative_refcount, METH_O},
+    {"soac_type_state_write_member", soac_type_state_write_member, METH_VARARGS},
     {"dict_arm_soac_ordinary_hook", dict_arm_soac_ordinary_hook, METH_VARARGS},
     {"dict_ordinary_inline_state", dict_ordinary_inline_state, METH_O},
     {"dict_ordinary_clear_managed_probe", dict_ordinary_clear_managed_probe, METH_VARARGS},
