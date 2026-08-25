@@ -34,6 +34,14 @@ extern int _PySoacBody_RestartWouldObserve(PyInterpreterState *interp);
 extern int _PySoacBody_CodeHasObservers(
     PyInterpreterState *interp, PyCodeObject *code);
 
+/* Same full twelve-word carrier, successful-Resume READY state, current
+ * native thread/LIFO and captured owning code. expected_code is comparison
+ * only until matched to the actual frame-owned code. Read-only/callback-free
+ * on success; no generic flag widening or second scope is permitted. */
+extern _PyInterpreterFrame *_PyFrame_BorrowSoacSyncBodyV1(
+    const PySoacSyncBodyIntervalV1 *interval, size_t interval_size,
+    PyCodeObject *expected_code);
+
 /* These two internal exports are used by the real _testinternalcapi setter.
  * They are native observer-API transaction state, not compiler context.
  * Increment/decrement the exact current native tstate; nesting allowed.

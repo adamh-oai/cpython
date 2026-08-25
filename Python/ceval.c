@@ -2811,7 +2811,8 @@ soac_outgoing_preflight(
         context->abi_version != Py_SOAC_OUTGOING_CONTEXT_ABI_V1 || context->reserved != 0) {
         return soac_outgoing_invalid("invalid outgoing source-call context ABI");
     }
-    if (context->source_scope_size != sizeof(PySoacLifetimeScopeV1) ||
+    if ((context->source_scope_size != sizeof(PySoacLifetimeScopeV1) &&
+         context->source_scope_size != sizeof(PySoacSyncBodyIntervalV1)) ||
         !soac_call_range(context->source_scope, context->source_scope_size,
                          _Alignof(PySoacLifetimeScopeV1))) {
         return soac_outgoing_invalid("invalid outgoing source-scope range");
@@ -2831,7 +2832,8 @@ soac_outgoing_preflight(
         soac_call_overlaps(operands, bytes, context, context_size) ||
         soac_call_overlaps(result, sizeof(*result), context, context_size) ||
         soac_call_overlaps(operands, bytes, context->source_scope, context->source_scope_size) ||
-        soac_call_overlaps(result, sizeof(*result), context->source_scope, context->source_scope_size)) {
+        soac_call_overlaps(result, sizeof(*result), context->source_scope, context->source_scope_size) ||
+        soac_call_overlaps(context, context_size, context->source_scope, context->source_scope_size)) {
         return soac_outgoing_invalid("outgoing operand/result/context storage overlaps");
     }
     if (!PySoacRef_IsEmptyV1(*result)) {

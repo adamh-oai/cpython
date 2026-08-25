@@ -18,6 +18,7 @@ enum {
     SOAC_SYNC_BODY_BEFORE_RESUME = 1,
     SOAC_SYNC_BODY_RESUMED = 2,
     SOAC_SYNC_BODY_ENDED = 3,
+    SOAC_SYNC_BODY_READY = 4,
 };
 
 _Static_assert(sizeof(SoacSyncBodyStateV1) == sizeof(PySoacSyncBodyIntervalV1),
@@ -182,7 +183,7 @@ soac_body_overlap(const void *left, size_t left_size,
 }
 
 static int
-soac_body_storage_valid(PySoacSyncBodyIntervalV1 *interval, size_t size)
+soac_body_storage_valid(const PySoacSyncBodyIntervalV1 *interval, size_t size)
 {
     if (size != sizeof(*interval) ||
         !soac_body_range(interval, size, _Alignof(PySoacSyncBodyIntervalV1))) {
@@ -227,19 +228,19 @@ PyFrame_GetSoacSyncBodyLayoutV1(
 
 #if !defined(Py_GIL_DISABLED) && SIZEOF_VOID_P == 8
 static int
-soac_body_validate_live(PySoacSyncBodyIntervalV1 *interval, size_t size,
+soac_body_validate_live(const PySoacSyncBodyIntervalV1 *interval, size_t size,
                         SoacSyncBodyStateV1 *state)
 {
     if (soac_body_storage_valid(interval, size) < 0) return -1;
     memcpy(state, interval, sizeof(*state));
     if (state->version != Py_SOAC_SYNC_BODY_ABI_V1 || state->charged != 1 ||
         (state->state != SOAC_SYNC_BODY_BEFORE_RESUME &&
-         state->state != SOAC_SYNC_BODY_RESUMED)) {
+         state->state != SOAC_SYNC_BODY_RESUMED && state->state != SOAC_SYNC_BODY_READY)) {
         PyErr_SetString(PyExc_RuntimeError, "native body interval is not live");
         return -1;
     }
     uint16_t flags = SOAC_LIFETIME_SYNC_BODY;
-    if (state->state == SOAC_SYNC_BODY_RESUMED) flags |= SOAC_LIFETIME_SYNC_RESUMED;
+    if (state->state != SOAC_SYNC_BODY_BEFORE_RESUME) flags |= SOAC_LIFETIME_SYNC_RESUMED;
     if (_PyFrame_ValidateSoacScopeV1(&state->scope, (uintptr_t)interval, flags) < 0) {
         return -1;
     }
@@ -251,6 +252,55 @@ soac_body_validate_live(PySoacSyncBodyIntervalV1 *interval, size_t size,
         return -1;
     }
     return 0;
+}
+
+static _PyInterpreterFrame *
+soac_body_borrow_ready(const PySoacSyncBodyIntervalV1 *interval, size_t interval_size)
+{
+    SoacSyncBodyStateV1 state;
+    if (soac_body_validate_live(interval, interval_size, &state) < 0) return NULL;
+    _PyInterpreterFrame *frame = (_PyInterpreterFrame *)state.scope.frame;
+    if (state.state != SOAC_SYNC_BODY_READY ||
+        (frame->soac_lifetime_owned_environment & SOAC_LIFETIME_BORROWED_CODE)) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "native body join requires successful initial Resume and owning code");
+        return NULL;
+    }
+    return frame;
+}
+
+static _PyInterpreterFrame *
+soac_body_join_output(const PySoacSyncBodyIntervalV1 *interval, size_t interval_size,
+                      const void *out, size_t out_size, size_t out_alignment)
+{
+    if (soac_body_storage_valid(interval, interval_size) < 0) return NULL;
+    if (!soac_body_range(out, out_size, out_alignment) ||
+        soac_body_overlap(interval, interval_size, out, out_size)) {
+        PyErr_SetString(PyExc_ValueError, "invalid or aliased native body join output");
+        return NULL;
+    }
+    _PyInterpreterFrame *frame = soac_body_borrow_ready(interval, interval_size);
+    if (frame == NULL) return NULL;
+    /* Validate every known supporting allocation BEFORE interpreting output
+     * bytes as a reference token. No lookup/ref acquisition/callback occurs. */
+    PyCodeObject *code = _PyFrame_GetCode(frame);
+    PyFrameObject *object = _PyFrame_GetSoacLifetimeObject(frame);
+    PyObject *function = PyStackRef_AsPyObjectBorrow(frame->f_funcobj);
+    size_t frame_bytes = offsetof(PyFrameObject, _f_frame_data) +
+        offsetof(_PyInterpreterFrame, localsplus) +
+        ((size_t)code->co_nlocalsplus + (size_t)code->co_stacksize) * sizeof(_PyStackRef);
+    size_t code_bytes = (size_t)Py_TYPE(code)->tp_basicsize +
+        (size_t)Py_SIZE(code) * (size_t)Py_TYPE(code)->tp_itemsize;
+    size_t pool_bytes = offsetof(PyTupleObject, ob_item) +
+        (size_t)PyTuple_GET_SIZE(code->co_consts) * sizeof(PyObject *);
+    if (soac_body_overlap(out, out_size, object, frame_bytes) ||
+        soac_body_overlap(out, out_size, code, code_bytes) ||
+        soac_body_overlap(out, out_size, function, sizeof(PyFunctionObject)) ||
+        soac_body_overlap(out, out_size, code->co_consts, pool_bytes)) {
+        PyErr_SetString(PyExc_ValueError, "native body join output aliases source owners");
+        return NULL;
+    }
+    return frame;
 }
 
 static void
@@ -448,8 +498,106 @@ PyFrame_ResumeSoacSyncBodyV1(PySoacSyncBodyIntervalV1 *interval, size_t interval
         if (FT_ATOMIC_LOAD_UINTPTR_ACQUIRE(code->_co_instrumentation_version) != version &&
             _Py_Instrument(code, tstate->interp) < 0) return -1;
     }
+    /* RESUMED records progress, including a failed or currently running poll.
+     * Only successful polling followed by fresh same-state validation grants
+     * READY. Never resurrect an interval ended/replaced during native reentry. */
+    if (check_periodics(tstate) < 0 || PyErr_Occurred()) return -1;
+    if (soac_body_validate_live(interval, interval_size, &state) < 0) return -1;
+    if (state.state != SOAC_SYNC_BODY_RESUMED) {
+        PyErr_SetString(PyExc_RuntimeError, "native body changed during initial Resume");
+        return -1;
+    }
+    state.state = SOAC_SYNC_BODY_READY;
+    memcpy(interval, &state, sizeof(state));
     /* No quickening, source bytecode execution, fake PC or event omission. */
-    return check_periodics(tstate);
+    return 0;
+#endif
+}
+
+_PyInterpreterFrame *
+_PyFrame_BorrowSoacSyncBodyV1(
+    const PySoacSyncBodyIntervalV1 *interval, size_t interval_size,
+    PyCodeObject *expected_code)
+{
+    if (PyErr_Occurred()) return NULL;
+#if defined(Py_GIL_DISABLED) || SIZEOF_VOID_P != 8
+    (void)interval; (void)interval_size; (void)expected_code;
+    PyErr_SetString(PyExc_NotImplementedError,
+                    "native body intervals require the selected 64-bit GIL build");
+    return NULL;
+#else
+    _PyInterpreterFrame *frame = soac_body_borrow_ready(interval, interval_size);
+    if (frame == NULL) return NULL;
+    /* expected_code is a comparison token, not independently owned storage. */
+    if (_PyFrame_GetCode(frame) != expected_code) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "outgoing call does not match its captured native body code");
+        return NULL;
+    }
+    return frame;
+#endif
+}
+
+int
+PyFrame_GetSoacSyncBodyOutgoingContextV1(
+    const PySoacSyncBodyIntervalV1 *interval, size_t interval_size,
+    Py_ssize_t instruction_offset,
+    PySoacOutgoingCallContextV1 *out, size_t out_size)
+{
+    if (PyErr_Occurred()) return -1;
+#if defined(Py_GIL_DISABLED) || SIZEOF_VOID_P != 8
+    (void)interval; (void)interval_size; (void)instruction_offset; (void)out; (void)out_size;
+    PyErr_SetString(PyExc_NotImplementedError,
+                    "native body intervals require the selected 64-bit GIL build");
+    return -1;
+#else
+    if (out_size != sizeof(*out)) {
+        PyErr_SetString(PyExc_ValueError, "invalid native body outgoing context size");
+        return -1;
+    }
+    _PyInterpreterFrame *frame = soac_body_join_output(
+        interval, interval_size, out, out_size, _Alignof(PySoacOutgoingCallContextV1));
+    if (frame == NULL) return -1;
+    *out = (PySoacOutgoingCallContextV1) {
+        .abi_version = Py_SOAC_OUTGOING_CONTEXT_ABI_V1,
+        .reserved = 0,
+        .source_scope = (const PySoacLifetimeScopeV1 *)(const void *)interval,
+        .source_scope_size = sizeof(*interval),
+        .source_code = _PyFrame_GetCode(frame),
+        .instruction_offset = instruction_offset,
+        .source_namespace = NULL,
+    };
+    return 0;
+#endif
+}
+
+int
+PyFrame_LoadSoacSyncBodyConstantV1(
+    const PySoacSyncBodyIntervalV1 *interval, size_t interval_size,
+    Py_ssize_t constant_index, PySoacRefV1 *result)
+{
+    if (PyErr_Occurred()) return -1;
+#if defined(Py_GIL_DISABLED) || SIZEOF_VOID_P != 8
+    (void)interval; (void)interval_size; (void)constant_index; (void)result;
+    PyErr_SetString(PyExc_NotImplementedError,
+                    "native body intervals require the selected 64-bit GIL build");
+    return -1;
+#else
+    _PyInterpreterFrame *frame = soac_body_join_output(
+        interval, interval_size, result, sizeof(*result), _Alignof(PySoacRefV1));
+    if (frame == NULL) return -1;
+    if (!PySoacRef_IsEmptyV1(*result)) {
+        PyErr_SetString(PyExc_ValueError, "native body constant result must start Empty");
+        return -1;
+    }
+    PyObject *constants = _PyFrame_GetCode(frame)->co_consts;
+    if (constant_index < 0 || constant_index >= PyTuple_GET_SIZE(constants)) {
+        PyErr_SetString(PyExc_IndexError, "native body constant index is out of range");
+        return -1;
+    }
+    *result = soac_ref_public(
+        PyStackRef_FromPyObjectBorrow(PyTuple_GET_ITEM(constants, constant_index)));
+    return 0;
 #endif
 }
 

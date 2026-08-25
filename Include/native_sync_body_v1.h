@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "native_reference_v1.h"
+#include "native_outgoing_v1.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -95,13 +96,51 @@ PyAPI_FUNC(int) PyFrame_BeginSoacSyncBodyV1(
  * native check_periodics (including signal/pending/GC/GIL/async work).
  * Source observer entitlement remains excluded by admission+mutation guards.
  * 0: required argument checks/body may proceed under their independent proof.
+ * Native body joins become ready only after the poll succeeds and the exact
+ * live interval is revalidated. Polling/failed-Resume progress is not readiness,
+ * including after a caller clears the actual poll exception.
  * -1: exact pending exception; interval STAYS linked, so caller can attach the
  * actual entry_site event and unwind/End. No late policy error replaces it.
+ * A reentrant C caller that already Ended this interval is instead rejected
+ * during post-poll validation; Resume never restores that terminal interval.
  * Preexisting-error/invalid-call rejection changes no progress; callers must
  * distinguish API misuse from an actual failed Resume, never invent its TB.
  */
 PyAPI_FUNC(int) PyFrame_ResumeSoacSyncBodyV1(
     PySoacSyncBodyIntervalV1 *interval, size_t interval_size);
+
+/* Read-only joins for this SAME successfully resumed interval. They create no
+ * source/operation authority. Exact size/alignment/range, original storage,
+ * current native thread/LIFO and captured owning-code primary are required.
+ * Output storage is disjoint from the full interval and its actual frame,
+ * function, code and constant-pool storage. A preexisting PyErr returns -1
+ * unchanged; every preflight failure leaves output and interval untouched.
+ * No Python callback, release or Python ownership edge occurs on success.
+ *
+ * The outgoing context owns nothing and is usable only while the same interval
+ * is live/current and its actual primaries support it. source_scope denotes the
+ * full twelve-word carrier, source_scope_size is sizeof(*interval), and the
+ * optimized synchronous source_namespace is NULL. Do not reinterpret/copy the
+ * opaque interval as a six-word scope. instruction_offset is a separately
+ * proven original CALL emission or -1 under the existing outgoing contract;
+ * this getter does not authenticate it or change the source frame's position.
+ */
+PyAPI_FUNC(int) PyFrame_GetSoacSyncBodyOutgoingContextV1(
+    const PySoacSyncBodyIntervalV1 *interval, size_t interval_size,
+    Py_ssize_t instruction_offset,
+    PySoacOutgoingCallContextV1 *out, size_t out_size);
+
+/* Exact native LOAD_CONST from the captured code's actual immutable co_consts.
+ * constant_index must have its independent original-operation association.
+ * Never use mutable current func_code or a caller-provided replacement value.
+ * Out-of-range index raises IndexError. result starts Empty and receives one
+ * native borrowed token, not the owning public-C FromBorrowed conversion.
+ * Native StackRef/debug-handle bookkeeping is unchanged. Close the child before
+ * its captured code support retires; promote only at actual escape/return.
+ */
+PyAPI_FUNC(int) PyFrame_LoadSoacSyncBodyConstantV1(
+    const PySoacSyncBodyIntervalV1 *interval, size_t interval_size,
+    Py_ssize_t constant_index, PySoacRefV1 *result);
 
 /* Exactly once after successful Begin, on success or error. Validate exact
  * storage/thread/LIFO/state before any mutation; no partial counter refund.

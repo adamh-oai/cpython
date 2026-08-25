@@ -29,6 +29,11 @@ typedef struct {
  * association. Native boundary/arity validation does not establish that proof.
  * No line/range/display-name join or source-error-site offset is accepted as
  * a substitute. The lifetime frame's unavailable position is never changed.
+ * source_scope_size is exactly the six-word ordinary lifetime scope size, or
+ * the full twelve-word SyncBodyInterval size supplied by its native getter.
+ * The latter requires the same interval's successful initial Resume; its
+ * embedded six-word prefix is not a valid outgoing carrier by itself. All
+ * operand/result alias checks cover the complete selected carrier.
  *
  * Unknown sites refuse if an entitled observer needs the omitted information,
  * or if native instrumented EX retirement is unprovable, even while tracing

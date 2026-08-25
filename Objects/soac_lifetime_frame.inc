@@ -7,6 +7,7 @@
 #include "pycore_traceback.h"  // _PyTraceBack_HereSoacLifetime
 #include "native_lifetime_reference_v1.h"  // ignored native22 ABI layer
 #include "pycore_soac_outgoing_v1.h"  // read-only current-scope validation
+#include "pycore_soac_body_interval.h"  // same full SyncBody carrier, READY only
 #include "pycore_soac_managed_code.h"  // shared private managed association
 
 static int
@@ -683,6 +684,11 @@ _PyFrame_BorrowSoacLifetimeScopeV1(
                     "outgoing source calls require the selected 64-bit GIL build");
     return NULL;
 #else
+    if (scope_size == sizeof(PySoacSyncBodyIntervalV1)) {
+        return _PyFrame_BorrowSoacSyncBodyV1(
+            (const PySoacSyncBodyIntervalV1 *)(const void *)scope,
+            scope_size, expected_code);
+    }
     /* The existing validator is read-only despite its older non-const API. */
     if (soac_scope_storage_valid((PySoacLifetimeScopeV1 *)(void *)scope,
                                  scope_size) < 0) {
