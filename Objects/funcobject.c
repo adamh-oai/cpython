@@ -846,10 +846,17 @@ PyFunction_SetSoacMetadata(
         return -1;
     }
     PyFunctionObject *func = (PyFunctionObject *)op;
-    func_clear_soac_metadata(func);
+    void *previous_metadata = func->func_soac_metadata;
+    void (*previous_destructor)(void *) = func->func_soac_metadata_destructor;
+    /* Publish the complete replacement before a destructor can reenter.
+     * A nested setter owns the final association; never overwrite it after
+     * returning from the previous destructor. */
     func->func_soac_metadata = metadata;
     func->func_soac_metadata_destructor = destructor;
     func->func_soac_function_id = soac_function_id;
+    if (previous_metadata != NULL && previous_destructor != NULL) {
+        previous_destructor(previous_metadata);
+    }
     return 0;
 }
 

@@ -85,6 +85,9 @@ PyAPI_FUNC(PyObject *) PyFunction_GetModule(PyObject *);
 PyAPI_FUNC(PyObject *) PyFunction_GetDefaults(PyObject *);
 PyAPI_FUNC(int) PyFunction_SetDefaults(PyObject *, PyObject *);
 PyAPI_FUNC(void) PyFunction_SetVectorcall(PyFunctionObject *, vectorcallfunc);
+/* Publish the pointer, destructor and function ID before calling the old
+ * metadata's destructor. If that callback replaces or clears the association,
+ * its final association remains installed when the outer setter returns. */
 PyAPI_FUNC(int) PyFunction_SetSoacMetadata(
     PyObject *,
     uint64_t soac_function_id,
