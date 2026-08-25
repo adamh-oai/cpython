@@ -34,7 +34,6 @@
 #include "pycore_setobject.h"     // _PySet_Update()
 #include "pycore_sliceobject.h"   // _PyBuildSlice_ConsumeRefs
 #include "pycore_soac_type.h"    // physical member policy guards
-#include "pycore_soac_vm_call_v1.h" // native CALL declarations for all interpreters
 #include "pycore_soac_interpreter.h" // ordinary checked frames in all interpreters
 #include "pycore_sysmodule.h"     // _PySys_GetOptionalAttrString()
 #include "pycore_template.h"      // _PyTemplate_Build()

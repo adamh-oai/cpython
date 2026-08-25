@@ -15,7 +15,6 @@
 #include "pycore_optimizer.h"     // _PyExecutorObject
 #include "pycore_pyatomic_ft_wrappers.h" // FT_ATOMIC_STORE_UINTPTR_RELEASE()
 #include "pycore_pystate.h"       // _PyInterpreterState_GET()
-#include "pycore_soac_outgoing_v1.h" // supplied native source-call site
 #include "pycore_runtime_structs.h" // _PyCoMonitoringData
 #include "pycore_tuple.h"         // _PyTuple_FromArraySteal()
 
