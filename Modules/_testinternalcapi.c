@@ -2508,7 +2508,7 @@ soac_test_ordinary_instance_policy(PyObject *owner, PyObject *dict, PyObject *ke
         PyErr_SetString(PyExc_TypeError, "ordinary instance has no namespace permit");
         return -1;
     }
-    if (PyUnicode_CheckExact(key) &&
+    if (PyUnicode_Check(key) &&
         soac_test_ordinary_field(owner, key, value) < 0) {
         return -1;
     }
@@ -3931,6 +3931,7 @@ static PyMethodDef module_functions[] = {
     {"slot_new_soac_type_state_type", slot_new_soac_type_state_type, METH_VARARGS},
     {"get_soac_type_state_info", get_soac_type_state_info, METH_O},
     {"capture_soac_type_state_allocation", capture_soac_type_state_allocation, METH_VARARGS},
+    {"soac_type_state_alloc_pending_error", soac_type_state_alloc_pending_error, METH_VARARGS},
     {"check_soac_type_state_reftracer", check_soac_type_state_reftracer, METH_O},
     {"probe_soac_type_state_lookups", probe_soac_type_state_lookups, METH_VARARGS},
     {"probe_soac_type_state_private_escape", probe_soac_type_state_private_escape, METH_VARARGS},

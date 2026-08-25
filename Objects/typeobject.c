@@ -2539,8 +2539,20 @@ PyObject *
 _PyType_AllocNoTrack(PyTypeObject *type, Py_ssize_t nitems)
 {
     if (_PySOAC_CheckTypeAllocation(type) < 0) return NULL;
+    /* Generic allocation also runs with an existing C error indicator during
+     * cleanup. NULL state means ordinary/legacy storage, not failure. Keep
+     * that prior exception out of callback-capable metadata preparation and
+     * restore it on success; a genuinely new preparation error takes priority. */
+    PyObject *previous_error = PyErr_GetRaisedException();
     PyTypeState *storage = _PyTypeState_ForAllocation(type);
-    if (storage == NULL && PyErr_Occurred()) return NULL;
+    if (PyErr_Occurred()) {
+        PyObject *error = PyErr_GetRaisedException();
+        Py_XDECREF(storage);
+        Py_XDECREF(previous_error);
+        PyErr_SetRaisedException(error);
+        return NULL;
+    }
+    PyErr_SetRaisedException(previous_error);
     PyObject *obj;
     /* The +1 on nitems is needed for most types but not all. We could save a
      * bit of space by allocating one less item in certain cases, depending on

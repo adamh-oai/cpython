@@ -445,6 +445,47 @@ capture_soac_type_state_allocation(PyObject *self, PyObject *args)
 #endif
 }
 
+static PyObject *
+soac_type_state_alloc_pending_error(PyObject *self, PyObject *args)
+{
+#if !_Py_TYPE_STATE_SUPPORTED
+    PyErr_SetString(PyExc_NotImplementedError, "allocation probe requires the supported GIL layout");
+    return NULL;
+#else
+    PyObject *kind, *primary;
+    Py_ssize_t fail_at;
+    if (!PyArg_ParseTuple(args, "OOn:soac_type_state_alloc_pending_error",
+                          &kind, &primary, &fail_at)) return NULL;
+    if (!PyType_Check(kind) || ((PyTypeObject *)kind)->tp_itemsize != 0 ||
+        !PyExceptionInstance_Check(primary) || (fail_at != 0 && fail_at != 1)) {
+        PyErr_SetString(PyExc_TypeError, "pending allocation probe requires a fixed-size type, exception, and fault index 0/1");
+        return NULL;
+    }
+    SoacTestAllocationCapture capture = {.fail_at = fail_at, .armed = 1};
+    PyMem_GetAllocator(PYMEM_DOMAIN_OBJ, &capture.previous);
+    PyMemAllocatorEx allocator = {
+        .ctx = &capture, .malloc = soac_test_allocation_malloc,
+        .calloc = soac_test_allocation_calloc, .realloc = soac_test_allocation_realloc,
+        .free = soac_test_allocation_free,
+    };
+    PyMem_SetAllocator(PYMEM_DOMAIN_OBJ, &allocator);
+    PyErr_SetRaisedException(Py_NewRef(primary));
+    PyObject *result = PyType_GenericAlloc((PyTypeObject *)kind, 0);
+    soac_test_allocation_restore(&capture);
+    /* Inspect and clear the actual C error indicator before crossing back to
+     * Python. No ctypes or Python exception propagation mediates this call. */
+    PyObject *error = PyErr_GetRaisedException();
+    if (capture.overflow) {
+        Py_XDECREF(result);
+        Py_XDECREF(error);
+        PyErr_SetString(PyExc_AssertionError, "pending allocation exceeded the bounded capture");
+        return NULL;
+    }
+    return Py_BuildValue("(NNn)", result == NULL ? Py_NewRef(Py_None) : result,
+                         error == NULL ? Py_NewRef(Py_None) : error, capture.requests);
+#endif
+}
+
 typedef struct {
     Py_ssize_t created;
     Py_ssize_t destroyed;
