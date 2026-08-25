@@ -24,6 +24,7 @@
 #include "pycore_soac_dataclass.h" // explicit generated-member operations
 #include "pycore_symtable.h"      // _Py_Mangle()
 #include "pycore_typeobject.h"    // struct type_cache
+#include "pycore_type_state.h"    // optional storage-local native rules
 #include "pycore_unicodeobject.h" // _PyUnicode_Copy
 #include "pycore_unionobject.h"   // _Py_union_type_or
 #include "pycore_weakref.h"       // _PyWeakref_GET_REF()
@@ -2538,6 +2539,8 @@ PyObject *
 _PyType_AllocNoTrack(PyTypeObject *type, Py_ssize_t nitems)
 {
     if (_PySOAC_CheckTypeAllocation(type) < 0) return NULL;
+    PyTypeState *storage = _PyTypeState_ForAllocation(type);
+    if (storage == NULL && PyErr_Occurred()) return NULL;
     PyObject *obj;
     /* The +1 on nitems is needed for most types but not all. We could save a
      * bit of space by allocating one less item in certain cases, depending on
@@ -2548,13 +2551,20 @@ _PyType_AllocNoTrack(PyTypeObject *type, Py_ssize_t nitems)
     size_t size = _PyObject_VAR_SIZE(type, nitems+1);
 
     const size_t presize = _PyType_PreHeaderSize(type);
+    size_t inline_capacity = 0;
     if (type->tp_flags & Py_TPFLAGS_INLINE_VALUES) {
         assert(type->tp_itemsize == 0);
-        size += _PyInlineValuesSize(type);
+        size_t inline_size = _PyInlineValuesSize(type);
+        if (storage != NULL) inline_capacity = shared_keys_usable_size(CACHED_KEYS(type));
+        if (size > (size_t)PY_SSIZE_T_MAX - inline_size) goto size_error;
+        size += inline_size;
     }
+    if (storage != NULL && _PyTypeState_AllocationSize(type, size, &size) < 0) goto error;
+    if (size > (size_t)PY_SSIZE_T_MAX - presize) goto size_error;
     char *alloc = _PyObject_MallocWithType(type, size + presize);
     if (alloc  == NULL) {
-        return PyErr_NoMemory();
+        PyErr_NoMemory();
+        goto error;
     }
     obj = (PyObject *)(alloc + presize);
     if (presize) {
@@ -2568,6 +2578,20 @@ _PyType_AllocNoTrack(PyTypeObject *type, Py_ssize_t nitems)
     // initialized by _PyObject_Init[Var]().
     memset((char *)obj + sizeof(PyObject), 0, size - sizeof(PyObject));
 
+    if (storage != NULL) {
+        /* Complete inline payload and its frozen extent before reference
+         * creation can notify a tracer or expose a stateful participant. */
+        Py_SET_TYPE(obj, type);
+        if (type->tp_flags & Py_TPFLAGS_INLINE_VALUES) {
+            _PyObject_InitInlineValues(obj, type);
+#if _Py_TYPE_STATE_SUPPORTED
+            assert(inline_capacity > 0 && inline_capacity <= SHARED_KEYS_MAX_SIZE);
+            _PyObject_InlineValues(obj)->soac_allocated_capacity = (uint8_t)inline_capacity;
+#endif
+        }
+        _PyObject_InitWithTypeState(obj, type, storage);
+        return obj;
+    }
     if (type->tp_itemsize == 0) {
         _PyObject_Init(obj, type);
     }
@@ -2578,6 +2602,15 @@ _PyType_AllocNoTrack(PyTypeObject *type, Py_ssize_t nitems)
         _PyObject_InitInlineValues(obj, type);
     }
     return obj;
+size_error:
+    PyErr_NoMemory();
+error:
+    {
+        PyObject *error = PyErr_GetRaisedException();
+        Py_XDECREF(storage);
+        PyErr_SetRaisedException(error);
+        return NULL;
+    }
 }
 
 PyObject *
@@ -2598,6 +2631,7 @@ PyType_GenericAlloc(PyTypeObject *type, Py_ssize_t nitems)
         /* Ready-time admission restricts tp_free to a native allocation mate.
          * Do not invoke tp_dealloc: __del__ must not see a failed allocation.
          * The specialized decref preserves debug/reftracer bookkeeping. */
+        _PyObject_ClearTypeState(obj);
         _Py_DECREF_SPECIALIZED(obj, (destructor)type->tp_free);
         _Py_DECREF_TYPE(type);
         return NULL;
@@ -2650,6 +2684,8 @@ subtype_traverse(PyObject *self, visitproc visit, void *arg)
 {
     PyTypeObject *type, *base;
     traverseproc basetraverse;
+
+    if (_PyObject_TypeStateTraverse(self, visit, arg) < 0) return -1;
 
     /* Find the nearest base with a different tp_traverse,
        and traverse slots while we're at it */
@@ -2752,6 +2788,7 @@ subtype_clear(PyObject *self)
             Py_CLEAR(*dictptr);
     }
 
+    _PyObject_ClearTypeState(self);
     if (baseclear)
         return baseclear(self);
     return 0;
@@ -2898,6 +2935,8 @@ subtype_dealloc(PyObject *self)
             }
         }
     }
+
+    _PyObject_ClearTypeState(self);
 
     /* Extract the type again; tp_del may have changed it */
     type = Py_TYPE(self);
@@ -7275,9 +7314,6 @@ type_clear(PyObject *self)
 
        cleared, and here's why:
 
-       tp_cache:
-           Not used; if it were, it would be a dict.
-
        tp_bases, tp_base:
            If these are involved in a cycle, there must be at least
            one other, mutable object in the cycle, e.g. a base
@@ -7294,6 +7330,9 @@ type_clear(PyObject *self)
     _PySOAC_TypeContractBeginTeardown(type);
     PyType_Modified(type);
     _PySOAC_TypeContractClear(type);
+    /* Cache retirement is at an actual GC boundary, not PyType_Modified.
+     * Old instances/dictionaries independently own their immutable state. */
+    Py_CLEAR(type->tp_cache);
     PyObject *dict = lookup_tp_dict(type);
     if (dict) {
         _PyDict_ClearForTeardown(dict);
@@ -8525,6 +8564,11 @@ object___sizeof___impl(PyObject *self)
         res = _PyVarObject_CAST(self)->ob_size * isize;
     }
     res += Py_TYPE(self)->tp_basicsize;
+    if (_PyObject_HasTypeStateSlot(self)) {
+        if (_PyObject_TypeStateSlot(self) == NULL) return NULL;
+        if (res > PY_SSIZE_T_MAX - (Py_ssize_t)sizeof(PyTypeState *)) return PyErr_NoMemory();
+        res += sizeof(PyTypeState *);
+    }
 
     return PyLong_FromSsize_t(res);
 }

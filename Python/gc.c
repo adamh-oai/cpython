@@ -4,6 +4,7 @@
 
 #include "Python.h"
 #include "pycore_soac_type.h"  // pending allocation barrier
+#include "pycore_type_state.h"  // preserve optional allocation extent
 #include "pycore_ceval.h"         // _Py_set_eval_breaker_bit()
 #include "pycore_dict.h"          // _PyInlineValuesSize()
 #include "pycore_initconfig.h"    // _PyStatus_OK()
@@ -2420,6 +2421,11 @@ PyUnstable_Object_GC_NewWithExtraData(PyTypeObject *tp, size_t extra_size)
 PyVarObject *
 _PyObject_GC_Resize(PyVarObject *op, Py_ssize_t nitems)
 {
+    if (_PyObject_HasTypeStateSlot((PyObject *)op)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "optional type-state storage does not support variable resize");
+        return NULL;
+    }
     const size_t basicsize = _PyObject_VAR_SIZE(Py_TYPE(op), nitems);
     const size_t presize = _PyType_PreHeaderSize(Py_TYPE(op));
     _PyObject_ASSERT((PyObject *)op, !_PyObject_GC_IS_TRACKED(op));

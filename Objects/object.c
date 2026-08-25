@@ -23,6 +23,8 @@
 #include "pycore_memoryobject.h"  // _PyManagedBuffer_Type
 #include "pycore_namespace.h"     // _PyNamespace_Type
 #include "pycore_object.h"        // export _Py_SwappedOp
+#include "pycore_object_alloc.h"  // stateful allocation keeps native pairing
+#include "pycore_type_state.h"    // optional storage-owned native rules
 #include "pycore_optimizer.h"     // _PyUOpExecutor_Type
 #include "pycore_pyerrors.h"      // _PyErr_Occurred()
 #include "pycore_pymem.h"         // _PyMem_IsPtrFreed()
@@ -2708,18 +2710,21 @@ _PyTypes_FiniTypes(PyInterpreterState *interp)
 
 
 static inline void
-new_reference(PyObject *op)
+new_reference(PyObject *op, uint16_t layout_flags)
 {
     // Skip the immortal object check in Py_SET_REFCNT; always set refcnt to 1
 #if !defined(Py_GIL_DISABLED)
 #if SIZEOF_VOID_P > 4
     op->ob_refcnt_full = 1;
     assert(op->ob_refcnt == 1);
-    assert(op->ob_flags == 0);
+    assert((layout_flags & ~_Py_HAS_TYPE_STATE_SLOT_FLAG) == 0);
+    op->ob_flags = layout_flags;
 #else
+    assert(layout_flags == 0);
     op->ob_refcnt = 1;
 #endif
 #else
+    assert(layout_flags == 0);
     op->ob_flags = 0;
     op->ob_mutex = (PyMutex){ 0 };
 #ifdef _Py_THREAD_SANITIZER
@@ -2746,13 +2751,13 @@ _Py_NewReference(PyObject *op)
 #ifdef Py_REF_DEBUG
     _Py_IncRefTotal(_PyThreadState_GET());
 #endif
-    new_reference(op);
+    new_reference(op, 0);
 }
 
 void
 _Py_NewReferenceNoTotal(PyObject *op)
 {
-    new_reference(op);
+    new_reference(op, 0);
 }
 
 void
@@ -2775,7 +2780,8 @@ _Py_SetImmortalUntracked(PyObject *op)
     op->ob_ref_shared = 0;
     _Py_atomic_or_uint8(&op->ob_gc_bits, _PyGC_BITS_DEFERRED);
 #elif SIZEOF_VOID_P > 4
-    op->ob_flags = _Py_IMMORTAL_FLAGS;
+    op->ob_flags = _Py_IMMORTAL_FLAGS |
+        (op->ob_flags & _Py_HAS_TYPE_STATE_SLOT_FLAG);
     op->ob_refcnt = _Py_IMMORTAL_INITIAL_REFCNT;
 #else
     op->ob_refcnt = _Py_IMMORTAL_INITIAL_REFCNT;
@@ -3480,6 +3486,8 @@ _PyObject_VisitType(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(tp);
     return 0;
 }
+
+#include "soac_type_state.inc"
 
 // Implementations for the stable ABI
 // Keep these at the end.

@@ -22,6 +22,7 @@
 #include "pycore_context.h"       // _PyContext_NewHamtForTests()
 #include "pycore_dict.h"          // PyDictValues
 #include "pycore_soac_type.h"     // actual ordinary dictionary selection
+#include "pycore_type_state.h"    // checked optional storage allocation
 #include "pycore_fileutils.h"     // _Py_normpath()
 #include "pycore_flowgraph.h"     // _PyCompile_OptimizeCfg()
 #include "pycore_frame.h"         // _PyInterpreterFrame
@@ -2490,6 +2491,8 @@ dict_ordinary_replace_detach_oom(PyObject *self, PyObject *args)
     return NULL;
 }
 
+static int soac_test_type_state_private_write(PyObject *, PyObject *, PyObject *, int);
+
 static int
 soac_test_ordinary_instance_policy(PyObject *owner, PyObject *dict, PyObject *key,
                                    PyObject *value, int operation, PyObject *provenance)
@@ -2512,6 +2515,7 @@ soac_test_ordinary_instance_policy(PyObject *owner, PyObject *dict, PyObject *ke
     /* The original incoming attribute name is not the canonical stored key.
      * Inspect Unicode data, never repeat arbitrary hash/equality or str(). */
     if (attribute && soac_test_ordinary_field(owner, provenance, value) < 0) return -1;
+    if (soac_test_type_state_private_write(owner, dict, value, operation) < 0) return -1;
     return operation == PyDict_SOAC_VALIDATE_INITIAL
         ? soac_test_ordinary_after_initial(owner, dict) : 0;
 }
@@ -2566,8 +2570,10 @@ soac_test_ordinary_final_commit(PyObject *owner, PyObject *type,
     return 0;
 }
 
+#include "_testinternalcapi/soac_type_state.inc"
+
 static PyObject *
-dict_new_soac_ordinary_type(PyObject *self, PyObject *args)
+dict_new_soac_ordinary_type_impl(PyObject *args, int direct)
 {
     PyObject *name, *bases, *namespace, *fields, *namespace_function;
     if (!PyArg_ParseTuple(args, "OOOOO:dict_new_soac_ordinary_type",
@@ -2607,6 +2613,7 @@ dict_new_soac_ordinary_type(PyObject *self, PyObject *args)
         .owner = owner, .namespace_function = namespace_function,
         .name = name, .bases = bases, .namespace_dict = namespace,
         .keywords = keywords, .commit_final = soac_test_ordinary_final_commit,
+        .bind_type = direct ? soac_test_type_state_bind : NULL,
     };
     PyObject *handle = PyType_NewSoacConstructionHandle(&spec);
     PyObject *type = handle == NULL ? NULL
@@ -2631,6 +2638,18 @@ dict_new_soac_ordinary_type(PyObject *self, PyObject *args)
     Py_DECREF(keywords);
     Py_DECREF(empty);
     return type;
+}
+
+static PyObject *
+dict_new_soac_ordinary_type(PyObject *self, PyObject *args)
+{
+    return dict_new_soac_ordinary_type_impl(args, 0);
+}
+
+static PyObject *
+dict_new_soac_type_state_type(PyObject *self, PyObject *args)
+{
+    return dict_new_soac_ordinary_type_impl(args, 1);
 }
 
 static PyObject *
@@ -3908,6 +3927,14 @@ static PyMethodDef module_functions[] = {
     {"dict_setitem_and_delete_for_module", dict_setitem_and_delete_for_module, METH_VARARGS},
     {"dict_new_soac_type", dict_new_soac_type, METH_VARARGS},
     {"dict_new_soac_ordinary_type", dict_new_soac_ordinary_type, METH_VARARGS},
+    {"dict_new_soac_type_state_type", dict_new_soac_type_state_type, METH_VARARGS},
+    {"get_soac_type_state_info", get_soac_type_state_info, METH_O},
+    {"capture_soac_type_state_allocation", capture_soac_type_state_allocation, METH_VARARGS},
+    {"check_soac_type_state_reftracer", check_soac_type_state_reftracer, METH_O},
+    {"probe_soac_type_state_lookups", probe_soac_type_state_lookups, METH_VARARGS},
+    {"probe_soac_type_state_private_escape", probe_soac_type_state_private_escape, METH_VARARGS},
+    {"soac_type_state_clear", soac_type_state_clear, METH_O},
+    {"soac_type_state_negative_refcount", soac_type_state_negative_refcount, METH_O},
     {"dict_arm_soac_ordinary_hook", dict_arm_soac_ordinary_hook, METH_VARARGS},
     {"dict_ordinary_inline_state", dict_ordinary_inline_state, METH_O},
     {"dict_ordinary_clear_managed_probe", dict_ordinary_clear_managed_probe, METH_VARARGS},

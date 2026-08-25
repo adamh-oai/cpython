@@ -217,7 +217,9 @@ struct _typeobject {
     inquiry tp_is_gc; /* For PyObject_IS_GC */
     PyObject *tp_bases;
     PyObject *tp_mro; /* method resolution order */
-    PyObject *tp_cache; /* no longer used */
+    /* Optional exact native PyTypeState cache on participating heap types.
+     * Ordinary types retain NULL. This is not installed class authority. */
+    PyObject *tp_cache;
     void *tp_subclasses;  /* for static builtin types this is an index */
     PyObject *tp_weaklist; /* not used for static builtin types */
     destructor tp_del;
@@ -316,6 +318,23 @@ enum {
 };
 
 typedef struct _PySoacInstanceDictPolicy PySoacInstanceDictPolicy;
+typedef struct _PyTypeState PyTypeState;
+typedef int (*PySoacStorageStateFactoryV1)(
+    PyObject *class_owner, PyObject *actual_type, PyTypeState **out);
+
+/* Trusted, write-once registration during the original pending bind. This
+ * adds no type/source authority and cannot reopen or replace a registration.
+ * prepare returns 0 with one owned state in out (NULL only for no selected
+ * storage), or -1 with an exception and NULL out. It runs only after actual
+ * final admission, before supported fresh allocation, never per write. */
+PyAPI_FUNC(int) PyType_SetSoacStorageStateFactoryV1(
+    PyObject *actual_type, PyObject *expected_owner,
+    PySoacStorageStateFactoryV1 prepare);
+
+/* Checked borrowed view: absent layout bit returns NULL without reading a
+ * trailer. A present but invalid/terminal attachment raises, never authorizes
+ * unchecked writes. Neither this pointer nor its presence grants a contract. */
+PyAPI_FUNC(PyTypeState *) PyObject_GetTypeState(PyObject *object);
 enum {
     Py_SOAC_INSTANCE_DICT_NONE = 0,
     Py_SOAC_INSTANCE_DICT_INDEXED = 1,

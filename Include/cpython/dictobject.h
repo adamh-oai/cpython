@@ -20,7 +20,9 @@ typedef struct {
      * Bit 12 marks a permanently owned SOAC dictionary policy.
      * Bit 13 records a noncanonical lookup alias in stable-prefix storage.
      * Bit 14 blocks first policy installation during an in-place split clear.
-     * Bits 15-31 are currently unused
+     * Bits 15-17 hold attachment-local mutation/terminal/installing state for optional
+     * direct type-state dictionaries; the immutable state can be shared.
+     * Bits 18-31 are currently unused
      * Bits 32-63 are a unique id in the free threading build (used for per-thread refcounting)
      */
     uint64_t _ma_watcher_tag;
@@ -85,6 +87,43 @@ struct _PySoacInstanceDictPolicy {
     PyObject *owner;
     PyDict_SoacPolicyCallback validate;
 };
+
+/* Immutable storage rules prepared from actual native type bindings. The
+ * callback sees resolved rules, not a receiver whose MRO must be rediscovered.
+ * NULL value denotes deletion; canonical_name is the existing Unicode payload. */
+typedef int (*PyTypeStateFieldCheckV1)(
+    PyObject *rule_owner, PyObject *canonical_name, PyObject *value);
+
+typedef struct {
+    /* Borrowed only while NewV1 validates the actual declaring catalogue. */
+    PyObject *expected_class_owner;
+    Py_ssize_t field_index;
+    Py_ssize_t offset;
+    PyObject *canonical_name;
+    PyObject *rule_owner;
+    PyTypeStateFieldCheckV1 validate;
+} PyTypeStateSlotSpecV1;
+
+#define Py_TYPE_STATE_ABI_V1 1u
+typedef struct {
+    uint32_t abi_version;
+    uint32_t struct_size;
+    /* Dictionary-only metadata: do not retain unrelated native-slot rules.
+     * All three are NULL when there are no dictionary obligations. */
+    PyObject *dictionary_owner;
+    PyDict_SoacPolicyCallback validate_dictionary;
+    PyTypeStateFieldCheckV1 validate_inline;
+    Py_ssize_t slot_count;
+    const PyTypeStateSlotSpecV1 *slots;
+} PyTypeStateSpecV1;
+
+/* Copies the complete actual native slot projection and retains only rule
+ * owners/names. The returned instance state owns a separately shareable
+ * dictionary projection; an escaped dict need not retain slot-only owners.
+ * No receiver/type backedge is added solely for finding the policy. Returns
+ * one owned native PyObject-compatible state reference, or NULL with error. */
+PyAPI_FUNC(PyTypeState *) PyTypeState_NewV1(
+    PyObject *actual_type, const PyTypeStateSpecV1 *spec, size_t spec_size);
 PyAPI_FUNC(int) PyDict_SetSoacPolicy(
     PyObject *dict, PyObject *owner, PyDict_SoacPolicyCallback validate,
     unsigned int flags);

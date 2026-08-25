@@ -20,6 +20,7 @@
 #include "pycore_pylifecycle.h"   // _PyOS_URandomNonblock()
 #include "pycore_runtime.h"       // _Py_ID()
 #include "pycore_soac_type.h"    // physical slot write/read policy
+#include "pycore_type_state.h"   // actual allocated storage-state marker
 #include "pycore_unicodeobject.h" // _PyUnicodeASCIIIter_Type
 
 #include <stdlib.h> // rand()
@@ -821,7 +822,8 @@ do_specialize_instance_load_attr(PyObject* owner, _Py_CODEUNIT* instr, PyObject*
         }
         case OBJECT_SLOT:
         {
-            if (_PySOAC_UsesObjectSlotPolicy(Py_TYPE(owner))) {
+            if (_PyObject_HasTypeStateSlot(owner) ||
+                _PySOAC_UsesObjectSlotPolicy(Py_TYPE(owner))) {
                 SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_ATTR_OBJECT_SLOT);
                 return -1;
             }
@@ -998,7 +1000,8 @@ _Py_Specialize_StoreAttr(_PyStackRef owner_st, _Py_CODEUNIT *instr, PyObject *na
     PyObject *descr = NULL;
     _PyAttrCache *cache = (_PyAttrCache *)(instr + 1);
     PyTypeObject *type = Py_TYPE(owner);
-    if ((type->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) ||
+    if (_PyObject_HasTypeStateSlot(owner) ||
+        (type->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) ||
         _PySOAC_HasOrdinaryInstanceWrites(type)) {
         SPECIALIZATION_FAIL(STORE_ATTR, SPEC_FAIL_OVERRIDDEN);
         goto fail;
@@ -1032,7 +1035,8 @@ _Py_Specialize_StoreAttr(_PyStackRef owner_st, _Py_CODEUNIT *instr, PyObject *na
             goto fail;
         case OBJECT_SLOT:
         {
-            if (_PySOAC_UsesObjectSlotPolicy(Py_TYPE(owner))) {
+            if (_PyObject_HasTypeStateSlot(owner) ||
+                _PySOAC_UsesObjectSlotPolicy(Py_TYPE(owner))) {
                 SPECIALIZATION_FAIL(STORE_ATTR, SPEC_FAIL_ATTR_OBJECT_SLOT);
                 goto fail;
             }

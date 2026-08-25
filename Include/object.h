@@ -659,6 +659,10 @@ given type object has a specified feature.
 #if defined(Py_GIL_DISABLED) && defined(Py_DEBUG)
 #define _Py_TYPE_REVEALED_FLAG (1 << 3)
 #endif
+/* Allocation layout, not enforcement liveness. Never clear this bit merely
+ * because the owned state has begun terminal cleanup. The optional trailer
+ * protocol is currently supported only by the audited LP64 GIL layout. */
+#define _Py_HAS_TYPE_STATE_SLOT_FLAG (1 << 4)
 
 #define Py_CONSTANT_NONE 0
 #define Py_CONSTANT_FALSE 1

@@ -81,6 +81,8 @@ struct SoacTypeContract {
     PyObject *inherited_final_names;  /* immutable inherited-only dict policy */
     int class_dictionary_policy_installed;
     PySoacTypeFinalCommitV4 commit_final; /* immutable construction authority */
+    PySoacStorageStateFactoryV1 storage_state_factory;
+    int binding_storage_factory;
     int (*check_instance_write)(PyObject *, PyObject *, PyObject *, PyObject *);
     PyObject *(*new_instance_dict)(PyObject *, PyObject *);
     int (*prepare_instance_dictionary_policy)(
@@ -113,6 +115,26 @@ soac_type_contract(PyTypeObject *type)
 {
     SoacTypeContract *state = soac_type_state(type);
     return state != NULL && state->permanent_contract_published ? state : NULL;
+}
+
+int
+_PyTypeState_SupportedInstanceType(PyTypeObject *type)
+{
+    if (!_Py_TYPE_STATE_SUPPORTED ||
+        (type->tp_flags & (Py_TPFLAGS_HEAPTYPE | Py_TPFLAGS_HAVE_GC)) !=
+            (Py_TPFLAGS_HEAPTYPE | Py_TPFLAGS_HAVE_GC) ||
+        type->tp_itemsize != 0 || type->tp_basicsize < (Py_ssize_t)sizeof(PyObject) ||
+        type->tp_alloc != PyType_GenericAlloc || type->tp_free != PyObject_GC_Del ||
+        (type->tp_new != object_new && type->tp_new != PyType_GenericNew) ||
+        type->tp_dealloc != subtype_dealloc || type->tp_traverse != subtype_traverse ||
+        type->tp_clear != subtype_clear) {
+        return 0;
+    }
+    PyTypeObject *base = type;
+    while (base->tp_base != NULL && (base->tp_flags & Py_TPFLAGS_HEAPTYPE)) {
+        base = base->tp_base;
+    }
+    return base == &PyBaseObject_Type;
 }
 
 static SoacConstructionHandle *
@@ -349,7 +371,164 @@ soac_contract_live(SoacTypeContract *state)
     return 0;
 }
 
+int
+PyType_SetSoacStorageStateFactoryV1(PyObject *object, PyObject *expected_owner,
+                                   PySoacStorageStateFactoryV1 prepare)
+{
+    if (!_Py_TYPE_STATE_SUPPORTED) {
+        PyErr_SetString(PyExc_NotImplementedError,
+                        "optional type-state allocation requires the audited LP64 GIL layout");
+        return -1;
+    }
+    SoacTypeContract *state = object != NULL && PyType_Check(object)
+        ? soac_type_state((PyTypeObject *)object) : NULL;
+    if (state == NULL || expected_owner == NULL || prepare == NULL ||
+        state->owner != expected_owner || state->type != (PyTypeObject *)object ||
+        state->interpreter != _PyInterpreterState_GET() || state->terminal ||
+        soac_type_phase(state) != Py_SOAC_TYPE_STATE_PENDING ||
+        state->permanent_contract_published || state->construction == NULL ||
+        !state->binding_storage_factory || state->storage_state_factory != NULL ||
+        (((PyTypeObject *)object)->tp_flags & Py_TPFLAGS_READY)) {
+        PyErr_SetString(soac_type_mutation_error(),
+                        "storage-state factory requires the original unopened pending bind");
+        return -1;
+    }
+    state->storage_state_factory = prepare;
+    return 0;
+}
+
+int
+_PyTypeState_CheckInstanceContracts(PyTypeState *storage)
+{
+    if (storage->class_contracts == NULL ||
+        !PyTuple_CheckExact(storage->class_contracts)) {
+        return soac_type_state_error("instance storage has no native contract liveness projection");
+    }
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(storage->class_contracts); ++i) {
+        PyObject *item = PyTuple_GET_ITEM(storage->class_contracts, i);
+        if (!Py_IS_TYPE(item, &SoacTypeContract_Type) ||
+            soac_contract_live((SoacTypeContract *)item) < 0) {
+            if (!PyErr_Occurred()) {
+                return soac_type_state_error("instance storage has foreign native contract metadata");
+            }
+            return -1;
+        }
+    }
+    return 0;
+}
+
 #include "soac_slots.inc"
+
+PyTypeState *
+_PyTypeState_ForAllocation(PyTypeObject *type)
+{
+    if (!_PyTypeState_SupportedInstanceType(type)) return NULL;
+    if (type->tp_cache != NULL && Py_IS_TYPE(type->tp_cache, &_PyTypeState_Type)) {
+        PyTypeState *cached = (PyTypeState *)type->tp_cache;
+        if (cached->kind != _Py_TYPE_STATE_INSTANCE || cached->allocation_type != type ||
+            _PyTypeState_CheckLive(cached) < 0) {
+            if (!PyErr_Occurred()) soac_type_state_error("foreign storage-state cache receipt");
+            return NULL;
+        }
+        if (type->tp_version_tag != 0 && cached->type_version == type->tp_version_tag) {
+            return (PyTypeState *)Py_NewRef(cached);
+        }
+    }
+    PyObject *mro = lookup_tp_mro(type);
+    if (mro == NULL || !PyTuple_CheckExact(mro)) return NULL;
+    SoacTypeContract *selected = NULL;
+    PySoacStorageStateFactoryV1 factory = NULL;
+    for (Py_ssize_t i = -1; i < PyTuple_GET_SIZE(mro); ++i) {
+        SoacTypeContract *contract = soac_object_slot_contract_at(type, mro, i);
+        if (contract == NULL) continue;
+        if (soac_contract_live(contract) < 0) return NULL;
+        /* No arbitrary owner is passed to another runtime's factory. A mixed
+         * legacy/native family keeps every existing policy and no tail. The
+         * factory authenticates every declaring owner, including method-only
+         * native bases that contribute no physical storage rows. */
+        if (contract->dictionary_mode == Py_SOAC_INSTANCE_DICT_INDEXED ||
+            contract->storage_state_factory == NULL ||
+            (factory != NULL && contract->storage_state_factory != factory)) {
+            return NULL;
+        }
+        factory = contract->storage_state_factory;
+        if (contract->dictionary_mode == Py_SOAC_INSTANCE_DICT_NONE &&
+            contract->object_slot_count == 0) continue;
+        if (selected == NULL) {
+            selected = contract;
+        }
+    }
+    if (selected == NULL) return NULL;
+    if (type->tp_cache != NULL && !Py_IS_TYPE(type->tp_cache, &_PyTypeState_Type)) {
+        soac_type_state_error("foreign type cache cannot be replaced by storage state");
+        return NULL;
+    }
+    /* Types for which CPython cannot establish a version receipt remain an
+     * explicit legacy allocation family; do not rebuild a descriptor per object. */
+    if (!PyUnstable_Type_AssignVersionTag(type)) return NULL;
+    unsigned int version = type->tp_version_tag;
+    Py_INCREF(mro);  /* factory allocation can run GC/reenter */
+    PyObject *owner = Py_NewRef(selected->owner);
+    PyObject *previous = Py_XNewRef(type->tp_cache);
+    Py_INCREF(selected);
+    PyTypeState *prepared = NULL;
+    PyTypeState *result = NULL;
+    if (Py_EnterRecursiveCall(" while preparing native storage state")) goto done;
+    int status = factory(owner, (PyObject *)type, &prepared);
+    Py_LeaveRecursiveCall();
+    if (status != 0 || PyErr_Occurred() || prepared == NULL ||
+        !Py_IS_TYPE(prepared, &_PyTypeState_Type) ||
+        prepared->kind != _Py_TYPE_STATE_INSTANCE || prepared->allocation_type != type ||
+        prepared->type_version != version || _PyTypeState_CheckLive(prepared) < 0 ||
+        type->tp_mro != mro || type->tp_version_tag != version ||
+        !_PyTypeState_SupportedInstanceType(type) ||
+        selected->owner != owner || selected->storage_state_factory != factory ||
+        soac_contract_live(selected) < 0) {
+        if (!PyErr_Occurred()) soac_type_state_error("storage-state factory changed its native allocation binding");
+        goto done;
+    }
+    if (type->tp_cache != previous) {
+        /* A GC callback can complete the same cold preparation recursively.
+         * Reuse its already-authenticated receipt, never overwrite it blindly. */
+        PyObject *current = type->tp_cache;
+        if (current == NULL || !Py_IS_TYPE(current, &_PyTypeState_Type)) {
+            soac_type_state_error("storage-state cache changed during preparation");
+            goto done;
+        }
+        PyTypeState *cached = (PyTypeState *)current;
+        if (cached->kind != _Py_TYPE_STATE_INSTANCE || cached->allocation_type != type ||
+            cached->type_version != version || _PyTypeState_CheckLive(cached) < 0) {
+            if (!PyErr_Occurred()) soac_type_state_error("reentrant storage-state cache has another receipt");
+            goto done;
+        }
+        result = (PyTypeState *)Py_NewRef(cached);
+    }
+    else {
+        Py_XSETREF(type->tp_cache, Py_NewRef(prepared));
+        result = prepared;
+        prepared = NULL;
+    }
+done:
+    {
+        PyObject *error = PyErr_GetRaisedException();
+        Py_XDECREF(prepared);
+        Py_XDECREF(previous);
+        Py_DECREF(owner);
+        Py_DECREF(selected);
+        PyErr_SetRaisedException(error);
+    }
+    if (result != NULL &&
+        (type->tp_mro != mro || type->tp_version_tag != version ||
+         type->tp_cache != (PyObject *)result || !_PyTypeState_SupportedInstanceType(type) ||
+         _PyTypeState_CheckLive(result) < 0)) {
+        if (!PyErr_Occurred()) soac_type_state_error("storage-state preparation cleanup changed its native binding");
+        PyObject *error = PyErr_GetRaisedException();
+        Py_CLEAR(result);
+        PyErr_SetRaisedException(error);
+    }
+    Py_DECREF(mro);
+    return result;
+}
 
 static int
 soac_handle_traverse(SoacConstructionHandle *handle, visitproc visit, void *arg)
@@ -458,6 +637,8 @@ soac_state_clear(SoacTypeContract *state)
         state->phase = Py_SOAC_TYPE_STATE_FAILED;
     }
     state->type = NULL;
+    state->storage_state_factory = NULL;
+    state->binding_storage_factory = 0;
     state->initial_frozen_setattr = NULL;
     state->initial_frozen_delattr = NULL;
     state->pending_frozen_setattr_birth = 0;
@@ -1370,8 +1551,10 @@ soac_bind_pending_type(PyTypeObject *type, SoacConstructionHandle *handle,
         soac_fail_construction(handle);
         return -1;
     }
+    state->binding_storage_factory = 1;
     int status = handle->spec.bind_type == NULL ? 0
         : handle->spec.bind_type(owner, (PyObject *)type);
+    state->binding_storage_factory = 0;
     /* Pending preparation may reenter. Constructor C owners support actual
      * type/handle, but logical state must be re-read after the callback. */
     if (status != 0 || PyErr_Occurred() || soac_type_state(type) != state ||
@@ -2007,6 +2190,12 @@ _PySOAC_NewInstanceDictionary(PyObject *object)
 static SoacTypeContract *
 soac_type_ordinary_dictionary_contract(PyTypeObject *type)
 {
+    struct _PySoacStorageLookupProbe *probe =
+        _PyInterpreterState_GET()->dict_state.soac_storage_lookup_probe;
+    if (probe != NULL && probe->actual_type == type &&
+        probe->ordinary_type_lookups != UINT64_MAX) {
+        ++probe->ordinary_type_lookups;
+    }
     SoacTypeContract *own = soac_type_contract(type);
     if (own != NULL && own->dictionary_mode == Py_SOAC_INSTANCE_DICT_ORDINARY) return own;
     PyObject *mro = type->tp_mro;
@@ -2028,6 +2217,9 @@ _PySOAC_HasOrdinaryInstanceWrites(PyTypeObject *type)
 int
 _PySOAC_CheckInlineInstanceWrite(PyObject *object, PyObject *name, PyObject *value)
 {
+    if (_PyObject_HasTypeStateSlot(object)) {
+        return _PyTypeState_CheckInlineWrite(object, name, value);
+    }
     if (PyErr_Occurred()) return -1;
     PyTypeObject *type = Py_TYPE(object);
     SoacTypeContract *state = soac_type_ordinary_dictionary_contract(type);
@@ -2045,6 +2237,32 @@ _PySOAC_CheckInlineInstanceWrite(PyObject *object, PyObject *name, PyObject *val
         return soac_type_state_error("ordinary inline field check failed or changed");
     }
     return 0;
+}
+
+int
+_PyTypeState_CheckInlineWrite(PyObject *object, PyObject *name, PyObject *value)
+{
+    PyTypeState *state = PyObject_GetTypeState(object);
+    if (state == NULL) return -1;
+    if (state->kind != _Py_TYPE_STATE_INSTANCE) {
+        return soac_type_state_error("inline write has another native storage family");
+    }
+    if (state->dictionary == NULL) return 0;
+    PyTypeState *dictionary = state->dictionary;
+    if (_PyTypeState_CheckLive(dictionary) < 0) return -1;
+    PyTypeObject *type = Py_TYPE(object);
+    Py_INCREF(state);
+    int result = dictionary->validate_inline(dictionary->dictionary_policy.owner, name, value);
+    if (result == 0 && !PyErr_Occurred() &&
+        Py_TYPE(object) == type && PyObject_GetTypeState(object) == state) {
+        Py_DECREF(state);
+        return 0;
+    }
+    if (!PyErr_Occurred()) soac_type_state_error("inline storage changed during native validation");
+    PyObject *error = PyErr_GetRaisedException();
+    Py_DECREF(state);
+    PyErr_SetRaisedException(error);
+    return -1;
 }
 
 int

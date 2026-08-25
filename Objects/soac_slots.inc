@@ -151,6 +151,93 @@ soac_object_slot_contract_at(PyTypeObject *type, PyObject *mro, Py_ssize_t index
     return base == type ? NULL : soac_type_contract(base);
 }
 
+int
+_PyTypeState_BindSpec(PyTypeObject *type, const PyTypeStateSpecV1 *spec,
+                      PyTypeState *storage)
+{
+    PyObject *mro = lookup_tp_mro(type);
+    if (mro == NULL || !PyTuple_CheckExact(mro)) {
+        return soac_type_state_error("storage-state preparation has no actual native MRO");
+    }
+    Py_INCREF(mro);
+    Py_ssize_t contracts = 0, required_slots = 0;
+    int dictionary = 0;
+    for (Py_ssize_t i = -1; i < PyTuple_GET_SIZE(mro); ++i) {
+        SoacTypeContract *state = soac_object_slot_contract_at(type, mro, i);
+        if (state == NULL) continue;
+        if (soac_contract_live(state) < 0) goto error;
+        if (state->dictionary_mode == Py_SOAC_INSTANCE_DICT_INDEXED) {
+            soac_type_state_error("indexed storage remains an explicit legacy policy family");
+            goto error;
+        }
+        ++contracts;
+        dictionary |= state->dictionary_mode == Py_SOAC_INSTANCE_DICT_ORDINARY;
+        if (state->object_slot_count > PY_SSIZE_T_MAX - required_slots) {
+            PyErr_NoMemory();
+            goto error;
+        }
+        required_slots += state->object_slot_count;
+        for (Py_ssize_t field = 0; field < state->object_slot_count; ++field) {
+            Py_ssize_t found = 0;
+            for (Py_ssize_t row = 0; row < spec->slot_count; ++row) {
+                const PyTypeStateSlotSpecV1 *item = &spec->slots[row];
+                if (item->expected_class_owner != state->owner || item->field_index != field) continue;
+                ++found;
+                if (item->rule_owner == NULL || item->validate == NULL ||
+                    item->canonical_name == NULL || !PyUnicode_CheckExact(item->canonical_name) ||
+                    !_PyUnicode_Equal(item->canonical_name, PyTuple_GET_ITEM(state->object_slot_fields, field)) ||
+                    item->offset != state->object_slots[field].offset ||
+                    !soac_object_slot_in_layout(type, &state->object_slots[field])) {
+                    soac_type_state_error("storage-state row does not match its actual native slot");
+                    goto error;
+                }
+            }
+            if (found != 1) {
+                soac_type_state_error("storage-state slot catalogue is missing or duplicates a declaration");
+                goto error;
+            }
+        }
+    }
+    if (required_slots != spec->slot_count ||
+        dictionary != (spec->dictionary_owner != NULL)) {
+        soac_type_state_error("storage-state projection does not cover its actual native storage");
+        goto error;
+    }
+    PyObject *held = PyTuple_New(contracts);
+    if (held == NULL) goto error;
+    if (type->tp_mro != mro) {
+        Py_DECREF(held);
+        soac_type_state_error("actual MRO changed while retaining storage-state metadata");
+        goto error;
+    }
+    Py_ssize_t next = 0;
+    for (Py_ssize_t i = -1; i < PyTuple_GET_SIZE(mro); ++i) {
+        SoacTypeContract *state = soac_object_slot_contract_at(type, mro, i);
+        if (state == NULL) continue;
+        if (soac_contract_live(state) < 0 || next >= contracts) {
+            Py_DECREF(held);
+            if (!PyErr_Occurred()) soac_type_state_error("native contract catalogue changed during storage preparation");
+            goto error;
+        }
+        PyTuple_SET_ITEM(held, next++, Py_NewRef(state));
+    }
+    if (next != contracts) {
+        Py_DECREF(held);
+        soac_type_state_error("native contract catalogue changed during storage preparation");
+        goto error;
+    }
+    storage->class_contracts = held;
+    Py_DECREF(mro);
+    return 0;
+error:
+    {
+        PyObject *error = PyErr_GetRaisedException();
+        Py_DECREF(mro);
+        PyErr_SetRaisedException(error);
+        return -1;
+    }
+}
+
 static SoacTypeContract *
 soac_find_object_slot_owner(PyObject *object, PyObject *expected_owner,
                              Py_ssize_t index)
@@ -222,9 +309,21 @@ PyType_MatchesSoacObjectSlotDescriptor(PyObject *object, PyObject *expected_owne
         PyDescr_TYPE(descriptor) == state->object_slots[index].declaring_type;
 }
 
+static void
+soac_record_legacy_slot_lookup(PyTypeObject *type)
+{
+    struct _PySoacStorageLookupProbe *probe =
+        _PyInterpreterState_GET()->dict_state.soac_storage_lookup_probe;
+    if (probe != NULL && probe->actual_type == type &&
+        probe->slot_type_lookups != UINT64_MAX) {
+        ++probe->slot_type_lookups;
+    }
+}
+
 int
 _PySOAC_UsesObjectSlotPolicy(PyTypeObject *type)
 {
+    soac_record_legacy_slot_lookup(type);
     PyObject *mro = lookup_tp_mro(type);
     Py_ssize_t size = mro == NULL ? 0 : PyTuple_GET_SIZE(mro);
     for (Py_ssize_t i = -1; i < size; ++i) {
@@ -259,7 +358,11 @@ soac_member_width(int kind)
 int
 _PySOAC_CheckObjectSlotAccess(PyObject *object, const PyMemberDef *view)
 {
+    if (_PyObject_HasTypeStateSlot(object)) {
+        return _PyTypeState_CheckMemberAccess(object, view);
+    }
     PyTypeObject *type = Py_TYPE(object);
+    soac_record_legacy_slot_lookup(type);
     PyObject *mro = lookup_tp_mro(type);
     Py_ssize_t size = mro == NULL ? 0 : PyTuple_GET_SIZE(mro);
     Py_ssize_t width = soac_member_width(view->type);
@@ -301,7 +404,11 @@ unsafe_view:
 int
 _PySOAC_CheckObjectSlotWrite(PyObject *object, Py_ssize_t offset, PyObject *value)
 {
+    if (_PyObject_HasTypeStateSlot(object)) {
+        return _PyTypeState_CheckMemberWrite(object, offset, value);
+    }
     PyTypeObject *type = Py_TYPE(object);
+    soac_record_legacy_slot_lookup(type);
     PyObject *mro = lookup_tp_mro(type);
     Py_ssize_t size = mro == NULL ? 0 : PyTuple_GET_SIZE(mro);
     for (Py_ssize_t i = -1; i < size; ++i) {
@@ -333,6 +440,67 @@ _PySOAC_CheckObjectSlotWrite(PyObject *object, Py_ssize_t offset, PyObject *valu
         }
     }
     return 0;
+}
+
+int
+_PyTypeState_CheckMemberAccess(PyObject *object, const PyMemberDef *view)
+{
+    PyTypeState *state = PyObject_GetTypeState(object);
+    if (state == NULL) return -1;
+    Py_ssize_t width = soac_member_width(view->type);
+    if (state->kind != _Py_TYPE_STATE_INSTANCE) goto unsafe_view;
+    if ((view->flags & _Py_AFTER_ITEMS) ||
+        (width > 0 && view->offset > PY_SSIZE_T_MAX - width)) goto unsafe_view;
+    /* The trailer is never a public member. A forged view must not replace
+     * its state edge even when no declared native slot shares that offset. */
+    PyTypeState **tail = _PyObject_TypeStateSlot(object);
+    if (tail == NULL) return -1;
+    Py_ssize_t tail_offset = (char *)tail - (char *)object;
+    if (width != 0 && view->offset < tail_offset + (Py_ssize_t)sizeof(*tail) &&
+        (width < 0 || view->offset + width > tail_offset)) goto unsafe_view;
+    for (Py_ssize_t i = 0; i < state->slot_count; ++i) {
+        Py_ssize_t offset = state->slots[i].offset;
+        if (width != 0 && view->offset < offset + (Py_ssize_t)sizeof(PyObject *) &&
+            (width < 0 || view->offset + width > offset) &&
+            (view->offset != offset ||
+             (view->type != _Py_T_OBJECT && view->type != Py_T_OBJECT_EX))) goto unsafe_view;
+    }
+    return 0;
+unsafe_view:
+    PyErr_SetString(soac_type_mutation_error(),
+                    "native member view is incompatible with protected storage");
+    return -1;
+}
+
+int
+_PyTypeState_CheckMemberWrite(PyObject *object, Py_ssize_t offset, PyObject *value)
+{
+    PyTypeState *state = PyObject_GetTypeState(object);
+    if (state == NULL) return -1;
+    if (state->kind != _Py_TYPE_STATE_INSTANCE) {
+        return soac_type_state_error("native slot write has another storage family");
+    }
+    PyTypeObject *type = Py_TYPE(object);
+    Py_INCREF(state);
+    int result = 0;
+    for (Py_ssize_t i = 0; i < state->slot_count; ++i) {
+        const _PyTypeStateSlot *slot = &state->slots[i];
+        if (slot->offset != offset) continue;
+        if (slot->validate(slot->owner, slot->canonical_name, value) != 0 || PyErr_Occurred()) {
+            if (!PyErr_Occurred()) soac_type_state_error("native slot validator failed without an exception");
+            result = -1;
+            break;
+        }
+        if (Py_TYPE(object) != type || PyObject_GetTypeState(object) != state) {
+            if (!PyErr_Occurred()) soac_type_state_error("native slot state changed during validation");
+            result = -1;
+            break;
+        }
+    }
+    PyObject *error = PyErr_GetRaisedException();
+    Py_DECREF(state);
+    PyErr_SetRaisedException(error);
+    return result;
 }
 
 static int

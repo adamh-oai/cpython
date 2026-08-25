@@ -308,6 +308,11 @@ struct _dictvalues {
     uint8_t size;
     uint8_t embedded;
     uint8_t valid;
+#if !defined(Py_GIL_DISABLED) && SIZEOF_VOID_P == 8
+    /* Original inline allocation extent, not the shrinking usable capacity.
+     * Occupies existing LP64 padding; read only with HAS_TYPE_STATE_SLOT. */
+    uint8_t soac_allocated_capacity;
+#endif
     PyObject *values[1];
 };
 

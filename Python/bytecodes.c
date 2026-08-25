@@ -29,6 +29,7 @@
 #include "pycore_setobject.h"     // _PySet_NextEntry()
 #include "pycore_sliceobject.h"   // _PyBuildSlice_ConsumeRefs
 #include "pycore_soac_type.h"    // physical member policy guards
+#include "pycore_type_state.h"   // actual allocated storage-state marker
 #include "pycore_stackref.h"
 #include "pycore_template.h"      // _PyTemplate_Build()
 #include "pycore_tuple.h"         // _PyTuple_ITEMS()
@@ -2627,7 +2628,8 @@ dummy_func(
         op(_LOAD_ATTR_SLOT, (index/1, owner -- attr, o)) {
             PyObject *owner_o = PyStackRef_AsPyObjectBorrow(owner);
 
-            DEOPT_IF(_PySOAC_UsesObjectSlotPolicy(Py_TYPE(owner_o)));
+            DEOPT_IF(_PyObject_HasTypeStateSlot(owner_o) ||
+                     _PySOAC_UsesObjectSlotPolicy(Py_TYPE(owner_o)));
 
             PyObject **addr = (PyObject **)((char *)owner_o + index);
             PyObject *attr_o = FT_ATOMIC_LOAD_PTR(*addr);
@@ -2742,8 +2744,9 @@ dummy_func(
         op(_GUARD_NO_ORDINARY_INSTANCE_WRITES, (owner -- owner)) {
             /* Separate from optimizer-foldable type-version guards. Actual
              * ordinary subclasses inherit checked writes, not an own flag. */
-            PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
-            EXIT_IF(_PySOAC_HasOrdinaryInstanceWrites(tp));
+            PyObject *owner_o = PyStackRef_AsPyObjectBorrow(owner);
+            EXIT_IF(_PyObject_HasTypeStateSlot(owner_o) ||
+                    _PySOAC_HasOrdinaryInstanceWrites(Py_TYPE(owner_o)));
         }
 
         op(_GUARD_DORV_NO_DICT, (owner -- owner)) {
@@ -2834,7 +2837,8 @@ dummy_func(
         op(_STORE_ATTR_SLOT, (index/1, value, owner -- o)) {
             PyObject *owner_o = PyStackRef_AsPyObjectBorrow(owner);
 
-            DEOPT_IF(_PySOAC_UsesObjectSlotPolicy(Py_TYPE(owner_o)));
+            DEOPT_IF(_PyObject_HasTypeStateSlot(owner_o) ||
+                     _PySOAC_UsesObjectSlotPolicy(Py_TYPE(owner_o)));
 
             DEOPT_IF(!LOCK_OBJECT(owner_o));
             char *addr = (char *)owner_o + index;

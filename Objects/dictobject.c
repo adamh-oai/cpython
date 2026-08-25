@@ -126,6 +126,8 @@ As a consequence of this, split keys have a maximum size of 16.
 #include "pycore_gc.h"            // _PyObject_GC_IS_TRACKED()
 #include "pycore_hashtable.h"     // native-owned SOAC policy sidecars
 #include "pycore_object.h"        // _PyObject_GC_TRACK(), _PyDebugAllocatorStats()
+#include "pycore_object_alloc.h"
+#include "pycore_type_state.h"
 #include "pycore_pyatomic_ft_wrappers.h" // FT_ATOMIC_LOAD_SSIZE_RELAXED
 #include "pycore_soac_type.h"    // native-owned instance dictionary factories
 #include "pycore_soac_dataclass.h" // exact pending generated-member operation
@@ -138,32 +140,55 @@ As a consequence of this, split keys have a maximum size of 16.
 #include "stringlib/eq.h"                // unicode_eq()
 #include <stdbool.h>
 
-typedef struct SoacSplitClearFrame {
+struct SoacSplitClearFrame {
     struct SoacSplitClearFrame *previous;
     Py_ssize_t nentries;
     Py_ssize_t next_index;
-} SoacSplitClearFrame;
+};
 
-typedef struct {
-    PyObject *owner;
-    PyDict_SoacPolicyCallback validate;
-    unsigned int flags;
-    /* Storage selection, not a second authority or policy inventory. */
-    unsigned char dictionary_mode;
-    unsigned char installing;
-    unsigned char sealed;
-    unsigned char terminal;
-    unsigned char mutating;
-    /* Explicit clear must retain stock split-dictionary release order.  This
-       is layout metadata only: values have exactly one authoritative owner. */
-    PyDictKeysObject *baseline_keys;
-    uint8_t baseline_capacity;
-    unsigned char baseline_embedded;
-    unsigned char baseline_promoted;
-    unsigned char instance_bound;
-    SoacSplitClearFrame *split_clear;
-    uint32_t split_clear_pending;
-} SoacDictPolicy;
+#define SOAC_DIRECT_MUTATING _Py_DICT_TYPE_STATE_MUTATING
+#define SOAC_DIRECT_TERMINAL _Py_DICT_TYPE_STATE_TERMINAL
+#define SOAC_DIRECT_INSTALLING _Py_DICT_TYPE_STATE_INSTALLING
+
+/* Null/cleared direct slots remain protected through final free. This is an
+ * immutable refusal value, never an ordinary or mutable policy descriptor. */
+static SoacDictPolicy soac_terminal_direct_policy = {
+    .flags = PyDict_SOAC_ALLOW_NONSTRING_KEYS,
+    .dictionary_mode = Py_SOAC_INSTANCE_DICT_ORDINARY,
+    .direct = 1,
+    .terminal = 1,
+};
+
+static inline int
+soac_policy_terminal(PyDictObject *dict, SoacDictPolicy *policy)
+{
+    return policy->terminal || (policy->direct &&
+        (policy->owner == NULL || (dict->_ma_watcher_tag & SOAC_DIRECT_TERMINAL)));
+}
+
+static inline int
+soac_policy_installing(PyDictObject *dict, SoacDictPolicy *policy)
+{
+    return policy->direct ? (dict->_ma_watcher_tag & SOAC_DIRECT_INSTALLING) != 0
+                          : policy->installing;
+}
+
+static inline int
+soac_policy_mutating(PyDictObject *dict, SoacDictPolicy *policy)
+{
+    return policy->direct ? (dict->_ma_watcher_tag & SOAC_DIRECT_MUTATING) != 0
+                          : policy->mutating;
+}
+
+static inline void
+soac_policy_set_mutating(PyDictObject *dict, SoacDictPolicy *policy, int value)
+{
+    if (policy->direct) {
+        if (value) dict->_ma_watcher_tag |= SOAC_DIRECT_MUTATING;
+        else dict->_ma_watcher_tag &= ~SOAC_DIRECT_MUTATING;
+    }
+    else policy->mutating = (unsigned char)value;
+}
 
 static int indexed_normalize_namespace(PyDictObject *dict);
 static Py_ssize_t insert_split_key(PyDictKeysObject *, PyObject *, Py_hash_t);
@@ -179,10 +204,27 @@ soac_mutation_error(void)
 static SoacDictPolicy *
 soac_policy(PyDictObject *dict)
 {
+    if (_PyObject_HasTypeStateSlot((PyObject *)dict)) {
+        PyTypeState **slot = _PyObject_TypeStateSlot((PyObject *)dict);
+        if (slot == NULL || *slot == NULL) return &soac_terminal_direct_policy;
+        PyTypeState *state = *slot;
+        if (!Py_IS_TYPE(state, &_PyTypeState_Type) ||
+            state->kind != _Py_TYPE_STATE_DICTIONARY || state->terminal ||
+            state->interpreter != _PyInterpreterState_GET()) {
+            return &soac_terminal_direct_policy;
+        }
+        return &state->dictionary_policy;
+    }
     if (!_PyDict_HasSoacPolicy(dict)) {
         return NULL;
     }
-    _Py_hashtable_t *policies = _PyInterpreterState_GET()->dict_state.soac_policies;
+    struct _Py_dict_state *dictionary_state = &_PyInterpreterState_GET()->dict_state;
+    struct _PySoacStorageLookupProbe *probe = dictionary_state->soac_storage_lookup_probe;
+    if (probe != NULL && probe->dictionary == (PyObject *)dict &&
+        probe->dictionary_identity_lookups != UINT64_MAX) {
+        ++probe->dictionary_identity_lookups;
+    }
+    _Py_hashtable_t *policies = dictionary_state->soac_policies;
     SoacDictPolicy *policy = policies == NULL
         ? NULL : _Py_hashtable_get(policies, dict);
     if (policy == NULL) {
@@ -215,7 +257,8 @@ _PyDict_HasLiveSoacReadOnlyPolicy(PyObject *dict)
     /* A failed write's hash/equality callback may read already-frozen
        bindings while mutating is set. This is not an installation proof:
        INITIAL validation also runs under that guard. */
-    return policy->flags == PyDict_SOAC_READ_ONLY && !policy->terminal;
+    return policy->flags == PyDict_SOAC_READ_ONLY &&
+        !soac_policy_terminal((PyDictObject *)dict, policy);
 }
 
 int
@@ -226,7 +269,9 @@ PyDict_MatchesSoacPolicy(PyObject *dict, PyObject *owner,
         return 0;
     }
     SoacDictPolicy *policy = soac_policy((PyDictObject *)dict);
-    return !policy->terminal && !policy->mutating &&
+    return !soac_policy_terminal((PyDictObject *)dict, policy) &&
+        !soac_policy_installing((PyDictObject *)dict, policy) &&
+        !soac_policy_mutating((PyDictObject *)dict, policy) &&
         policy->owner == owner && policy->validate == validate &&
         policy->flags == flags;
 }
@@ -238,7 +283,9 @@ PyDict_MatchesSoacClassNamespace(PyObject *dict, PyObject *expected_owner)
         return 0;
     }
     SoacDictPolicy *policy = soac_policy((PyDictObject *)dict);
-    if (policy->flags != 0 || (!policy->terminal && policy->mutating)) {
+    if (policy->flags != 0 ||
+        (!soac_policy_terminal((PyDictObject *)dict, policy) &&
+         soac_policy_mutating((PyDictObject *)dict, policy))) {
         return 0;
     }
     return _PySOAC_MatchesClassNamespacePolicy(policy->owner, policy->validate,
@@ -259,20 +306,20 @@ soac_check_key(PyDictObject *dict, PyObject *key)
 }
 
 static int
-soac_begin_mutation(SoacDictPolicy *policy)
+soac_begin_mutation(PyDictObject *dict, SoacDictPolicy *policy)
 {
-    if (policy->terminal) {
+    if (soac_policy_terminal(dict, policy)) {
         PyObject *error = PySoac_GetStrictRuntimeUnavailableError();
         PyErr_SetString(error != NULL ? error : PyExc_RuntimeError,
                         "SOAC dictionary has entered terminal teardown");
         return -1;
     }
-    if (policy->mutating) {
+    if (soac_policy_mutating(dict, policy)) {
         PyErr_SetString(soac_mutation_error(),
                         "reentrant mutation of a SOAC dictionary");
         return -1;
     }
-    policy->mutating = 1;
+    soac_policy_set_mutating(dict, policy, 1);
     return 0;
 }
 
@@ -280,7 +327,8 @@ static int
 soac_validate(SoacDictPolicy *policy, PyDictObject *dict,
               PyObject *key, PyObject *value, int operation, PyObject *provenance)
 {
-    assert(policy->mutating && !policy->terminal && policy->owner != NULL);
+    assert(soac_policy_mutating(dict, policy) &&
+           !soac_policy_terminal(dict, policy) && policy->owner != NULL);
     if (policy->flags == PyDict_SOAC_READ_ONLY &&
         operation != PyDict_SOAC_VALIDATE_INITIAL &&
         operation != PyDict_SOAC_TERMINAL_TEARDOWN) {
@@ -317,6 +365,7 @@ soac_validate(SoacDictPolicy *policy, PyDictObject *dict,
    and is released before committing callback-free stores or releasing values. */
 typedef struct {
     SoacDictPolicy *validated;
+    PyDictObject *dictionary;
     int acquired;
     /* Callback-scoped, borrowed from the actual native member setter. These
      * are operation/locator evidence, never additional Python owner edges. */
@@ -343,7 +392,7 @@ static void
 soac_commit_end(SoacDictCommitGuard *guard)
 {
     if (guard->acquired) {
-        guard->validated->mutating = 0;
+        soac_policy_set_mutating(guard->dictionary, guard->validated, 0);
         guard->acquired = 0;
     }
 }
@@ -353,6 +402,8 @@ soac_commit_begin(PyDictObject *dict, SoacDictCommitGuard *guard,
                   PyObject *key, PyObject *canonical, PyObject *value,
                   int operation)
 {
+    assert(guard->dictionary == NULL || guard->dictionary == dict);
+    guard->dictionary = dict;
     SoacDictPolicy *policy = soac_policy(dict);
     if (guard->pending_operation != NULL) {
         if (soac_pending_resolved_unchanged(dict, guard) < 0) return -1;
@@ -379,7 +430,7 @@ soac_commit_begin(PyDictObject *dict, SoacDictCommitGuard *guard,
             PyErr_SetString(soac_mutation_error(), "pending namespace policy was replaced");
             return -1;
         }
-        if (soac_begin_mutation(policy) < 0) return -1;
+        if (soac_begin_mutation(dict, policy) < 0) return -1;
         guard->validated = policy;
         guard->acquired = 1;
         /* The native pending operation already checked inherited finality.
@@ -392,7 +443,7 @@ soac_commit_begin(PyDictObject *dict, SoacDictCommitGuard *guard,
     }
     assert(guard->validated == NULL && policy != NULL);
     if ((key != NULL && soac_check_key(dict, key) < 0) ||
-        soac_begin_mutation(policy) < 0) {
+        soac_begin_mutation(dict, policy) < 0) {
         return -1;
     }
     guard->validated = policy;
@@ -474,6 +525,11 @@ soac_notify_unprotected_write(PyDictObject *dict, PyDict_WatchEvent event,
 static void
 soac_destroy_policy(PyDictObject *dict)
 {
+    if (_PyObject_HasTypeStateSlot((PyObject *)dict)) {
+        dict->_ma_watcher_tag |= SOAC_DIRECT_TERMINAL;
+        _PyObject_ClearTypeState((PyObject *)dict);
+        return;
+    }
     if (!_PyDict_HasSoacPolicy(dict)) {
         return;
     }
@@ -582,9 +638,11 @@ soac_stage_policy(PyDictObject *dict, PyObject *owned_owner,
 static void
 soac_commit_install(PyDictObject *dict, SoacDictPolicy *policy)
 {
-    assert((policy->installing || policy->mutating) && !policy->terminal);
-    policy->installing = 0;
-    policy->mutating = 0;
+    assert((soac_policy_installing(dict, policy) || soac_policy_mutating(dict, policy)) &&
+           !soac_policy_terminal(dict, policy));
+    if (policy->direct) dict->_ma_watcher_tag &= ~SOAC_DIRECT_INSTALLING;
+    else policy->installing = 0;
+    soac_policy_set_mutating(dict, policy, 0);
     /* The new owner is a GC edge even if the incoming ordinary dictionary
      * previously contained only untracked values. */
     if (!_PyObject_GC_IS_TRACKED(dict)) _PyObject_GC_TRACK(dict);
@@ -608,7 +666,7 @@ soac_abort_instance_install(SoacInstanceDictInstall *install)
         soac_destroy_policy(install->dictionary);
     }
     else {
-        install->policy->mutating = 0;
+        soac_policy_set_mutating(install->dictionary, install->policy, 0);
     }
     install->policy = NULL;
     PyErr_SetRaisedException(error);
@@ -634,7 +692,7 @@ soac_prepare_instance_install(PyObject *instance, PyObject *candidate,
     SoacDictPolicy *old = soac_policy(dict);
     /* No provisional policy escapes via another receiver, including one
      * without its own field requirements. */
-    if (old != NULL && old->installing) {
+    if (old != NULL && soac_policy_installing(dict, old)) {
         PyErr_SetString(soac_mutation_error(), "instance dictionary policy is not committed");
         return -1;
     }
@@ -662,7 +720,7 @@ soac_prepare_instance_install(PyObject *instance, PyObject *candidate,
     PySoacInstanceDictPolicy existing = {0}, selected = {0};
     SoacDictPolicy *reserved = old;
     if (old != NULL) {
-        if (soac_begin_mutation(old) < 0) return -1;
+        if (soac_begin_mutation(dict, old) < 0) return -1;
         existing.owner = old->owner;
         existing.validate = old->validate;
     }
@@ -767,13 +825,13 @@ PyDict_SealSoacNamespace(PyObject *dict)
         PyErr_SetString(PyExc_TypeError, "only a SOAC namespace policy can be sealed");
         return -1;
     }
-    if (soac_begin_mutation(policy) < 0) {
+    if (soac_begin_mutation((PyDictObject *)dict, policy) < 0) {
         return -1;
     }
     /* This protects namespace shape, not every binding.  The native policy
        still approves lexical mutable bindings and permitted appends. */
     policy->sealed = 1;
-    policy->mutating = 0;
+    soac_policy_set_mutating((PyDictObject *)dict, policy, 0);
     return 0;
 }
 
@@ -784,18 +842,26 @@ _PyDict_SoacBeginTeardown(PyObject *dict)
         return;
     }
     SoacDictPolicy *policy = soac_policy((PyDictObject *)dict);
-    if (policy->terminal) {
+    if (soac_policy_terminal((PyDictObject *)dict, policy)) {
         return;
     }
-    if (policy->mutating) {
+    if (soac_policy_mutating((PyDictObject *)dict, policy)) {
         Py_FatalError("terminal teardown of an active SOAC dictionary mutation");
     }
-    policy->terminal = 1;
+    PyTypeState *held_state = NULL;
+    if (policy->direct) {
+        PyTypeState **slot = _PyObject_TypeStateSlot(dict);
+        if (slot == NULL) Py_FatalError("invalid dictionary type-state tail during notification");
+        held_state = (PyTypeState *)Py_XNewRef(*slot);
+    }
+    if (policy->direct) ((PyDictObject *)dict)->_ma_watcher_tag |= SOAC_DIRECT_TERMINAL;
+    else policy->terminal = 1;
     PyObject *exc = PyErr_GetRaisedException();
     if (policy->validate(policy->owner, dict, NULL, NULL,
                          PyDict_SOAC_TERMINAL_TEARDOWN, NULL) != 0 || PyErr_Occurred()) {
         Py_FatalError("SOAC owner failed irreversible terminal notification");
     }
+    Py_XDECREF(held_state);
     PyErr_SetRaisedException(exc);
 }
 
@@ -1837,6 +1903,54 @@ new_dict_with_shared_keys(PyDictKeysObject *keys)
         values->values[i] = NULL;
     }
     return new_dict(keys, values, 0, 1);
+}
+
+/* Consumes keys and, on failure when requested, values. The extended header
+ * is fresh and private: it never pops an ordinary-sized dict freelist entry.
+ * Its state/payload/marker are complete before the CREATE reftracer event. */
+static PyObject *
+new_dict_with_type_state(PyDictKeysObject *keys, PyDictValues *values,
+                         Py_ssize_t used, int free_values_on_failure,
+                         PyTypeState *state)
+{
+    if (state == NULL) return new_dict(keys, values, used, free_values_on_failure);
+    if (_PyTypeState_CheckLive(state) < 0 || state->kind != _Py_TYPE_STATE_DICTIONARY) {
+        if (!PyErr_Occurred()) PyErr_SetString(PyExc_TypeError, "invalid dictionary state projection");
+        goto error;
+    }
+    size_t size, presize = _PyType_PreHeaderSize(&PyDict_Type);
+    if (_PyTypeState_AllocationSize(&PyDict_Type, sizeof(PyDictObject), &size) < 0 ||
+        size > (size_t)PY_SSIZE_T_MAX - presize) {
+        if (!PyErr_Occurred()) PyErr_NoMemory();
+        goto error;
+    }
+    char *mem = _PyObject_MallocWithType(&PyDict_Type, presize + size);
+    if (mem == NULL) {
+        PyErr_NoMemory();
+        goto error;
+    }
+    memset(mem, 0, presize + size);
+    PyDictObject *dict = (PyDictObject *)(mem + presize);
+    _PyObject_GC_Link((PyObject *)dict);
+    dict->ma_keys = keys;
+    dict->ma_values = values;
+    dict->ma_used = used;
+    dict->_ma_watcher_tag = _PyDict_SOAC_POLICY_TAG |
+                           SOAC_DIRECT_MUTATING | SOAC_DIRECT_INSTALLING;
+    _PyObject_InitWithTypeState((PyObject *)dict, &PyDict_Type,
+                               (PyTypeState *)Py_NewRef(state));
+    ASSERT_CONSISTENT(dict);
+    /* The receiver/inline array supports contents until private installation
+     * commits. Track only at that commit, not during a preparation callback. */
+    return (PyObject *)dict;
+error:
+    {
+        PyObject *error = PyErr_GetRaisedException();
+        dictkeys_decref(keys, false);
+        if (free_values_on_failure) free_values(values, false);
+        PyErr_SetRaisedException(error);
+        return NULL;
+    }
 }
 
 
@@ -3178,7 +3292,7 @@ _PyDict_ReserveSoacNamespaceKeys(PyObject *op, PyObject *owner, PyObject *names)
         PyErr_SetString(soac_mutation_error(), "SOAC namespace reservation requires its unsealed native owner");
         return -1;
     }
-    if (soac_begin_mutation(policy) < 0) {
+    if (soac_begin_mutation(dict, policy) < 0) {
         return -1;
     }
     PyDictKeysObject *prefix = NULL;
@@ -3213,7 +3327,7 @@ _PyDict_ReserveSoacNamespaceKeys(PyObject *op, PyObject *owner, PyObject *names)
     }
     result = indexed_extend_namespace(dict, prefix);
 done:
-    policy->mutating = 0;
+    soac_policy_set_mutating(dict, policy, 0);
     if (prefix != NULL) {
         dictkeys_decref(prefix, false);
     }
@@ -4688,8 +4802,8 @@ soac_ordinary_setitem_take2(PyDictObject *dict, PyObject *key, PyObject *value,
                             int override, Py_hash_t hash)
 {
     SoacDictPolicy *policy = soac_policy(dict);
-    SoacDictCommitGuard guard = {.validated = policy};
-    if (soac_begin_mutation(policy) < 0) goto fail;
+    SoacDictCommitGuard guard = {.validated = policy, .dictionary = dict};
+    if (soac_begin_mutation(dict, policy) < 0) goto fail;
     guard.acquired = 1;
     if (hash == -1) hash = _PyObject_HashFast(key);
     if (hash == -1) goto fail;
@@ -4736,7 +4850,7 @@ soac_setitem_resolved(PyDictObject *dict, PyObject *key, PyObject *value,
         return soac_ordinary_setitem_take2(dict, Py_NewRef(key), Py_NewRef(value),
                                           operation, provenance, override, hash);
     }
-    if (soac_check_key(dict, key) < 0 || soac_begin_mutation(policy) < 0) {
+    if (soac_check_key(dict, key) < 0 || soac_begin_mutation(dict, policy) < 0) {
         return -1;
     }
     int result = -1;
@@ -4820,7 +4934,7 @@ soac_setitem_resolved(PyDictObject *dict, PyObject *key, PyObject *value,
             : insertdict(dict, Py_NewRef(key), hash, Py_NewRef(value), policy);
     }
 done:
-    policy->mutating = 0;
+    soac_policy_set_mutating(dict, policy, 0);
     Py_XDECREF(canonical);
     Py_XDECREF(old_value);
     return result;
@@ -5035,7 +5149,7 @@ _PyDict_SetItemForTeardown(PyObject *op, PyObject *key, PyObject *value)
     }
     PyDictObject *dict = (PyDictObject *)op;
     SoacDictPolicy *policy = soac_policy(dict);
-    if (!policy->terminal) {
+    if (!soac_policy_terminal(dict, policy)) {
         Py_FatalError("SOAC teardown write without terminal owner notification");
     }
     /* Called only by terminal module cleanup.  Public writes still reject
@@ -5148,8 +5262,8 @@ soac_ordinary_remove_lock_held(PyDictObject *dict, PyObject *key,
 {
     if (result != NULL) *result = NULL;
     SoacDictPolicy *policy = soac_policy(dict);
-    SoacDictCommitGuard guard = {.validated = policy};
-    if (soac_begin_mutation(policy) < 0) return -1;
+    SoacDictCommitGuard guard = {.validated = policy, .dictionary = dict};
+    if (soac_begin_mutation(dict, policy) < 0) return -1;
     guard.acquired = 1;
     if (pop && dict->ma_used == 0) {
         soac_commit_end(&guard);
@@ -5196,7 +5310,7 @@ soac_remove_lock_held(PyDictObject *dict, PyObject *key, Py_hash_t hash,
     if (policy->dictionary_mode == Py_SOAC_INSTANCE_DICT_ORDINARY) {
         return soac_ordinary_remove_lock_held(dict, key, hash, pop_empty, result);
     }
-    if (soac_check_key(dict, key) < 0 || soac_begin_mutation(policy) < 0) {
+    if (soac_check_key(dict, key) < 0 || soac_begin_mutation(dict, policy) < 0) {
         return -1;
     }
     int status = -1;
@@ -5233,7 +5347,7 @@ soac_remove_lock_held(PyDictObject *dict, PyObject *key, Py_hash_t hash,
     delitem_common(dict, hash, ix, value);
     status = 1;
 done:
-    policy->mutating = 0;
+    soac_policy_set_mutating(dict, policy, 0);
     Py_XDECREF(canonical);
     if (status == 1 && result != NULL) {
         *result = value;
@@ -5259,7 +5373,7 @@ _PyDict_SetItemAndDeleteForModule(PyObject *op, PyObject *key,
         PyErr_SetString(PyExc_TypeError, "SOAC module composite requires distinct namespace names");
         return -1;
     }
-    if (soac_begin_mutation(policy) < 0) {
+    if (soac_begin_mutation(dict, policy) < 0) {
         return -1;
     }
     PyObject *primary_value, *companion_value;
@@ -5269,7 +5383,7 @@ _PyDict_SetItemAndDeleteForModule(PyObject *op, PyObject *key,
     (void)_Py_dict_lookup(dict, key, hash, &primary_value);
     (void)_Py_dict_lookup(dict, companion, companion_hash, &companion_value);
     int sealed = policy->sealed;
-    policy->mutating = 0;
+    soac_policy_set_mutating(dict, policy, 0);
     if (value == NULL && primary_value == NULL) {
         return 0;
     }
@@ -5381,7 +5495,7 @@ delitemif_lock_held(PyObject *op, PyObject *key,
     if (PyDict_HasSoacPolicy(op)) {
         mp = (PyDictObject *)op;
         SoacDictPolicy *policy = soac_policy(mp);
-        if (soac_check_key(mp, key) < 0 || soac_begin_mutation(policy) < 0) {
+        if (soac_check_key(mp, key) < 0 || soac_begin_mutation(mp, policy) < 0) {
             return -1;
         }
         PyObject *held = NULL;
@@ -5412,7 +5526,7 @@ delitemif_lock_held(PyObject *op, PyObject *key,
             res = 1;
         }
 protected_done:
-        policy->mutating = 0;
+        soac_policy_set_mutating(mp, policy, 0);
         Py_XDECREF(canonical);
         Py_XDECREF(held);
         return res;
@@ -5556,7 +5670,7 @@ indexed_release_cleared_keys(PyDictKeysObject *keys, Py_ssize_t count)
 static int
 indexed_clear_split(PyDictObject *dict, SoacDictPolicy *policy)
 {
-    assert(policy->mutating && policy->baseline_keys != NULL);
+    assert(!policy->direct && policy->mutating && policy->baseline_keys != NULL);
     if (policy->split_clear != NULL && !policy->baseline_embedded) {
         PyErr_SetString(soac_mutation_error(),
                         "cannot recursively clear a detached split dictionary");
@@ -5603,7 +5717,7 @@ indexed_clear_split(PyDictObject *dict, SoacDictPolicy *policy)
         policy->mutating = 0;
         Py_DECREF(key);
         Py_DECREF(value);
-        if (soac_begin_mutation(policy) < 0) {
+        if (soac_begin_mutation(dict, policy) < 0) {
             policy->split_clear = frame.previous;
             return -1;
         }
@@ -5706,7 +5820,7 @@ soac_clear_lock_held(PyDictObject *dict)
     if (policy->dictionary_mode == Py_SOAC_INSTANCE_DICT_ORDINARY) {
         return clear_lock_held((PyObject *)dict, NULL);
     }
-    if (soac_begin_mutation(policy) < 0) {
+    if (soac_begin_mutation(dict, policy) < 0) {
         return -1;
     }
     PyObject *held = NULL;
@@ -5787,6 +5901,15 @@ _PyDict_ClearForTeardown(PyObject *op)
         PyDict_Clear(op);
         return;
     }
+    /* Terminal notification/value release may reenter tp_clear. Retiring this
+     * attachment must not free its embedded immutable policy while the outer
+     * clear still inspects it. Legacy policy lifetime is already the dict's. */
+    PyTypeState *held_state = NULL;
+    if (_PyObject_HasTypeStateSlot(op)) {
+        PyTypeState **slot = _PyObject_TypeStateSlot(op);
+        if (slot == NULL) Py_FatalError("invalid dictionary type-state tail during clear");
+        held_state = (PyTypeState *)Py_XNewRef(*slot);
+    }
     _PyDict_SoacBeginTeardown(op);
     PyDictObject *dict = (PyDictObject *)op;
     SoacDictPolicy *policy = soac_policy(dict);
@@ -5837,7 +5960,15 @@ _PyDict_ClearForTeardown(PyObject *op)
     }
     /* Break the additional GC edge only after terminal notification and
        consistent dictionary cleanup.  The immutable terminal marker remains. */
-    Py_CLEAR(policy->owner);
+    if (policy->direct) {
+        /* Retire only this dictionary attachment. The immutable dictionary
+         * projection may still protect other receivers and escaped aliases. */
+        _PyObject_ClearTypeState(op);
+    }
+    else {
+        Py_CLEAR(policy->owner);
+    }
+    soac_close_preserving_error((PyObject *)held_state);
 }
 
 void
@@ -6242,6 +6373,7 @@ static void
 dict_dealloc(PyObject *self)
 {
     PyDictObject *mp = (PyDictObject *)self;
+    int extended = _PyObject_HasTypeStateSlot(self);
     _PyObject_ResurrectStart(self);
     _PyDict_NotifyEvent(PyDict_EVENT_DEALLOCATED, mp, NULL, NULL);
     if (_PyObject_ResurrectEnd(self)) {
@@ -6277,7 +6409,7 @@ dict_dealloc(PyObject *self)
         assert(keys->dk_refcnt == 1 || keys == Py_EMPTY_KEYS);
         dictkeys_decref(keys, false);
     }
-    if (Py_IS_TYPE(mp, &PyDict_Type)) {
+    if (Py_IS_TYPE(mp, &PyDict_Type) && !extended) {
         _Py_FREELIST_FREE(dicts, mp, Py_TYPE(mp)->tp_free);
     }
     else {
@@ -6697,7 +6829,7 @@ static int
 soac_merge(PyDictObject *dict, PyObject *source, int override, int sequence)
 {
     SoacDictPolicy *policy = soac_policy(dict);
-    if (soac_begin_mutation(policy) < 0) {
+    if (soac_begin_mutation(dict, policy) < 0) {
         return -1;
     }
     PyObject *items = NULL, *seen = NULL;
@@ -6746,7 +6878,7 @@ soac_merge(PyDictObject *dict, PyObject *source, int override, int sequence)
     }
     result = 0;
 validated:
-    policy->mutating = 0;
+    soac_policy_set_mutating(dict, policy, 0);
     /* Each committed item has its own guard/ref-release boundary.  Revalidate
        after preceding finalizers: they may legitimately update other mutable
        fields.  Never trust the prevalidation snapshot as a write capability. */
@@ -6766,7 +6898,7 @@ validated:
     Py_XDECREF(items);
     return result;
 validation_error:
-    policy->mutating = 0;
+    soac_policy_set_mutating(dict, policy, 0);
     PyMem_Free(hashes);
     Py_XDECREF(seen);
     Py_XDECREF(items);
@@ -7539,7 +7671,7 @@ dict_setdefault_ref_lock_held(PyObject *d, PyObject *key, PyObject *default_valu
             *result = NULL;
         }
         SoacDictPolicy *policy = soac_policy(mp);
-        if (soac_check_key(mp, key) < 0 || soac_begin_mutation(policy) < 0) {
+        if (soac_check_key(mp, key) < 0 || soac_begin_mutation(mp, policy) < 0) {
             return -1;
         }
         int status = -1;
@@ -7569,7 +7701,9 @@ dict_setdefault_ref_lock_held(PyObject *d, PyObject *key, PyObject *default_valu
                 }
             }
             else if (policy->dictionary_mode == Py_SOAC_INSTANCE_DICT_ORDINARY) {
-                SoacDictCommitGuard guard = {.validated = policy, .acquired = 1};
+                SoacDictCommitGuard guard = {
+                    .validated = policy, .dictionary = mp, .acquired = 1,
+                };
                 inserted = soac_ordinary_setdefault_absent(
                     mp, key, hash, default_value, ix, &guard);
             }
@@ -7588,7 +7722,7 @@ dict_setdefault_ref_lock_held(PyObject *d, PyObject *key, PyObject *default_valu
             *result = incref_result ? Py_NewRef(value) : value;
         }
 protected_done:
-        policy->mutating = 0;
+        soac_policy_set_mutating(mp, policy, 0);
         return status;
     }
 
@@ -7824,7 +7958,7 @@ dict_popitem_impl(PyDictObject *self)
         return NULL;
     if (_PyDict_HasIndexedTable(self)) {
         SoacDictPolicy *policy = soac_policy(self);
-        if (policy != NULL && soac_begin_mutation(policy) < 0) {
+        if (policy != NULL && soac_begin_mutation(self, policy) < 0) {
             Py_DECREF(res);
             return NULL;
         }
@@ -7875,7 +8009,7 @@ indexed_error:
     if (_PyDict_HasSoacPolicy(self) &&
         soac_policy(self)->dictionary_mode != Py_SOAC_INSTANCE_DICT_ORDINARY) {
         SoacDictPolicy *policy = soac_policy(self);
-        if (soac_begin_mutation(policy) < 0) {
+        if (soac_begin_mutation(self, policy) < 0) {
             Py_DECREF(res);
             return NULL;
         }
@@ -7911,7 +8045,8 @@ protected_error:
     SoacDictCommitGuard ordinary_guard = {0};
     if (_PyDict_HasSoacPolicy(self)) {
         ordinary_guard.validated = soac_policy(self);
-        if (soac_begin_mutation(ordinary_guard.validated) < 0) {
+        ordinary_guard.dictionary = self;
+        if (soac_begin_mutation(self, ordinary_guard.validated) < 0) {
             Py_DECREF(res);
             return NULL;
         }
@@ -8002,7 +8137,10 @@ static int
 dict_traverse(PyObject *op, visitproc visit, void *arg)
 {
     PyDictObject *mp = (PyDictObject *)op;
-    if (_PyDict_HasSoacPolicy(mp)) {
+    if (_PyObject_HasTypeStateSlot(op)) {
+        if (_PyObject_TypeStateTraverse(op, visit, arg) < 0) return -1;
+    }
+    else if (_PyDict_HasSoacPolicy(mp)) {
         Py_VISIT(soac_policy(mp)->owner);
     }
     PyDictKeysObject *keys = mp->ma_keys;
@@ -8058,6 +8196,11 @@ _PyDict_SizeOf_LockHeld(PyDictObject *mp)
     _Py_CRITICAL_SECTION_ASSERT_OBJECT_LOCKED(mp);
 
     size_t res = _PyObject_SIZE(Py_TYPE(mp));
+    if (_PyObject_HasTypeStateSlot((PyObject *)mp)) {
+        PyTypeState **slot = _PyObject_TypeStateSlot((PyObject *)mp);
+        if (slot == NULL) return -1;
+        res = (char *)slot - (char *)mp + sizeof(*slot);
+    }
     if (_PyDict_HasIndexedTable(mp)) {
         PyDictIndexedValues *values = indexed_values(mp);
         res += offsetof(PyDictIndexedValues, values) +
@@ -10198,14 +10341,39 @@ soac_prepare_private_dictionary(PyObject *obj, PyDictObject *dict,
                                 SoacInstanceDictInstall *install)
 {
     *install = (SoacInstanceDictInstall){0};
+    if (_PyObject_HasTypeStateSlot(obj)) {
+        PyTypeState *state = PyObject_GetTypeState(obj);
+        if (state == NULL) return -1;
+        if (state->dictionary == NULL) return 0;
+        PyTypeState *attached = PyObject_GetTypeState((PyObject *)dict);
+        if (attached != state->dictionary ||
+            !(dict->_ma_watcher_tag & SOAC_DIRECT_INSTALLING) ||
+            !(dict->_ma_watcher_tag & SOAC_DIRECT_MUTATING)) {
+            if (!PyErr_Occurred()) PyErr_SetString(soac_mutation_error(),
+                "fresh instance dictionary lost its prepared state projection");
+            return -1;
+        }
+        install->dictionary = dict;
+        install->policy = &attached->dictionary_policy;
+        /* This is already the sole immutable rule owner, not a second policy
+         * installation or callback-based rediscovery of the receiver's MRO. */
+        return 0;
+    }
     if (!_PySOAC_HasOrdinaryInstanceWrites(Py_TYPE(obj))) return 0;
     if (_PyObject_GC_IS_TRACKED(dict)) _PyObject_GC_UNTRACK(dict);
     return soac_prepare_instance_install(obj, (PyObject *)dict, install);
 }
 
 static PyDictObject *
-make_dict_from_instance_attributes(PyDictKeysObject *keys, PyDictValues *values)
+make_dict_from_instance_attributes(PyObject *obj, PyDictKeysObject *keys,
+                                   PyDictValues *values)
 {
+    PyTypeState *state = NULL;
+    if (_PyObject_HasTypeStateSlot(obj)) {
+        PyTypeState *instance = PyObject_GetTypeState(obj);
+        if (instance == NULL) return NULL;
+        state = instance->dictionary;
+    }
     dictkeys_incref(keys);
     Py_ssize_t used = 0;
     size_t size = shared_keys_usable_size(keys);
@@ -10215,8 +10383,32 @@ make_dict_from_instance_attributes(PyDictKeysObject *keys, PyDictValues *values)
             used += 1;
         }
     }
-    PyDictObject *res = (PyDictObject *)new_dict(keys, values, used, 0);
+    PyDictObject *res = (PyDictObject *)new_dict_with_type_state(keys, values, used, 0, state);
     return res;
+}
+
+static PyObject *
+new_empty_dict_for_instance(PyObject *obj, PyDictKeysObject *keys)
+{
+    PyTypeState *state = NULL;
+    if (_PyObject_HasTypeStateSlot(obj)) {
+        PyTypeState *instance = PyObject_GetTypeState(obj);
+        if (instance == NULL) return NULL;
+        state = instance->dictionary;
+    }
+    if (state == NULL) {
+        return keys == NULL ? PyDict_New() : new_dict_with_shared_keys(keys);
+    }
+    if (keys == NULL) {
+        dictkeys_incref(Py_EMPTY_KEYS);
+        return new_dict_with_type_state(Py_EMPTY_KEYS, NULL, 0, 0, state);
+    }
+    size_t size = shared_keys_usable_size(keys);
+    PyDictValues *values = new_values(size);
+    if (values == NULL) return PyErr_NoMemory();
+    for (size_t i = 0; i < size; ++i) values->values[i] = NULL;
+    dictkeys_incref(keys);
+    return new_dict_with_type_state(keys, values, 0, 1, state);
 }
 
 PyDictObject *
@@ -10230,8 +10422,8 @@ _PyObject_MaterializeManagedDict_LockHeld(PyObject *obj)
     int preparing = _PySOAC_HasOrdinaryInstanceWrites(type) && values->valid == 1;
     if (preparing) FT_ATOMIC_STORE_UINT8(values->valid, _PyDictValues_SOAC_PREPARING);
     PyDictObject *dict = values->valid
-        ? make_dict_from_instance_attributes(CACHED_KEYS(type), values)
-        : (PyDictObject *)PyDict_New();
+        ? make_dict_from_instance_attributes(obj, CACHED_KEYS(type), values)
+        : (PyDictObject *)new_empty_dict_for_instance(obj, NULL);
     SoacInstanceDictInstall install = {0};
     if (dict == NULL) goto error;
     if (soac_prepare_private_dictionary(obj, dict, &install) < 0) goto error;
@@ -10376,7 +10568,7 @@ store_instance_attr_lock_held(PyObject *obj, PyDictValues *values,
             // so that no one else will see it.
             int preparing = _PySOAC_HasOrdinaryInstanceWrites(Py_TYPE(obj));
             if (preparing) FT_ATOMIC_STORE_UINT8(values->valid, _PyDictValues_SOAC_PREPARING);
-            dict = make_dict_from_instance_attributes(keys, values);
+            dict = make_dict_from_instance_attributes(obj, keys, values);
             SoacInstanceDictInstall install = {0};
             if (dict == NULL ||
                 soac_prepare_private_dictionary(obj, dict, &install) < 0) goto private_error;
@@ -10388,7 +10580,9 @@ store_instance_attr_lock_held(PyObject *obj, PyDictValues *values,
             /* The exact native write is allowed inside this private install;
              * no external attachment can consume the still-installing policy.
              * Header discovery/escape is forbidden throughout this interval. */
-            if (install.policy != NULL) install.policy->mutating = 0;
+            if (install.policy != NULL) {
+                soac_policy_set_mutating(install.dictionary, install.policy, 0);
+            }
             if (setitem_for_attribute_lock_held(dict, name, value) < 0) goto private_error;
             FT_ATOMIC_STORE_PTR_RELEASE(_PyObject_ManagedDictPointer(obj)->dict, dict);
             /* A successful native split->combined write may already have
@@ -10424,8 +10618,7 @@ private_error:
         return _PyObject_StoreInstanceAttribute(obj, name, value);
     }
     if (soac_check_inline_preparing(obj) < 0) return -1;
-    if (_PySOAC_HasOrdinaryInstanceWrites(Py_TYPE(obj)) &&
-        _PySOAC_CheckInlineInstanceWrite(obj, name, value) < 0) return -1;
+    if (_PySOAC_CheckInlineInstanceWrite(obj, name, value) < 0) return -1;
     /* The selected native callback is non-allocating on its successful Rust
      * path. Revalidate nevertheless: a native callback may materialize or
      * replace storage, and a detached valid=0 buffer must never be revived. */
@@ -10994,7 +11187,8 @@ PyObject_ClearManagedDict(PyObject *obj)
     // by the GC and therefore known to have no references.
     PyDictObject *managed = _PyObject_GetManagedDict(obj);
     if (managed != NULL && _PyDict_HasSoacPolicy(managed)) {
-        soac_policy(managed)->baseline_embedded = 0;
+        SoacDictPolicy *policy = soac_policy(managed);
+        if (!policy->direct) policy->baseline_embedded = 0;
     }
     if (Py_TYPE(obj)->tp_flags & Py_TPFLAGS_INLINE_VALUES) {
         PyDictObject *dict = _PyObject_GetManagedDict(obj);
@@ -11043,7 +11237,8 @@ _PyDict_DetachFromObject(PyDictObject *mp, PyObject *obj)
     ASSERT_WORLD_STOPPED_OR_OBJ_LOCKED(obj);
 
     if (_PyDict_HasSoacPolicy(mp)) {
-        soac_policy(mp)->baseline_embedded = 0;
+        SoacDictPolicy *policy = soac_policy(mp);
+        if (!policy->direct) policy->baseline_embedded = 0;
     }
     return detach_dict_from_object(mp, obj);
 }
@@ -11151,7 +11346,7 @@ ensure_managed_dict(PyObject *obj)
                 goto done;
             }
 #endif
-            dict = (PyDictObject *)new_dict_with_shared_keys(CACHED_KEYS(tp));
+            dict = (PyDictObject *)new_empty_dict_for_instance(obj, CACHED_KEYS(tp));
             SoacInstanceDictInstall install = {0};
             if (dict != NULL && soac_prepare_private_dictionary(obj, dict, &install) < 0) {
                 soac_close_preserving_error((PyObject *)dict);
@@ -11199,10 +11394,10 @@ ensure_nonmanaged_dict(PyObject *obj, PyObject **dictptr)
         }
         else if (_PyType_HasFeature(tp, Py_TPFLAGS_HEAPTYPE) && (cached = CACHED_KEYS(tp))) {
             assert(!_PyType_HasFeature(tp, Py_TPFLAGS_INLINE_VALUES));
-            dict = new_dict_with_shared_keys(cached);
+            dict = new_empty_dict_for_instance(obj, cached);
         }
         else {
-            dict = PyDict_New();
+            dict = new_empty_dict_for_instance(obj, NULL);
         }
         SoacInstanceDictInstall install = {0};
         if (dict != NULL && soac_prepare_private_dictionary(obj, (PyDictObject *)dict, &install) < 0) {
