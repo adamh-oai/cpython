@@ -1976,6 +1976,45 @@ clear_thread_frame(PyThreadState *tstate, _PyInterpreterFrame * frame)
     _PyThreadState_PopFrame(tstate, frame);
 }
 
+static void
+clear_gen_frame(PyThreadState *tstate, _PyInterpreterFrame * frame)
+{
+    assert(frame->owner == FRAME_OWNED_BY_GENERATOR);
+    PyGenObject *gen = _PyGen_GetGeneratorFromFrame(frame);
+    FT_ATOMIC_STORE_INT8_RELEASE(gen->gi_frame_state, FRAME_CLEARED);
+    assert(tstate->exc_info == &gen->gi_exc_state);
+    tstate->exc_info = gen->gi_exc_state.previous_item;
+    gen->gi_exc_state.previous_item = NULL;
+    assert(frame->frame_obj == NULL || frame->frame_obj->f_frame == frame);
+    frame->previous = NULL;
+    _PyFrame_ClearExceptCode(frame);
+    _PyErr_ClearExcState(&gen->gi_exc_state);
+    // gh-143939: There must not be any escaping calls between setting
+    // the generator return kind and returning from _PyEval_EvalFrame.
+    ((_PyThreadStateImpl *)tstate)->generator_return_kind = GENERATOR_RETURN;
+}
+
+void
+_PyEval_FrameClearAndPop(PyThreadState *tstate, _PyInterpreterFrame * frame)
+{
+    // Update last_profiled_frame for remote profiler frame caching.
+    // By this point, tstate->current_frame is already set to the parent frame.
+    // Only update if we're popping the exact frame that was last profiled.
+    // This avoids corrupting the cache when transient frames (called and returned
+    // between profiler samples) update last_profiled_frame to addresses the
+    // profiler never saw.
+    if (tstate->last_profiled_frame != NULL && tstate->last_profiled_frame == frame) {
+        tstate->last_profiled_frame = tstate->current_frame;
+    }
+
+    if (frame->owner == FRAME_OWNED_BY_THREAD) {
+        clear_thread_frame(tstate, frame);
+    }
+    else {
+        clear_gen_frame(tstate, frame);
+    }
+}
+
 /* Consumes references to func, locals and all the args */
 static _PyInterpreterFrame *
 eval_frame_push_and_init(PyThreadState *tstate, _PyStackRef func,
