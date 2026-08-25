@@ -574,6 +574,7 @@ NON_ESCAPING_FUNCTIONS = (
     "_PySOAC_DataclassIsBridgeImplementation",
     "_PySOAC_UsesObjectSlotPolicy",  # immutable native catalog query; no effects
     "_PySOAC_HasOrdinaryInstanceWrites",  # actual-MRO metadata query; no effects
+    "_PyObject_HasTypeStateSlot",  # layout-bit read; no allocation or error path
     "PyCell_GetRef",
     "PyCell_New",
     "PyCell_SwapTakeRef",
