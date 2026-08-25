@@ -3928,6 +3928,7 @@ static PyMethodDef module_functions[] = {
     {"dict_new_soac_type", dict_new_soac_type, METH_VARARGS},
     {"dict_new_soac_ordinary_type", dict_new_soac_ordinary_type, METH_VARARGS},
     {"dict_new_soac_type_state_type", dict_new_soac_type_state_type, METH_VARARGS},
+    {"slot_new_soac_type_state_type", slot_new_soac_type_state_type, METH_VARARGS},
     {"get_soac_type_state_info", get_soac_type_state_info, METH_O},
     {"capture_soac_type_state_allocation", capture_soac_type_state_allocation, METH_VARARGS},
     {"check_soac_type_state_reftracer", check_soac_type_state_reftracer, METH_O},

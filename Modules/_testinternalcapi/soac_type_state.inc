@@ -131,6 +131,122 @@ soac_test_type_state_bind(PyObject *owner, PyObject *actual_type)
         actual_type, owner, soac_test_type_state_factory);
 }
 
+static int
+soac_test_slot_state_factory(PyObject *owner, PyObject *actual_type, PyTypeState **out)
+{
+    *out = NULL;
+    PyObject *fields = PyTuple_GET_ITEM(owner, 0);
+    Py_ssize_t count = PyTuple_GET_SIZE(fields);
+    long corruption = PyLong_AsLong(PyTuple_GET_ITEM(owner, 2));
+    if (corruption == -1 && PyErr_Occurred()) return -1;
+    if ((size_t)count > SIZE_MAX / sizeof(PyTypeStateSlotSpecV1)) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    PyTypeStateSlotSpecV1 *rows = PyMem_Calloc((size_t)count, sizeof(*rows));
+    if (rows == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    for (Py_ssize_t i = 0; i < count; ++i) {
+        Py_ssize_t offset;
+        if (PyType_GetSoacObjectSlotOffset(actual_type, owner, i, &offset) != 1) {
+            PyMem_Free(rows);
+            if (!PyErr_Occurred()) PyErr_SetString(PyExc_TypeError, "slot fixture lost its actual native declaration");
+            return -1;
+        }
+        rows[i] = (PyTypeStateSlotSpecV1){
+            .expected_class_owner = owner, .field_index = i, .offset = offset,
+            .canonical_name = PyTuple_GET_ITEM(fields, i), .rule_owner = owner,
+            .validate = soac_test_ordinary_field,
+        };
+    }
+    if (corruption == 2) rows[0].expected_class_owner = Py_None;
+    if (corruption == 3) rows[0].offset = count > 1 ? rows[1].offset : rows[0].offset + sizeof(PyObject *);
+    PyTypeStateSpecV1 spec = {
+        .abi_version = Py_TYPE_STATE_ABI_V1, .struct_size = sizeof(spec),
+        .slot_count = count - (corruption == 1), .slots = rows,
+    };
+    *out = PyTypeState_NewV1(actual_type, &spec, sizeof(spec));
+    PyMem_Free(rows);
+    return *out == NULL ? -1 : 0;
+}
+
+static int
+soac_test_slot_state_bind(PyObject *owner, PyObject *actual_type)
+{
+    return PyType_SetSoacStorageStateFactoryV1(actual_type, owner, soac_test_slot_state_factory);
+}
+
+static int
+soac_test_slot_state_final(PyObject *owner, PyObject *type, const PySoacTypeContractSpecV4 *contract)
+{
+    PySoacTypeConstructionInfoV1 info;
+    if (PyType_GetSoacConstructionInfoV1(type, &info, sizeof(info)) != 1 ||
+        info.phase != Py_SOAC_TYPE_STATE_ADMITTING || info.owner != owner ||
+        contract->dictionary_mode != Py_SOAC_INSTANCE_DICT_NONE ||
+        contract->fields != PyTuple_GET_ITEM(owner, 1) ||
+        contract->protected_names != PyTuple_GET_ITEM(owner, 1) ||
+        contract->final_methods != PyTuple_GET_ITEM(owner, 1) ||
+        contract->object_slot_fields != PyTuple_GET_ITEM(owner, 0) ||
+        contract->check_instance_write != soac_test_ordinary_inline_write ||
+        contract->new_instance_dict != NULL || contract->prepare_instance_dictionary_policy != NULL) {
+        if (!PyErr_Occurred()) PyErr_SetString(PyExc_TypeError, "slot fixture final policy identity changed");
+        return -1;
+    }
+    return 0;
+}
+
+static PyObject *
+slot_new_soac_type_state_type(PyObject *self, PyObject *args)
+{
+    PyObject *name, *bases, *namespace, *fields, *namespace_function;
+    int corruption = 0;
+    if (!PyArg_ParseTuple(args, "OOOOO|i:slot_new_soac_type_state_type",
+                         &name, &bases, &namespace, &fields, &namespace_function, &corruption)) return NULL;
+    if (!PyTuple_CheckExact(fields) || PyTuple_GET_SIZE(fields) == 0 || corruption < 0 || corruption > 3) {
+        PyErr_SetString(PyExc_TypeError, "slot fixture requires nonempty actual slot names and a supported corruption mode");
+        return NULL;
+    }
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(fields); ++i) {
+        if (!PyUnicode_CheckExact(PyTuple_GET_ITEM(fields, i))) {
+            PyErr_SetString(PyExc_TypeError, "slot fixture names must be exact strings");
+            return NULL;
+        }
+    }
+    PyObject *empty = PyTuple_New(0), *keywords = PyDict_New(), *mode = PyLong_FromLong(corruption);
+    PyObject *owner = empty == NULL || mode == NULL ? NULL : PyTuple_Pack(3, fields, empty, mode);
+    Py_XDECREF(mode);
+    if (empty == NULL || keywords == NULL || owner == NULL) {
+        Py_XDECREF(empty);
+        Py_XDECREF(keywords);
+        Py_XDECREF(owner);
+        return NULL;
+    }
+    PySoacTypeConstructionSpec construction = {
+        .abi_version = Py_SOAC_TYPE_CONTRACT_ABI, .struct_size = sizeof(construction),
+        .construction_mode = Py_SOAC_TYPE_CONSTRUCT_PENDING,
+        .owner = owner, .namespace_function = namespace_function,
+        .name = name, .bases = bases, .namespace_dict = namespace, .keywords = keywords,
+        .bind_type = soac_test_slot_state_bind, .commit_final = soac_test_slot_state_final,
+    };
+    PyObject *handle = PyType_NewSoacConstructionHandle(&construction);
+    PyObject *type = handle == NULL ? NULL : PyType_FromSoacConstructionHandle(handle, namespace_function);
+    PySoacTypeContractSpecV4 contract = {
+        .dictionary_mode = Py_SOAC_INSTANCE_DICT_NONE,
+        .fields = empty, .protected_names = empty, .final_methods = empty,
+        .object_slot_fields = fields, .check_instance_write = soac_test_ordinary_inline_write,
+    };
+    if (type != NULL && PyType_AdmitSoacPendingV1(type, owner, handle, &contract, sizeof(contract),
+                                               soac_test_slot_state_final) < 0) Py_CLEAR(type);
+    if (type != NULL && PyType_SealSoacContract(type, owner) < 0) Py_CLEAR(type);
+    Py_XDECREF(handle);
+    Py_DECREF(owner);
+    Py_DECREF(keywords);
+    Py_DECREF(empty);
+    return type;
+}
+
 static PyObject *
 get_soac_type_state_info(PyObject *self, PyObject *object)
 {
@@ -169,12 +285,13 @@ get_soac_type_state_info(PyObject *self, PyObject *object)
         Py_XDECREF(offset);
         return NULL;
     }
-    return Py_BuildValue("{s:O,s:n,s:N,s:N,s:N,s:s,s:O}",
+    return Py_BuildValue("{s:O,s:n,s:N,s:N,s:N,s:s,s:O,s:n}",
         "has_slot", has_slot ? Py_True : Py_False,
         "extra_slot_bytes", has_slot ? (Py_ssize_t)sizeof(PyTypeState *) : 0,
         "tail_offset", offset, "state_id", state_id,
         "dictionary_state_id", dictionary_id, "storage_mode", mode,
-        "terminal", terminal ? Py_True : Py_False);
+        "terminal", terminal ? Py_True : Py_False,
+        "native_slot_count", state == NULL ? 0 : state->slot_count);
 }
 
 /* This bounded allocator observer records requests made to the actual OBJ
@@ -471,7 +588,16 @@ soac_type_state_write_member(PyObject *self, PyObject *args)
         view.offset = (char *)_PyObject_InlineValues(object) - (char *)object +
                       offsetof(PyDictValues, soac_allocated_capacity);
     }
-    else if (strcmp(target, "ordinary_slot") == 0) {
+    else if (strcmp(target, "slot_as_integer") == 0) {
+        const PyMemberDef *member = Py_TYPE(object)->tp_members;
+        if (member == NULL || member->name == NULL || member->type != Py_T_OBJECT_EX) {
+            PyErr_SetString(PyExc_TypeError, "member probe has no actual object member");
+            return NULL;
+        }
+        view = *member;
+        view.type = Py_T_LONG;
+    }
+    else if (strcmp(target, "ordinary_slot") == 0 || strcmp(target, "left") == 0 || strcmp(target, "right") == 0) {
         const PyMemberDef *member = Py_TYPE(object)->tp_members;
         while (member != NULL && member->name != NULL && strcmp(member->name, target) != 0) ++member;
         if (member == NULL || member->name == NULL) {
