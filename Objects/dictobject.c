@@ -4647,6 +4647,13 @@ _PyDict_LoadGlobalStackRef(PyDictObject *globals, PyDictObject *builtins, PyObje
 PyObject *
 _PyDict_LoadBuiltinsFromGlobals(PyObject *globals)
 {
+    return _PyDict_LoadBuiltinsFromGlobalsWithFallback(globals, NULL);
+}
+
+PyObject *
+_PyDict_LoadBuiltinsFromGlobalsWithFallback(PyObject *globals,
+                                           PyObject *builtins_fallback)
+{
     if (!PyDict_Check(globals)) {
         PyErr_BadInternalCall();
         return NULL;
@@ -4666,7 +4673,8 @@ _PyDict_LoadBuiltinsFromGlobals(PyObject *globals)
         return NULL;
     }
     if (PyStackRef_IsNull(ref)) {
-        return Py_NewRef(PyEval_GetBuiltins());
+        return Py_NewRef(builtins_fallback != NULL
+                         ? builtins_fallback : PyEval_GetBuiltins());
     }
     PyObject *builtins = PyStackRef_AsPyObjectBorrow(ref);
     if (PyModule_Check(builtins)) {

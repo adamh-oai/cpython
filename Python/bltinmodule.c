@@ -1073,6 +1073,12 @@ builtin_chr(PyObject *module, PyObject *i)
 }
 
 
+static PyObject *
+builtin_compile_with_context(PyObject *source, PyObject *filename,
+                             const char *mode, int flags, int dont_inherit,
+                             int optimize, PyObject *modname,
+                             int feature_version, int explicit_context);
+
 /*[clinic input]
 compile as builtin_compile
 
@@ -1105,6 +1111,17 @@ builtin_compile_impl(PyObject *module, PyObject *source, PyObject *filename,
                      const char *mode, int flags, int dont_inherit,
                      int optimize, PyObject *modname, int feature_version)
 /*[clinic end generated code: output=9a0dce1945917a86 input=ddeae1e0253459dc]*/
+{
+    return builtin_compile_with_context(source, filename, mode, flags,
+                                        dont_inherit, optimize, modname,
+                                        feature_version, 0);
+}
+
+static PyObject *
+builtin_compile_with_context(PyObject *source, PyObject *filename,
+                             const char *mode, int flags, int dont_inherit,
+                             int optimize, PyObject *modname,
+                             int feature_version, int explicit_context)
 {
     PyObject *source_copy;
     const char *str;
@@ -1143,7 +1160,7 @@ builtin_compile_impl(PyObject *module, PyObject *source, PyObject *filename,
         goto error;
     }
 
-    if (!dont_inherit) {
+    if (!dont_inherit && !explicit_context) {
         PyEval_MergeCompilerFlags(&cf);
     }
 
@@ -1168,6 +1185,13 @@ builtin_compile_impl(PyObject *module, PyObject *source, PyObject *filename,
         else
             msg = "compile() mode must be 'exec', 'eval' or 'single'";
         PyErr_SetString(PyExc_ValueError, msg);
+        goto error;
+    }
+
+    if (!dont_inherit && explicit_context) {
+        PyErr_SetString(PyExc_NotImplementedError,
+                        "SOAC contextual compile requires dont_inherit=True; "
+                        "inherited compilation needs an authenticated dynamic-code protocol");
         goto error;
     }
 
@@ -1280,6 +1304,33 @@ builtin_divmod_impl(PyObject *module, PyObject *x, PyObject *y)
 }
 
 
+/* Explicit dynamic globals still use the normal dictionary write path. A
+ * missing __builtins__ comes from the originating function's captured mapping,
+ * never an unrelated native caller or a later module-dictionary replacement. */
+static int
+builtin_ensure_builtins(PyThreadState *tstate, PyObject *globals,
+                        PyObject *actual_builtins)
+{
+    if (actual_builtins == NULL) {
+        return _PyEval_EnsureBuiltins(tstate, globals, NULL);
+    }
+    assert(PyDict_Check(globals));
+    PyObject *builtins;
+    int found = PyDict_GetItemRef(globals, &_Py_ID(__builtins__), &builtins);
+    if (found < 0) {
+        return -1;
+    }
+    if (found) {
+        Py_DECREF(builtins);
+        return 0;
+    }
+    return PyDict_SetItem(globals, &_Py_ID(__builtins__), actual_builtins);
+}
+
+static PyObject *
+builtin_eval_with_context(PyObject *source, PyObject *globals, PyObject *locals,
+                          PyObject *actual_builtins);
+
 /*[clinic input]
 eval as builtin_eval
 
@@ -1302,6 +1353,13 @@ builtin_eval_impl(PyObject *module, PyObject *source, PyObject *globals,
                   PyObject *locals)
 /*[clinic end generated code: output=0a0824aa70093116 input=7c7bce5299a89062]*/
 {
+    return builtin_eval_with_context(source, globals, locals, NULL);
+}
+
+static PyObject *
+builtin_eval_with_context(PyObject *source, PyObject *globals, PyObject *locals,
+                          PyObject *actual_builtins)
+{
     PyThreadState *tstate = _PyThreadState_GET();
     PyObject *result = NULL, *source_copy;
     const char *str;
@@ -1314,6 +1372,12 @@ builtin_eval_impl(PyObject *module, PyObject *source, PyObject *globals,
         PyErr_SetString(PyExc_TypeError, PyMapping_Check(globals) ?
             "globals must be a real dict; try eval(expr, {}, mapping)"
             : "globals must be a dict");
+        return NULL;
+    }
+
+    if (actual_builtins != NULL && globals == Py_None) {
+        PyErr_SetString(PyExc_NotImplementedError,
+                        "SOAC contextual eval requires explicit globals");
         return NULL;
     }
 
@@ -1355,7 +1419,22 @@ builtin_eval_impl(PyObject *module, PyObject *source, PyObject *globals,
         locals = Py_NewRef(globals);
     }
 
-    if (_PyEval_EnsureBuiltins(tstate, globals, NULL) < 0) {
+    if (actual_builtins != NULL && !PyCode_Check(source)) {
+        /* Preserve source-kind errors, but do not publish builtins into an
+         * explicit target for a dynamic-source protocol we cannot execute. */
+        PyCompilerFlags cf = _PyCompilerFlags_INIT;
+        cf.cf_flags = PyCF_SOURCE_IS_UTF8;
+        str = _Py_SourceAsString(source, "eval", "string, bytes or code", &cf, &source_copy);
+        if (str != NULL) {
+            PyErr_SetString(PyExc_NotImplementedError,
+                            "SOAC contextual eval requires a code object; "
+                            "inherited compilation needs an authenticated dynamic-code protocol");
+            Py_XDECREF(source_copy);
+        }
+        goto error;
+    }
+
+    if (builtin_ensure_builtins(tstate, globals, actual_builtins) < 0) {
         goto error;
     }
 
@@ -1369,7 +1448,8 @@ builtin_eval_impl(PyObject *module, PyObject *source, PyObject *globals,
                 "code object passed to eval() may not contain free variables");
             goto error;
         }
-        result = PyEval_EvalCode(source, globals, locals);
+        result = _PyEval_EvalCodeWithBuiltinsFallback(
+            source, globals, locals, actual_builtins);
     }
     else {
         PyCompilerFlags cf = _PyCompilerFlags_INIT;
@@ -1401,6 +1481,10 @@ builtin_eval_impl(PyObject *module, PyObject *source, PyObject *globals,
     return result;
 }
 
+static PyObject *
+builtin_exec_with_context(PyObject *source, PyObject *globals, PyObject *locals,
+                          PyObject *closure, PyObject *actual_builtins);
+
 /*[clinic input]
 exec as builtin_exec
 
@@ -1427,8 +1511,28 @@ builtin_exec_impl(PyObject *module, PyObject *source, PyObject *globals,
                   PyObject *locals, PyObject *closure)
 /*[clinic end generated code: output=7579eb4e7646743d input=25e989b6d87a3a21]*/
 {
+    return builtin_exec_with_context(source, globals, locals, closure, NULL);
+}
+
+static PyObject *
+builtin_exec_with_context(PyObject *source, PyObject *globals, PyObject *locals,
+                          PyObject *closure, PyObject *actual_builtins)
+{
     PyThreadState *tstate = _PyThreadState_GET();
     PyObject *v;
+
+    if (actual_builtins != NULL && globals == Py_None) {
+        if (locals != Py_None && !PyMapping_Check(locals)) {
+            PyErr_Format(PyExc_TypeError,
+                         "locals must be a mapping or None, not %.100s",
+                         Py_TYPE(locals)->tp_name);
+        }
+        else {
+            PyErr_SetString(PyExc_NotImplementedError,
+                            "SOAC contextual exec requires explicit globals");
+        }
+        return NULL;
+    }
 
     int fromframe = 0;
     if (globals != Py_None) {
@@ -1479,7 +1583,27 @@ builtin_exec_impl(PyObject *module, PyObject *source, PyObject *globals,
         goto error;
     }
 
-    if (_PyEval_EnsureBuiltins(tstate, globals, NULL) < 0) {
+    if (actual_builtins != NULL && !PyCode_Check(source)) {
+        if (closure != NULL && closure != Py_None) {
+            PyErr_SetString(PyExc_TypeError,
+                            "closure can only be used when source is a code object");
+            goto error;
+        }
+        PyObject *source_copy;
+        PyCompilerFlags cf = _PyCompilerFlags_INIT;
+        cf.cf_flags = PyCF_SOURCE_IS_UTF8;
+        const char *str = _Py_SourceAsString(
+            source, "exec", "string, bytes or code", &cf, &source_copy);
+        if (str != NULL) {
+            PyErr_SetString(PyExc_NotImplementedError,
+                            "SOAC contextual exec requires a code object; "
+                            "inherited compilation needs an authenticated dynamic-code protocol");
+            Py_XDECREF(source_copy);
+        }
+        goto error;
+    }
+
+    if (builtin_ensure_builtins(tstate, globals, actual_builtins) < 0) {
         goto error;
     }
 
@@ -1522,14 +1646,15 @@ builtin_exec_impl(PyObject *module, PyObject *source, PyObject *globals,
         }
 
         if (!closure) {
-            v = PyEval_EvalCode(source, globals, locals);
+            v = _PyEval_EvalCodeWithBuiltinsFallback(
+                source, globals, locals, actual_builtins);
         } else {
-            v = PyEval_EvalCodeEx(source, globals, locals,
+            v = _PyEval_EvalCodeExWithBuiltinsFallback(source, globals, locals,
                 NULL, 0,
                 NULL, 0,
                 NULL, 0,
                 NULL,
-                closure);
+                closure, actual_builtins);
         }
     }
     else {
@@ -3776,7 +3901,9 @@ enum soac_context_builtin {
     SOAC_CONTEXT_GLOBALS,
     SOAC_CONTEXT_LOCALS,
     SOAC_CONTEXT_DIR,
-    SOAC_CONTEXT_DYNAMIC,
+    SOAC_CONTEXT_COMPILE,
+    SOAC_CONTEXT_EVAL,
+    SOAC_CONTEXT_EXEC,
 };
 
 static enum soac_context_builtin
@@ -3808,10 +3935,14 @@ soac_classify_context_builtin(PyObject *callable)
     if (!canonical) {
         return SOAC_CONTEXT_NONE;
     }
-    if (implementation == _PyCFunction_CAST(builtin_compile) ||
-        implementation == _PyCFunction_CAST(builtin_eval) ||
-        implementation == _PyCFunction_CAST(builtin_exec)) {
-        return SOAC_CONTEXT_DYNAMIC;
+    if (implementation == _PyCFunction_CAST(builtin_compile)) {
+        return SOAC_CONTEXT_COMPILE;
+    }
+    if (implementation == _PyCFunction_CAST(builtin_eval)) {
+        return SOAC_CONTEXT_EVAL;
+    }
+    if (implementation == _PyCFunction_CAST(builtin_exec)) {
+        return SOAC_CONTEXT_EXEC;
     }
     if (implementation == builtin_dir) {
         return SOAC_CONTEXT_DIR;
@@ -3820,15 +3951,148 @@ soac_classify_context_builtin(PyObject *callable)
            ? SOAC_CONTEXT_GLOBALS : SOAC_CONTEXT_LOCALS;
 }
 
+/* Both explicit-context call forms use one native binder. In particular,
+ * compile's filename/flags/dont_inherit conversions happen exactly once, in
+ * the same order as its Clinic wrapper, before the explicit-context policy
+ * reaches the common implementation. No Python argument is probed and then
+ * rebound by a second call to the builtin. */
+static PyObject *
+soac_call_context_dynamic_impl(enum soac_context_builtin kind,
+                               PyObject *const *args, Py_ssize_t nargs,
+                               PyObject *kwnames, PyObject *actual_builtins)
+{
+    static const char * const compile_keywords[] = {
+        "source", "filename", "mode", "flags", "dont_inherit", "optimize",
+        "module", "_feature_version", NULL
+    };
+    static const char * const eval_keywords[] = {
+        "", "globals", "locals", NULL
+    };
+    static const char * const exec_keywords[] = {
+        "", "globals", "locals", "closure", NULL
+    };
+    static _PyArg_Parser compile_parser = {
+        .keywords = compile_keywords, .fname = "compile",
+    };
+    static _PyArg_Parser eval_parser = {
+        .keywords = eval_keywords, .fname = "eval",
+    };
+    static _PyArg_Parser exec_parser = {
+        .keywords = exec_keywords, .fname = "exec",
+    };
+    _PyArg_Parser *parser;
+    int minpos, maxpos;
+    if (kind == SOAC_CONTEXT_COMPILE) {
+        parser = &compile_parser;
+        minpos = 3;
+        maxpos = 6;
+    }
+    else {
+        assert(kind == SOAC_CONTEXT_EVAL || kind == SOAC_CONTEXT_EXEC);
+        parser = kind == SOAC_CONTEXT_EVAL ? &eval_parser : &exec_parser;
+        minpos = 1;
+        maxpos = 3;
+    }
+    PyObject *values[8] = {NULL};
+    PyObject *const *bound = _PyArg_UnpackKeywords(
+        args, nargs, NULL, kwnames, parser, minpos, maxpos, 0, 0, values);
+    if (bound == NULL) {
+        return NULL;
+    }
+    if (bound != values) {
+        /* The no-keyword fast path returns the original positional vector. */
+        for (Py_ssize_t i = 0; i < nargs; i++) {
+            values[i] = bound[i];
+        }
+    }
+
+    if (kind == SOAC_CONTEXT_COMPILE) {
+        PyObject *result = NULL;
+        PyObject *filename = NULL;
+        const char *mode;
+        Py_ssize_t mode_length;
+        int flags = 0, dont_inherit = 0, optimize = -1, feature_version = -1;
+        PyObject *modname = values[6] != NULL ? values[6] : Py_None;
+        if (!PyUnicode_FSDecoder(values[1], &filename)) {
+            goto compile_done;
+        }
+        if (!PyUnicode_Check(values[2])) {
+            _PyArg_BadArgument("compile", "argument 'mode'", "str", values[2]);
+            goto compile_done;
+        }
+        mode = PyUnicode_AsUTF8AndSize(values[2], &mode_length);
+        if (mode == NULL) {
+            goto compile_done;
+        }
+        if (strlen(mode) != (size_t)mode_length) {
+            PyErr_SetString(PyExc_ValueError, "embedded null character");
+            goto compile_done;
+        }
+        if (values[3] != NULL) {
+            flags = PyLong_AsInt(values[3]);
+            if (flags == -1 && PyErr_Occurred()) {
+                goto compile_done;
+            }
+        }
+        if (values[4] != NULL) {
+            dont_inherit = PyObject_IsTrue(values[4]);
+            if (dont_inherit < 0) {
+                goto compile_done;
+            }
+        }
+        if (values[5] != NULL) {
+            optimize = PyLong_AsInt(values[5]);
+            if (optimize == -1 && PyErr_Occurred()) {
+                goto compile_done;
+            }
+        }
+        if (values[7] != NULL) {
+            feature_version = PyLong_AsInt(values[7]);
+            if (feature_version == -1 && PyErr_Occurred()) {
+                goto compile_done;
+            }
+        }
+        result = builtin_compile_with_context(
+            values[0], filename, mode, flags, dont_inherit, optimize,
+            modname, feature_version, 1);
+      compile_done:
+        Py_XDECREF(filename);
+        return result;
+    }
+
+    if (actual_builtins == NULL) {
+        PyErr_BadInternalCall();
+        return NULL;
+    }
+    PyObject *globals = values[1] != NULL ? values[1] : Py_None;
+    PyObject *locals = values[2] != NULL ? values[2] : Py_None;
+    if (kind == SOAC_CONTEXT_EVAL) {
+        return builtin_eval_with_context(values[0], globals, locals,
+                                         actual_builtins);
+    }
+    return builtin_exec_with_context(values[0], globals, locals, values[3],
+                                     actual_builtins);
+}
+
+static PyObject *
+soac_call_context_dynamic(PyObject *callable, enum soac_context_builtin kind,
+                          PyObject *const *args, Py_ssize_t nargs,
+                          PyObject *kwnames, PyObject *actual_builtins)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    if (_Py_EnterRecursiveCallTstate(tstate, " while calling a Python object")) {
+        return NULL;
+    }
+    PyObject *result = soac_call_context_dynamic_impl(
+        kind, args, nargs, kwnames, actual_builtins);
+    _Py_LeaveRecursiveCallTstate(tstate);
+    return _Py_CheckFunctionResult(tstate, callable, result, NULL);
+}
+
 static PyObject *
 soac_call_context_builtin(enum soac_context_builtin kind,
                           PyObject *actual_globals, PyObject *actual_locals)
 {
-    if (kind == SOAC_CONTEXT_DYNAMIC) {
-        PyErr_SetString(PyExc_NotImplementedError,
-                        "SOAC contextual compile/eval/exec requires an explicit dynamic-code protocol");
-        return NULL;
-    }
     if (kind == SOAC_CONTEXT_GLOBALS) {
         if (actual_globals == NULL || !PyDict_Check(actual_globals)) {
             PyErr_SetString(PyExc_TypeError,
@@ -3871,7 +4135,8 @@ soac_call_context_builtin(enum soac_context_builtin kind,
 PyObject *
 PySoac_VectorcallWithContext(PyObject *callable, PyObject *const *args,
                              size_t nargsf, PyObject *kwnames,
-                             PyObject *actual_globals, PyObject *actual_locals)
+                             PyObject *actual_globals, PyObject *actual_locals,
+                             PyObject *actual_builtins)
 {
     if (PyErr_Occurred()) {
         return NULL;
@@ -3883,10 +4148,15 @@ PySoac_VectorcallWithContext(PyObject *callable, PyObject *const *args,
         return NULL;
     }
     enum soac_context_builtin kind = soac_classify_context_builtin(callable);
+    if (kind == SOAC_CONTEXT_COMPILE || kind == SOAC_CONTEXT_EVAL ||
+        kind == SOAC_CONTEXT_EXEC) {
+        return soac_call_context_dynamic(callable, kind, args,
+                                         PyVectorcall_NARGS(nargsf), kwnames,
+                                         actual_builtins);
+    }
     if (kind != SOAC_CONTEXT_NONE &&
-        (kind == SOAC_CONTEXT_DYNAMIC ||
-         (PyVectorcall_NARGS(nargsf) == 0 &&
-          (kwnames == NULL || PyTuple_GET_SIZE(kwnames) == 0)))) {
+        PyVectorcall_NARGS(nargsf) == 0 &&
+        (kwnames == NULL || PyTuple_GET_SIZE(kwnames) == 0)) {
         return soac_call_context_builtin(kind, actual_globals, actual_locals);
     }
     /* Preserve normal argument errors and vars(object)/dir(object), including
@@ -3896,7 +4166,8 @@ PySoac_VectorcallWithContext(PyObject *callable, PyObject *const *args,
 
 PyObject *
 PySoac_ObjectCallWithContext(PyObject *callable, PyObject *args, PyObject *kwargs,
-                             PyObject *actual_globals, PyObject *actual_locals)
+                             PyObject *actual_globals, PyObject *actual_locals,
+                             PyObject *actual_builtins)
 {
     if (PyErr_Occurred()) {
         return NULL;
@@ -3908,10 +4179,29 @@ PySoac_ObjectCallWithContext(PyObject *callable, PyObject *args, PyObject *kwarg
         return NULL;
     }
     enum soac_context_builtin kind = soac_classify_context_builtin(callable);
+    if (kind == SOAC_CONTEXT_COMPILE || kind == SOAC_CONTEXT_EVAL ||
+        kind == SOAC_CONTEXT_EXEC) {
+        Py_ssize_t nargs = PyTuple_GET_SIZE(args);
+        PyObject *const *stack = _PyTuple_ITEMS(args);
+        if (kwargs == NULL || PyDict_GET_SIZE(kwargs) == 0) {
+            return soac_call_context_dynamic(callable, kind, stack, nargs,
+                                             NULL, actual_builtins);
+        }
+        PyObject *kwnames;
+        stack = _PyStack_UnpackDict(_PyThreadState_GET(), stack, nargs,
+                                    kwargs, &kwnames);
+        if (stack == NULL) {
+            return NULL;
+        }
+        PyObject *result = soac_call_context_dynamic(
+            callable, kind, stack, nargs, kwnames, actual_builtins);
+        _PyStack_UnpackDict_Free(stack, nargs, kwnames);
+        return _Py_CheckFunctionResult(_PyThreadState_GET(), callable,
+                                       result, NULL);
+    }
     if (kind != SOAC_CONTEXT_NONE &&
-        (kind == SOAC_CONTEXT_DYNAMIC ||
-         (PyTuple_GET_SIZE(args) == 0 &&
-          (kwargs == NULL || PyDict_GET_SIZE(kwargs) == 0)))) {
+        PyTuple_GET_SIZE(args) == 0 &&
+        (kwargs == NULL || PyDict_GET_SIZE(kwargs) == 0)) {
         return soac_call_context_builtin(kind, actual_globals, actual_locals);
     }
     /* Let the normal CPython call path unpack the tuple/dictionary; do not

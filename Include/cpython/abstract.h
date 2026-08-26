@@ -41,14 +41,20 @@ PyAPI_FUNC(vectorcallfunc) PyVectorcall_Function(PyObject *callable);
 /* Explicit compiler call context, never ambient thread-local authority.
  * Native globals()/locals()/vars()/dir() identities use the supplied mappings
  * for valid zero-argument forms; dir() returns sorted local-namespace keys.
- * Other supported calls keep vectorcall semantics; dynamic compile/eval/exec
- * need a separate authenticated protocol. */
+ * compile(..., dont_inherit=True) and exec/eval(code, explicit_globals) use
+ * ordinary native argument binding and execution. The latter require a
+ * non-NULL borrowed actual_builtins from the originating function, used only
+ * when explicit_globals lacks __builtins__. All supplied context objects must
+ * remain alive until the call returns. Inherited dynamic compilation needs a
+ * separate authenticated provenance protocol; these APIs do not grant code
+ * authority. Other calls keep their ordinary call semantics. */
 PyAPI_FUNC(PyObject *) PySoac_VectorcallWithContext(
     PyObject *callable, PyObject *const *args, size_t nargsf,
-    PyObject *kwnames, PyObject *actual_globals, PyObject *actual_locals);
+    PyObject *kwnames, PyObject *actual_globals, PyObject *actual_locals,
+    PyObject *actual_builtins);
 PyAPI_FUNC(PyObject *) PySoac_ObjectCallWithContext(
     PyObject *callable, PyObject *args, PyObject *kwargs,
-    PyObject *actual_globals, PyObject *actual_locals);
+    PyObject *actual_globals, PyObject *actual_locals, PyObject *actual_builtins);
 
 // Backwards compatibility aliases (PEP 590) for API that was provisional
 // in Python 3.8

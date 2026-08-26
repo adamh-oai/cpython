@@ -647,11 +647,20 @@ static int do_raise(PyThreadState *tstate, PyObject *exc, PyObject *cause);
 PyObject *
 PyEval_EvalCode(PyObject *co, PyObject *globals, PyObject *locals)
 {
+    return _PyEval_EvalCodeWithBuiltinsFallback(co, globals, locals, NULL);
+}
+
+PyObject *
+_PyEval_EvalCodeWithBuiltinsFallback(PyObject *co, PyObject *globals,
+                                    PyObject *locals,
+                                    PyObject *builtins_fallback)
+{
     PyThreadState *tstate = _PyThreadState_GET();
     if (locals == NULL) {
         locals = globals;
     }
-    PyObject *builtins = _PyDict_LoadBuiltinsFromGlobals(globals);
+    PyObject *builtins = _PyDict_LoadBuiltinsFromGlobalsWithFallback(
+        globals, builtins_fallback);
     if (builtins == NULL) {
         return NULL;
     }
@@ -2323,13 +2332,26 @@ PyEval_EvalCodeEx(PyObject *_co, PyObject *globals, PyObject *locals,
                   PyObject *const *defs, int defcount,
                   PyObject *kwdefs, PyObject *closure)
 {
+    return _PyEval_EvalCodeExWithBuiltinsFallback(
+        _co, globals, locals, args, argcount, kws, kwcount, defs, defcount,
+        kwdefs, closure, NULL);
+}
+
+PyObject *
+_PyEval_EvalCodeExWithBuiltinsFallback(
+    PyObject *_co, PyObject *globals, PyObject *locals,
+    PyObject *const *args, int argcount, PyObject *const *kws, int kwcount,
+    PyObject *const *defs, int defcount, PyObject *kwdefs, PyObject *closure,
+    PyObject *builtins_fallback)
+{
     PyThreadState *tstate = _PyThreadState_GET();
     PyObject *res = NULL;
     PyObject *defaults = PyTuple_FromArray(defs, defcount);
     if (defaults == NULL) {
         return NULL;
     }
-    PyObject *builtins = _PyDict_LoadBuiltinsFromGlobals(globals);
+    PyObject *builtins = _PyDict_LoadBuiltinsFromGlobalsWithFallback(
+        globals, builtins_fallback);
     if (builtins == NULL) {
         Py_DECREF(defaults);
         return NULL;

@@ -146,6 +146,18 @@ _PyEval_Vector(PyThreadState *tstate,
             PyObject* const* args, size_t argcount,
             PyObject *kwnames);
 
+/* Existing EvalCode execution with an explicit borrowed builtins fallback.
+ * Resolve globals' current __builtins__ at execution entry, after the builtin
+ * audit callback. NULL preserves the ordinary public API's caller fallback. */
+extern PyObject *_PyEval_EvalCodeWithBuiltinsFallback(
+    PyObject *co, PyObject *globals, PyObject *locals,
+    PyObject *builtins_fallback);
+extern PyObject *_PyEval_EvalCodeExWithBuiltinsFallback(
+    PyObject *co, PyObject *globals, PyObject *locals,
+    PyObject *const *args, int argcount, PyObject *const *kws, int kwcount,
+    PyObject *const *defs, int defcount, PyObject *kwdefs, PyObject *closure,
+    PyObject *builtins_fallback);
+
 extern int _PyEval_ThreadsInitialized(void);
 extern void _PyEval_InitGIL(PyThreadState *tstate, int own_gil);
 extern void _PyEval_FiniGIL(PyInterpreterState *interp);

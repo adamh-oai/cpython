@@ -203,6 +203,10 @@ PyAPI_FUNC(void) _PyDict_LoadGlobalStackRef(PyDictObject *, PyDictObject *, PyOb
 
 // Loads the __builtins__ object from the globals dict. Returns a new reference.
 extern PyObject *_PyDict_LoadBuiltinsFromGlobals(PyObject *globals);
+/* Same lookup, with a borrowed captured fallback instead of caller-frame
+ * inference when the entry is absent. NULL retains ordinary caller behavior. */
+extern PyObject *_PyDict_LoadBuiltinsFromGlobalsWithFallback(
+    PyObject *globals, PyObject *builtins_fallback);
 
 /* Consumes references to key and value */
 PyAPI_FUNC(int) _PyDict_SetItem_Take2(PyDictObject *op, PyObject *key, PyObject *value);
