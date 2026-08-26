@@ -12930,11 +12930,6 @@ static int
 super_init_without_args(_PyInterpreterFrame *cframe, PyTypeObject **type_p,
                         PyObject **obj_p)
 {
-    if (_PyFrame_IsSoacLifetime(cframe)) {
-        PyErr_SetString(PyExc_NotImplementedError,
-                        "zero-argument super cannot inspect optimized source locals");
-        return -1;
-    }
     PyCodeObject *co = _PyFrame_GetCode(cframe);
     if (co->co_argcount == 0) {
         PyErr_SetString(PyExc_RuntimeError,

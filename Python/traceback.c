@@ -156,11 +156,6 @@ tb_get_lineno(PyObject *op)
     PyTracebackObject *tb = _PyTracebackObject_CAST(op);
     _PyInterpreterFrame* frame = tb->tb_frame->f_frame;
     assert(frame != NULL);
-    if (_PyFrame_IsSoacLifetime(frame) && tb->tb_lineno == -1) {
-        PyErr_SetString(PyExc_NotImplementedError,
-                        "optimized source traceback line is unavailable");
-        return -1;
-    }
     return PyCode_Addr2Line(_PyFrame_GetCode(frame), tb->tb_lasti);
 }
 
@@ -172,9 +167,6 @@ tb_lineno_get(PyObject *op, void *Py_UNUSED(_))
     if (lineno == -1) {
         lineno = tb_get_lineno(op);
         if (lineno < 0) {
-            if (PyErr_Occurred()) {
-                return NULL;
-            }
             Py_RETURN_NONE;
         }
     }
@@ -320,12 +312,6 @@ _PyTraceBack_FromFrame(PyObject *tb_next, PyFrameObject *frame)
 {
     assert(tb_next == NULL || PyTraceBack_Check(tb_next));
     assert(frame != NULL);
-    if (_PyFrame_IsSoacLifetime(frame->f_frame)) {
-        /* Preserve the actual frame lifetime, but never reuse a prior
-         * explicit Add site as a fabricated current execution position.
-         * Getters and formatters reject this already-supported unknown pair. */
-        return tb_create_raw((PyTracebackObject *)tb_next, frame, -1, -1);
-    }
     int addr = _PyInterpreterFrame_LASTI(frame->f_frame) * sizeof(_Py_CODEUNIT);
     return tb_create_raw((PyTracebackObject *)tb_next, frame, addr, -1);
 }
@@ -345,27 +331,6 @@ PyTraceBack_Here(PyFrameObject *frame)
     }
     PyException_SetTraceback(exc, newtb);
     Py_XDECREF(newtb);
-    PyErr_SetRaisedException(exc);
-    return 0;
-}
-
-/* No dynamic frame-position field is consulted or changed here. The
- * public lifetime API has validated both the frame and exact source site. */
-int
-_PyTraceBack_HereSoacLifetime(PyFrameObject *frame, int offset, int line)
-{
-    assert(frame->f_frame->owner == FRAME_OWNED_BY_SOAC_ACTIVE);
-    PyObject *exc = PyErr_GetRaisedException();
-    assert(PyExceptionInstance_Check(exc));
-    PyObject *tb = PyException_GetTraceback(exc);
-    PyObject *newtb = tb_create_raw((PyTracebackObject *)tb, frame, offset, line);
-    Py_XDECREF(tb);
-    if (newtb == NULL) {
-        _PyErr_ChainExceptions1(exc);
-        return -1;
-    }
-    PyException_SetTraceback(exc, newtb);
-    Py_DECREF(newtb);
     PyErr_SetRaisedException(exc);
     return 0;
 }
@@ -766,9 +731,6 @@ tb_printinternal(PyTracebackObject *tb, PyObject *f, long limit)
         int tb_lineno = tb->tb_lineno;
         if (tb_lineno == -1) {
             tb_lineno = tb_get_lineno((PyObject *)tb);
-            if (tb_lineno < 0 && PyErr_Occurred()) {
-                goto error;
-            }
         }
         if (last_file == NULL ||
             code->co_filename != last_file ||
@@ -1100,25 +1062,18 @@ dump_frame(int fd, _PyInterpreterFrame *frame)
         res = -1;
     }
 
-    if (_PyFrame_IsSoacLifetime(frame)) {
-        /* Fatal/signal-safe path: no Python exception, fake line, or
-         * truncation of the remaining valid caller chain. */
-        PUTS(fd, ", <optimized source position unavailable>");
+    PUTS(fd, ", line ");
+    int lasti = _PyFrame_SafeGetLasti(frame);
+    int lineno = -1;
+    if (lasti >= 0) {
+        lineno = _PyCode_SafeAddr2Line(code, lasti);
+    }
+    if (lineno >= 0) {
+        _Py_DumpDecimal(fd, (size_t)lineno);
     }
     else {
-        PUTS(fd, ", line ");
-        int lasti = _PyFrame_SafeGetLasti(frame);
-        int lineno = -1;
-        if (lasti >= 0) {
-            lineno = _PyCode_SafeAddr2Line(code, lasti);
-        }
-        if (lineno >= 0) {
-            _Py_DumpDecimal(fd, (size_t)lineno);
-        }
-        else {
-            PUTS(fd, "???");
-            res = -1;
-        }
+        PUTS(fd, "???");
+        res = -1;
     }
 
     PUTS(fd, " in ");

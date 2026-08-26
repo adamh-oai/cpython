@@ -183,7 +183,6 @@ _PySOAC_InterpreterView(_PyInterpreterFrame *frame,
     if (frame == NULL || view == NULL ||
         (frame->owner != FRAME_OWNED_BY_THREAD &&
          frame->owner != FRAME_OWNED_BY_GENERATOR) ||
-        _PyFrame_IsSoacLifetime(frame) ||
         !PyFunction_Check(PyStackRef_AsPyObjectBorrow(frame->f_funcobj))) {
         return soac_interpreter_error("interpreter callback requires its actual ordinary frame");
     }

@@ -14,20 +14,7 @@ _PyFrame_Traverse(_PyInterpreterFrame *frame, visitproc visit, void *arg)
     Py_VISIT(frame->f_locals);
     Py_VISIT(frame->soac_dataclass_invocation);
     Py_VISIT(frame->soac_checked_activation);
-    if (_PyFrame_IsSoacLifetime(frame)) {
-        if (frame->soac_lifetime_owned_environment & SOAC_LIFETIME_OWNS_GLOBALS) {
-            Py_VISIT(frame->f_globals);
-        }
-        if (frame->soac_lifetime_owned_environment & SOAC_LIFETIME_OWNS_BUILTINS) {
-            Py_VISIT(frame->f_builtins);
-        }
-    }
-    /* ACTIVE source frames have only a borrowed current-parent view.
-     * Their external primary owns the function; an escaped frame must
-     * not add a GC backedge to that activation or suspended capsule. */
-    if (frame->owner != FRAME_OWNED_BY_SOAC_ACTIVE) {
-        _Py_VISIT_STACKREF(frame->f_funcobj);
-    }
+    _Py_VISIT_STACKREF(frame->f_funcobj);
     _Py_VISIT_STACKREF(frame->f_executable);
     return _PyGC_VisitFrameStack(frame, visit, arg);
 }
@@ -83,9 +70,7 @@ take_ownership(PyFrameObject *f, _PyInterpreterFrame *frame)
     assert(f->f_back == NULL);
     _PyInterpreterFrame *prev = _PyFrame_GetFirstComplete(frame->previous);
     if (prev) {
-        assert(prev->owner < FRAME_OWNED_BY_INTERPRETER ||
-               (prev->owner == FRAME_OWNED_BY_SOAC_ACTIVE &&
-                (prev->soac_lifetime_owned_environment & SOAC_LIFETIME_SCOPE_LINKED)));
+        assert(prev->owner < FRAME_OWNED_BY_INTERPRETER);
         PyObject *exc = PyErr_GetRaisedException();
         /* Link PyFrameObjects.f_back and remove link through _PyInterpreterFrame.previous */
         PyFrameObject *back = _PyFrame_GetFrameObject(prev);
@@ -160,22 +145,12 @@ PyUnstable_InterpreterFrame_GetCode(struct _PyInterpreterFrame *frame)
 int _Py_NO_SANITIZE_THREAD
 PyUnstable_InterpreterFrame_GetLasti(struct _PyInterpreterFrame *frame)
 {
-    if (_PyFrame_IsSoacLifetime(frame)) {
-        PyErr_SetString(PyExc_NotImplementedError,
-                        "current optimized frame position is unavailable");
-        return -1;
-    }
     return _PyInterpreterFrame_LASTI(frame) * sizeof(_Py_CODEUNIT);
 }
 
 int _Py_NO_SANITIZE_THREAD
 PyUnstable_InterpreterFrame_GetLine(_PyInterpreterFrame *frame)
 {
-    if (_PyFrame_IsSoacLifetime(frame)) {
-        PyErr_SetString(PyExc_NotImplementedError,
-                        "current optimized frame position is unavailable");
-        return -1;
-    }
     int addr = _PyInterpreterFrame_LASTI(frame) * sizeof(_Py_CODEUNIT);
     return PyCode_Addr2Line(_PyFrame_GetCode(frame), addr);
 }

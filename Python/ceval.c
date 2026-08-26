@@ -1182,9 +1182,6 @@ PyObject* _Py_HOT_FUNCTION DONT_SLP_VECTORIZE
 _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int throwflag)
 {
     _Py_EnsureTstateNotNULL(tstate);
-    if (_PyFrame_CheckSoacLifetimeExecution(frame) < 0) {
-        return NULL;
-    }
     check_invalid_reentrancy();
     CALL_STAT_INC(pyeval_calls);
 

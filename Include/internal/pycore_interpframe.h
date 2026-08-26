@@ -11,7 +11,6 @@
 #include "pycore_stats.h"         // CALL_STAT_INC()
 #include "pycore_soac_dataclass.h"
 #include "pycore_soac_interpreter.h"
-#include "pycore_soac_lifetime_frame.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -53,8 +52,7 @@ _PyFrame_ClearExecutable(_PyInterpreterFrame *frame)
 }
 
 #define _PyInterpreterFrame_LASTI(IF) \
-    ((_PyFrame_IsSoacLifetime((IF)) && (IF)->instr_ptr == NULL) ? -1 : \
-     (int)((IF)->instr_ptr - _PyFrame_GetBytecode((IF))))
+    ((int)((IF)->instr_ptr - _PyFrame_GetBytecode((IF))))
 
 static inline PyCodeObject *_PyFrame_GetCode(_PyInterpreterFrame *f) {
     assert(!PyStackRef_IsNull(f->f_executable));
@@ -64,14 +62,11 @@ static inline PyCodeObject *_PyFrame_GetCode(_PyInterpreterFrame *f) {
 }
 
 /* All native entries, including specialized frame pushes and generator
-   throw, require the actual ordinary frame's checked activation. Native
-   lifetime facades remain non-executable, and code identity alone is no grant. */
+   throw, require the actual ordinary frame's checked activation.
+   Code identity alone is no grant. */
 static inline int
 _PyFrame_CheckSoacExecution(_PyInterpreterFrame *frame)
 {
-    if (_PyFrame_CheckSoacLifetimeExecution(frame) < 0) {
-        return -1;
-    }
     return _PySOAC_CheckedFrameExecution(frame);
 }
 
@@ -132,9 +127,6 @@ _PyFrame_GetBytecode(_PyInterpreterFrame *f)
 static inline int _Py_NO_SANITIZE_THREAD
 _PyFrame_SafeGetLasti(struct _PyInterpreterFrame *f)
 {
-    if (_PyFrame_IsSoacLifetime(f)) {
-        return -1;
-    }
     // Code based on _PyFrame_GetBytecode() but replace _PyFrame_GetCode()
     // with _PyFrame_SafeGetCode().
     PyCodeObject *co = _PyFrame_SafeGetCode(f);
@@ -327,9 +319,6 @@ _PyFrame_SetStackPointer(_PyInterpreterFrame *frame, _PyStackRef *stack_pointer)
 static inline bool _Py_NO_SANITIZE_THREAD
 _PyFrame_IsIncomplete(_PyInterpreterFrame *frame)
 {
-    if (_PyFrame_IsSoacLifetime(frame)) {
-        return false;
-    }
     if (frame->owner >= FRAME_OWNED_BY_INTERPRETER) {
         return true;
     }
@@ -366,9 +355,6 @@ _PyFrame_GetFrameObject(_PyInterpreterFrame *frame)
 {
 
     assert(!_PyFrame_IsIncomplete(frame));
-    if (_PyFrame_IsSoacLifetime(frame)) {
-        return _PyFrame_GetSoacLifetimeObject(frame);
-    }
     PyFrameObject *res =  frame->frame_obj;
     if (res != NULL) {
         return res;

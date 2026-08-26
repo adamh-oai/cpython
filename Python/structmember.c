@@ -8,8 +8,6 @@
 #include "pycore_object.h"        // _Py_TryIncrefCompare(), FT_ATOMIC_*()
 #include "pycore_critical_section.h"
 #include "pycore_soac_type.h"    // native physical member policies
-#include "pycore_frame.h"
-#include "pycore_soac_lifetime_frame.h"
 
 
 static inline PyObject *
@@ -48,17 +46,6 @@ PyMember_GetOne(const char *obj_addr, PyMemberDef *l)
 
     if (_PySOAC_CheckObjectSlotAccess((PyObject *)obj_addr, l) < 0) {
         return NULL;
-    }
-    /* Keep the native member descriptor and its ordinary semantics.
-     * Only an unavailable optimized traceback offset must refuse. */
-    if (PyTraceBack_Check((PyObject *)obj_addr) &&
-        l->offset == offsetof(PyTracebackObject, tb_lasti)) {
-        PyTracebackObject *tb = (PyTracebackObject *)obj_addr;
-        if (_PyFrame_IsSoacLifetime(tb->tb_frame->f_frame) && tb->tb_lasti < 0) {
-            PyErr_SetString(PyExc_NotImplementedError,
-                            "optimized source traceback instruction offset is unavailable");
-            return NULL;
-        }
     }
     const void *addr = _PyMember_GetOffset((PyObject *)obj_addr, l);
     switch (l->type) {
@@ -185,12 +172,6 @@ PyMember_SetOne(char *addr, PyMemberDef *l, PyObject *v)
     if ((l->flags & Py_READONLY))
     {
         PyErr_SetString(PyExc_AttributeError, "readonly attribute");
-        return -1;
-    }
-    if (PyFrame_Check(obj) &&
-        _PyFrame_IsSoacLifetime(((PyFrameObject *)obj)->f_frame)) {
-        PyErr_SetString(PyExc_NotImplementedError,
-                        "optimized source-lifetime frame mutation/tracing is unavailable");
         return -1;
     }
     if (_PySOAC_CheckObjectSlotAccess(obj, l) < 0) {

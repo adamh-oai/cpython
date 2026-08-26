@@ -4,8 +4,6 @@
 #  error "this header requires Py_BUILD_CORE define"
 #endif
 
-#include "pycore_soac_lifetime_frame.h"
-
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -15,7 +13,7 @@ extern "C" {
 #define _Py_SOAC_OBSERVER_REFUSED (-2)
 
 /* GIL build: caller holds the GIL, but MUST NOT already hold HEAD_LOCK.
- * These acquire the native thread-list lock, inspect scalar/native frame
+ * These acquire the native thread-list lock, inspect borrowed observer scope
  * fields only, release it, and never allocate, set PyErr or call Python. */
 extern int _PySoacSource_HasProtectedInterval(
     PyInterpreterState *interp, PyCodeObject *code);
@@ -33,8 +31,8 @@ extern int _PySoacSource_RestartWouldObserve(PyInterpreterState *interp);
 extern int _PySoacSource_CodeHasObservers(
     PyInterpreterState *interp, PyCodeObject *code);
 
-/* Existing contextual calls have no native opcode site. An actual linked
- * SOAC source frame must reject observers that it cannot implement. */
+/* Existing contextual calls reject observers for their active SOAC code
+ * without constructing a Python frame or native opcode site. */
 extern int _PySoacSource_CheckCallObservers(PyThreadState *tstate);
 
 /* These two internal exports are used by the real _testinternalcapi setter.
@@ -55,7 +53,7 @@ _PySoacSource_ResolveObserverStatus(int status)
 {
     if (status == _Py_SOAC_OBSERVER_REFUSED) {
         PyErr_SetString(PyExc_NotImplementedError,
-                        "cannot enable source observers during a SOAC source-parent scope");
+                        "cannot enable source observers during a SOAC observer scope");
         return -1;
     }
     return status;
@@ -63,7 +61,7 @@ _PySoacSource_ResolveObserverStatus(int status)
 
 /* saved is the actual detached incoming error, not a borrowed exception.
  * Call after all native mutation locks are released. Diagnostics may reenter;
- * the active frame marker stays present until its actual interval ends. */
+ * the observer scope stays present until its actual interval ends. */
 static inline void
 _PySoacSource_FinishVoidSetter(int status, PyObject *saved, const char *name)
 {

@@ -1273,10 +1273,6 @@ static PyObject *
 gen_new_with_qualname(PyTypeObject *type, PyFrameObject *f,
                       PyObject *name, PyObject *qualname)
 {
-    if (_PyFrame_CheckSoacLifetimeExecution(f->f_frame) < 0) {
-        Py_DECREF(f);  /* These constructors always steal the frame. */
-        return NULL;
-    }
     PyCodeObject *code = _PyFrame_GetCode(f->f_frame);
     int size = code->co_nlocalsplus + code->co_stacksize;
     PyGenObject *gen = PyObject_GC_NewVar(PyGenObject, type, size);

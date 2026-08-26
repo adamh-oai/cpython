@@ -24,10 +24,6 @@ enum _frameowner {
     FRAME_OWNED_BY_GENERATOR = 1,
     FRAME_OWNED_BY_FRAME_OBJECT = 2,
     FRAME_OWNED_BY_INTERPRETER = 3,
-    /* Source-lifetime frames are never interpreter activations. */
-    FRAME_OWNED_BY_SOAC_ACTIVE = 4,
-    FRAME_OWNED_BY_SOAC_FINISHED = 5,
-    FRAME_OWNED_BY_SOAC_CLEARED = 6,
 };
 
 struct _PyInterpreterFrame {
@@ -44,12 +40,7 @@ struct _PyInterpreterFrame {
     /* Index of thread-local bytecode containing instr_ptr. */
     int32_t tlbc_index;
 #endif
-    union {
-        uint16_t return_offset;  /* Only relevant during a function call */
-        /* Lifetime-only frames never execute. Their exceptional retained map
-         * edges reuse this mutually exclusive scalar without changing layout. */
-        uint16_t soac_lifetime_owned_environment;
-    };
+    uint16_t return_offset;  /* Only relevant during a function call */
     char owner;
 #ifdef Py_DEBUG
     uint8_t visited:1;

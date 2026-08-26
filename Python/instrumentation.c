@@ -3206,21 +3206,3 @@ _PyInstrumentation_BranchesIterator(PyCodeObject *code)
     bi->bi_offset = 0;
     return (PyObject *)bi;
 }
-
-/* Actual source-parent context, not a reconstructed native CALL site. */
-int
-_PySoacSource_CheckCallObservers(PyThreadState *thread)
-{
-    assert(thread == _PyThreadState_GET());
-    _PyInterpreterFrame *frame = thread->current_frame;
-    if (frame == NULL || frame->owner != FRAME_OWNED_BY_SOAC_ACTIVE ||
-        !(frame->soac_lifetime_owned_environment & SOAC_LIFETIME_SCOPE_LINKED)) {
-        return 0;
-    }
-    if (_PySoacSource_CodeHasObservers(thread->interp, _PyFrame_GetCode(frame))) {
-        PyErr_SetString(PyExc_NotImplementedError,
-                        "SOAC source call lacks supported observer/site information");
-        return -1;
-    }
-    return 0;
-}
