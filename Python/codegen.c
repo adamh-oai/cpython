@@ -5221,11 +5221,6 @@ static int
 codegen_pop_inlined_comprehension_locals(compiler *c, location loc,
                                          _PyCompile_InlinedComprehensionState *state)
 {
-    /* Preserve which actual lexical slots are saved/restored. SOAC chooses
-     * its own safe cleanup schedule; no native handler recipe is exported. */
-    if (METADATA(c)->u_soac_bindings != NULL) {
-        RETURN_IF_ERROR(_PyCompile_SoacRestoreComprehension(c));
-    }
     if (state->pushed_locals) {
         ADDOP(c, NO_LOCATION, POP_BLOCK);
 

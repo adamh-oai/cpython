@@ -140,11 +140,6 @@ typedef struct {
 } soac_binding_init;
 
 typedef struct {
-    Py_ssize_t slot;
-    Py_ssize_t owner;
-} soac_binding_saved;
-
-typedef struct {
     int role;
     Py_ssize_t slot;
     Py_ssize_t owner;
@@ -153,7 +148,6 @@ typedef struct {
 typedef struct {
     location loc;
     Py_ssize_t parent;
-    int restored;
     PySTEntryObject *origin;  /* Borrowed original AST/symtable identity. */
     Py_ssize_t representative;
     Py_ssize_t final_id;
@@ -164,7 +158,6 @@ typedef struct {
     int previous_binding_role;
     int previous_binding_generator;
     SOAC_VECTOR(soac_binding_entry_op) entry_ops;
-    SOAC_VECTOR(soac_binding_saved) restores;
 } soac_binding_region;
 
 typedef struct {
@@ -340,7 +333,6 @@ soac_binding_collector_free(soac_binding_collector *collector)
         for (Py_ssize_t j = 0; j < unit->regions.count; j++) {
             soac_binding_region *region = &unit->regions.items[j];
             PyMem_Free(region->entry_ops.items);
-            PyMem_Free(region->restores.items);
         }
         PyMem_Free(unit->slots.items);
         PyMem_Free(unit->owners.items);
@@ -652,38 +644,13 @@ _PyCompile_SoacMakeCell(compiler *c, int deref_index)
 }
 
 int
-_PyCompile_SoacRestoreComprehension(compiler *c)
-{
-    soac_code_bindings *unit = c->u->u_metadata.u_soac_bindings;
-    if (unit == NULL) {
-        return SUCCESS;
-    }
-    if (unit->active_region < 0) {
-        return soac_binding_error("comprehension restore outside a region");
-    }
-    soac_binding_region *region = &unit->regions.items[unit->active_region];
-    if (region->restored) {
-        return soac_binding_error("comprehension restored twice in semantic recipe");
-    }
-    for (Py_ssize_t i = region->entry_ops.count; i-- > 0;) {
-        soac_binding_entry_op op = region->entry_ops.items[i];
-        if (op.role == Py_SOAC_CLASS_OP_SAVE_CLEAR) {
-            soac_binding_saved saved = {op.slot, op.owner};
-            RETURN_IF_ERROR(SOAC_PUSH(region->restores, saved));
-        }
-    }
-    region->restored = 1;
-    return SUCCESS;
-}
-
-int
 _PyCompile_SoacLeaveComprehension(compiler *c)
 {
     soac_code_bindings *unit = c->u->u_metadata.u_soac_bindings;
     if (unit == NULL) {
         return SUCCESS;
     }
-    if (unit->active_region < 0 || !unit->regions.items[unit->active_region].restored) {
+    if (unit->active_region < 0) {
         return soac_binding_error("unbalanced comprehension ownership region");
     }
     soac_binding_region *region = &unit->regions.items[unit->active_region];
@@ -989,18 +956,6 @@ soac_region_representative(soac_code_bindings *unit, Py_ssize_t region)
     return region < 0 ? -1 : unit->regions.items[region].representative;
 }
 
-static Py_ssize_t
-soac_saved_operation(soac_binding_region *region, Py_ssize_t owner)
-{
-    for (Py_ssize_t i = 0; i < region->entry_ops.count; i++) {
-        soac_binding_entry_op *op = &region->entry_ops.items[i];
-        if (op->role == Py_SOAC_CLASS_OP_SAVE_CLEAR && op->owner == owner) {
-            return i;
-        }
-    }
-    return -1;
-}
-
 static int
 soac_same_region_shape(soac_code_bindings *unit,
                         soac_binding_region *left, soac_binding_region *right)
@@ -1010,7 +965,6 @@ soac_same_region_shape(soac_code_bindings *unit,
         left->expression != right->expression || left->kind != right->kind ||
         left->is_async != right->is_async ||
         left->entry_ops.count != right->entry_ops.count ||
-        left->restores.count != right->restores.count ||
         soac_region_representative(unit, left->parent) !=
             soac_region_representative(unit, right->parent)) {
         return 0;
@@ -1020,15 +974,6 @@ soac_same_region_shape(soac_code_bindings *unit,
         soac_binding_entry_op *b = &right->entry_ops.items[i];
         if (a->role != b->role || !soac_same_slot(unit, a->slot, b->slot) ||
             unit->owners.items[a->owner].kind != unit->owners.items[b->owner].kind) {
-            return 0;
-        }
-    }
-    for (Py_ssize_t i = 0; i < left->restores.count; i++) {
-        soac_binding_saved *a = &left->restores.items[i];
-        soac_binding_saved *b = &right->restores.items[i];
-        Py_ssize_t saved = soac_saved_operation(left, a->owner);
-        if (!soac_same_slot(unit, a->slot, b->slot) || saved < 0 ||
-            saved != soac_saved_operation(right, b->owner)) {
             return 0;
         }
     }
@@ -2971,10 +2916,9 @@ soac_scope_region_rows(soac_code_bindings *unit)
         PyObject *span = soac_source_span(region->loc);
         PyObject *outer = soac_source_span(region->outer_loc);
         PyObject *ops = PyTuple_New(region->entry_ops.count);
-        PyObject *restores = PyTuple_New(region->restores.count);
         PyObject *bindings = soac_scope_source_binding_rows(unit, i);
         if (parent == NULL || span == NULL || span == Py_None || outer == NULL || outer == Py_None ||
-            ops == NULL || restores == NULL || bindings == NULL || !region->restored) {
+            ops == NULL || bindings == NULL) {
             if (!PyErr_Occurred()) {
                 soac_binding_error("incomplete native eager-comprehension region");
             }
@@ -2989,18 +2933,8 @@ soac_scope_region_rows(soac_code_bindings *unit)
             }
             PyTuple_SET_ITEM(ops, j, row);
         }
-        for (Py_ssize_t j = 0; j < region->restores.count; j++) {
-            soac_binding_saved *restore = &region->restores.items[j];
-            PyObject *row = Py_BuildValue("(in)", unit->slots.items[restore->slot].final_index,
-                                          unit->owners.items[restore->owner].final_id);
-            if (row == NULL) {
-                goto region_error;
-            }
-            PyTuple_SET_ITEM(restores, j, row);
-        }
-        PyObject *row = Py_BuildValue("(nOiOOiiOOO)",
-            region->final_id, parent, region->kind, span, outer, region->is_async,
-            region->restores.count != 0, ops, restores, bindings);
+        PyObject *row = Py_BuildValue("(nOiOOiOO)",
+            region->final_id, parent, region->kind, span, outer, region->is_async, ops, bindings);
         if (row == NULL) {
             goto region_error;
         }
@@ -3008,7 +2942,6 @@ soac_scope_region_rows(soac_code_bindings *unit)
         Py_DECREF(span);
         Py_DECREF(outer);
         Py_DECREF(ops);
-        Py_DECREF(restores);
         Py_DECREF(bindings);
         PyTuple_SET_ITEM(rows, region->final_id, row);
         continue;
@@ -3017,7 +2950,6 @@ region_error:
         Py_XDECREF(span);
         Py_XDECREF(outer);
         Py_XDECREF(ops);
-        Py_XDECREF(restores);
         Py_XDECREF(bindings);
         Py_DECREF(rows);
         return NULL;
@@ -3068,8 +3000,7 @@ soac_validate_scope_regions(soac_code_bindings *unit)
 {
     for (Py_ssize_t i = 0; i < unit->regions.count; i++) {
         soac_binding_region *region = &unit->regions.items[i];
-        Py_ssize_t saved = 0;
-        if (!region->restored || region->parent >= i) {
+        if (region->parent >= i) {
             return soac_binding_error("native comprehension has an inconsistent lexical boundary");
         }
         for (Py_ssize_t j = 0; j < region->entry_ops.count; j++) {
@@ -3084,22 +3015,6 @@ soac_validate_scope_regions(soac_code_bindings *unit)
             if ((entry->role != Py_SOAC_CLASS_OP_SAVE_CLEAR && entry->role != Py_SOAC_CLASS_OP_MAKE_CELL) ||
                 owner->slot != entry->slot || owner->region != i || owner->kind != expected) {
                 return soac_binding_error("native comprehension binding differs from its lexical owner");
-            }
-            saved += entry->role == Py_SOAC_CLASS_OP_SAVE_CLEAR;
-        }
-        if (saved != region->restores.count) {
-            return soac_binding_error("native comprehension lost a lexical snapshot restore");
-        }
-        for (Py_ssize_t j = 0; j < region->restores.count; j++) {
-            soac_binding_saved *restore = &region->restores.items[j];
-            Py_ssize_t operation = soac_saved_operation(region, restore->owner);
-            if (operation < 0 || region->entry_ops.items[operation].slot != restore->slot) {
-                return soac_binding_error("native comprehension restores a foreign saved slot");
-            }
-            for (Py_ssize_t prior = 0; prior < j; prior++) {
-                if (region->restores.items[prior].owner == restore->owner) {
-                    return soac_binding_error("native comprehension restores an owner twice");
-                }
             }
         }
     }

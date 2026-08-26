@@ -54,7 +54,7 @@ PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSource(
     const char *source, Py_ssize_t length, PyObject *filename, int optimize);
 
 /* Compile authenticated source once, returning (code, strings,
- * (6, CodeNodes, ScopeBindingRecipes, OperationTables)). All containers are
+ * (7, CodeNodes, ScopeBindingRecipes, OperationTables)). All containers are
  * exact immutable tuples. This compiler output supplies source correspondence;
  * the caller separately authenticates and admits actual runtime objects.
  * node=(id,parent_id,exact_code,scope_kind,symtable_kind,source_span)
@@ -64,15 +64,16 @@ PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSource(
  * scope=(code_id,slot_seeds,owners,regions,captures,accesses,class_actions_or_None)
  * seed=(final_slot,native_kind,FrameCleared0/BoundParameter1,ordinal_or_None)
  * owner=(id,kind,final_slot,native_kind,region_or_None)
- * region=(id,parent,kind,source_span,outer_iterable_span,is_async,has_saved_slots,
- *         entry_ops,restores,source_bindings)
+ * region=(id,parent,kind,source_span,outer_iterable_span,is_async,
+ *         entry_ops,source_bindings)
  * capture=(child_id,creation_span,free_ordinal,current_slot,region_or_None)
  * access=(original_Name_span,context,mode,current_slot,region_or_None)
  * class_actions=(header_initializers,exports), absent outside native classes.
  *
  * Scope rows preserve actual lexical binding and source ownership. There is
- * no exported prefix, opcode/lifetime schedule, handler-protection proof,
- * fused-read recipe or normal-completion trace. SOAC owns its cleanup policy.
+ * no exported prefix, restoration recipe, opcode/lifetime schedule,
+ * handler-protection proof, fused-read recipe or normal-completion trace.
+ * SOAC owns its cleanup policy.
  * OperationTables remain independently required by interpreter enforcement:
  * they identify actual definition publication and class/decorator CALL sites.
  */
@@ -80,7 +81,7 @@ PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSourceDetails(
     const char *source, Py_ssize_t length, PyObject *filename, int optimize);
 
 /* Fixed wire values, independent of internal compiler enum numbering. */
-#define Py_SOAC_CLASS_BINDINGS_SCHEMA 6
+#define Py_SOAC_CLASS_BINDINGS_SCHEMA 7
 /* Source-operation receipts share the SAME final code-node tree.
  * table = (code_id, instruction_count, code_size_bytes, exact_native_names,
  *          stores, calls, gaps)
@@ -246,7 +247,7 @@ PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSourceDetails(
 #define Py_SOAC_CLASS_ACCESS_CELL_VALUE 1
 #define Py_SOAC_CLASS_ACCESS_NAMESPACE_OR_CELL 2
 
-/* Wire6 lexical scope/compiler tags, never execution grants. */
+/* Wire7 lexical scope/compiler tags, never execution grants. */
 #define Py_SOAC_SCOPE_SEED_CLEARED 0
 #define Py_SOAC_SCOPE_SEED_PARAMETER 1
 #define Py_SOAC_EAGER_LIST 0

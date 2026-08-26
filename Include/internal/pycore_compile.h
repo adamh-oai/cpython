@@ -94,7 +94,6 @@ PyCodeObject *_PyAST_CompileWithSoacClassBindings(
 int _PyCompile_SoacEnterComprehension(struct _PyCompiler *, expr_ty, PySTEntryObject *);
 int _PyCompile_SoacSaveLocal(struct _PyCompiler *, int local_index);
 int _PyCompile_SoacMakeCell(struct _PyCompiler *, int deref_index);
-int _PyCompile_SoacRestoreComprehension(struct _PyCompiler *);
 int _PyCompile_SoacLeaveComprehension(struct _PyCompiler *);
 int _PyCompile_SoacCapture(struct _PyCompiler *, PyCodeObject *,
                           _Py_SourceLocation, int free_ordinal, int deref_index);
