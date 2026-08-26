@@ -75,12 +75,8 @@ soac_dataclass_bridge_default(PyObject *self, PyObject *const *args,
         return NULL;
     }
     long kind = PyLong_AsLong(self);
-    if ((kind == Py_SOAC_DATACLASS_BRIDGE_SOURCE ||
-         kind == Py_SOAC_DATACLASS_BRIDGE_VALUE) && nargs == 1) {
+    if (kind == Py_SOAC_DATACLASS_BRIDGE_SOURCE && nargs == 1) {
         return Py_NewRef(args[0]);
-    }
-    if (kind == Py_SOAC_DATACLASS_BRIDGE_INIT_VALUE && nargs == 3) {
-        return Py_NewRef(args[1]);
     }
     if (kind == Py_SOAC_DATACLASS_BRIDGE_NEW_SLOTS && nargs == 5) {
         return PyObject_Vectorcall(args[0], args + 1, 3, NULL);
@@ -102,10 +98,6 @@ static PyMethodDef soac_dataclass_bridge_methods[] = {
      METH_FASTCALL, NULL},
     {"_dataclass_set_member", _PyCFunction_CAST(soac_dataclass_bridge_default),
      METH_FASTCALL, NULL},
-    {"_dataclass_check_value", _PyCFunction_CAST(soac_dataclass_bridge_default),
-     METH_FASTCALL, NULL},
-    {"_dataclass_init_value", _PyCFunction_CAST(soac_dataclass_bridge_default),
-     METH_FASTCALL, NULL},
     {"_dataclass_new_slots", _PyCFunction_CAST(soac_dataclass_bridge_default),
      METH_FASTCALL, NULL},
 };
@@ -114,8 +106,6 @@ static const unsigned int soac_dataclass_bridge_kinds[] = {
     Py_SOAC_DATACLASS_BRIDGE_SOURCE,
     Py_SOAC_DATACLASS_BRIDGE_EXEC,
     Py_SOAC_DATACLASS_BRIDGE_MEMBER,
-    Py_SOAC_DATACLASS_BRIDGE_VALUE,
-    Py_SOAC_DATACLASS_BRIDGE_INIT_VALUE,
     Py_SOAC_DATACLASS_BRIDGE_NEW_SLOTS,
 };
 
@@ -407,121 +397,6 @@ error:
     return NULL;
 }
 
-static int
-soac_dataclass_validate_init_value(_PyInterpreterFrame *parent, PyObject *builtin,
-                                    PyObject *const *args, Py_ssize_t nargs,
-                                    PyObject **helper_name)
-{
-    SoacDataclassInvocation *invocation =
-        (SoacDataclassInvocation *)parent->soac_dataclass_invocation;
-    *helper_name = NULL;
-    if (invocation == NULL || soac_dataclass_current(invocation) < 0 ||
-        !soac_dataclass_is_running(invocation) || invocation->owner == NULL ||
-        !soac_dataclass_frame_valid(parent) ||
-        soac_dataclass_bridge_kind(builtin) != Py_SOAC_DATACLASS_BRIDGE_INIT_VALUE ||
-        nargs != 3 || !PyUnicode_CheckExact(args[1]) || !PyDict_CheckExact(args[2])) {
-        return invocation == NULL
-            ? soac_dataclass_error("generated init expression has no invocation")
-            : soac_dataclass_fail(invocation, "generated init expression is not authentic");
-    }
-    PySoacDataclassFrameView view = {
-        .frame = parent, .role = parent->soac_dataclass_role,
-        .invocation = (PyObject *)invocation,
-    };
-    int selected = _PyInterpreterState_GET()->soac.dataclass_callbacks.init_value(
-        invocation->owner, &view, args[0], args[1], args[2], helper_name);
-    if (selected < 0 || selected > 1 || PyErr_Occurred() ||
-        !soac_dataclass_is_running(invocation) || invocation->owner == NULL ||
-        (selected == 1 && (*helper_name == NULL ||
-                          !PyUnicode_CheckExact(*helper_name) ||
-                          !PyUnicode_IsIdentifier(*helper_name)))) {
-        return soac_dataclass_fail(invocation, "generated init expression selection failed");
-    }
-    return selected;
-}
-
-static PyObject *
-soac_dataclass_init_value_bridge(_PyInterpreterFrame *parent, PyObject *builtin,
-                                  PyObject *const *args, Py_ssize_t nargs)
-{
-    SoacDataclassInvocation *invocation =
-        (SoacDataclassInvocation *)parent->soac_dataclass_invocation;
-    PyObject *name = NULL;
-    int selected = soac_dataclass_validate_init_value(parent, builtin, args, nargs, &name);
-    if (selected < 0) {
-        return NULL;
-    }
-    if (!selected) {
-        return Py_NewRef(args[1]);
-    }
-    Py_INCREF(name);
-    PyObject *helper = PySoac_GetDataclassBuiltin(Py_SOAC_DATACLASS_BRIDGE_VALUE);
-    if (helper == NULL) {
-        soac_dataclass_fail(invocation, "generated value bridge is unavailable");
-        Py_DECREF(name);
-        return NULL;
-    }
-    Py_INCREF(helper);
-    PyObject *result = PyUnicode_FromFormat("%U(%U)", name, args[1]);
-    if (result == NULL) {
-        goto error;
-    }
-    PyObject *rechecked_name = NULL;
-    if (soac_dataclass_validate_init_value(parent, builtin, args, nargs, &rechecked_name) != 1 ||
-        rechecked_name != name) {
-        goto error;
-    }
-    PyObject *existing = NULL;
-    if (PyDict_GetItemRef(args[2], name, &existing) < 0) {
-        goto error;
-    }
-    if (existing != NULL && existing != helper) {
-        soac_dataclass_fail(invocation, "generated value helper capture collides with an existing binding");
-        Py_DECREF(existing);
-        goto error;
-    }
-    if (soac_dataclass_validate_init_value(parent, builtin, args, nargs, &rechecked_name) != 1 ||
-        rechecked_name != name ||
-        PySoac_GetDataclassBuiltin(Py_SOAC_DATACLASS_BRIDGE_VALUE) != helper) {
-        Py_XDECREF(existing);  /* NULL or the separately pinned canonical helper. */
-        goto error;
-    }
-    if (existing == NULL && PyDict_SetItem(args[2], name, helper) < 0) {
-        goto error;
-    }
-    Py_XDECREF(existing);
-    if (soac_dataclass_validate_init_value(parent, builtin, args, nargs, &rechecked_name) != 1 ||
-        rechecked_name != name ||
-        PySoac_GetDataclassBuiltin(Py_SOAC_DATACLASS_BRIDGE_VALUE) != helper) {
-        goto error;
-    }
-    /* Final capture identity check is callback-free, even if hostile keys
-     * were inserted during an earlier allocation/lookup. The policy callback
-     * separately validates the actual entire builder-locals schema. */
-    Py_ssize_t position = 0;
-    PyObject *key, *value;
-    int captured = 0;
-    while (PyDict_Next(args[2], &position, &key, &value)) {
-        if (PyUnicode_CheckExact(key) && _PyUnicode_Equal(key, name)) {
-            captured = value == helper;
-            break;
-        }
-    }
-    if (!captured) {
-        soac_dataclass_fail(invocation, "generated value helper capture changed during publication");
-        goto error;
-    }
-    Py_DECREF(helper);
-    Py_DECREF(name);
-    return result;
-error:
-    soac_dataclass_fail(invocation, "generated init expression could not be published");
-    Py_XDECREF(result);
-    Py_DECREF(helper);
-    Py_DECREF(name);
-    return NULL;
-}
-
 #include "soac_dataclass_slots.inc"
 
 static PyObject *
@@ -534,9 +409,6 @@ soac_dataclass_dispatch_bridge(_PyInterpreterFrame *parent, PyObject *builtin,
     if (kwnames != NULL && PyTuple_GET_SIZE(kwnames) != 0) {
         soac_dataclass_fail(invocation, "dataclass native bridges take positional operands");
         return NULL;
-    }
-    if (kind == Py_SOAC_DATACLASS_BRIDGE_INIT_VALUE) {
-        return soac_dataclass_init_value_bridge(parent, builtin, args, nargs);
     }
     if (kind == Py_SOAC_DATACLASS_BRIDGE_NEW_SLOTS) {
         return soac_dataclass_new_slots_bridge(parent, builtin, args, nargs);

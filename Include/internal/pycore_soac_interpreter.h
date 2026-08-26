@@ -19,14 +19,9 @@ typedef struct {
 
 typedef struct _PySoacInterpreterCallV1 _PySoacInterpreterCallV1;
 
-/* Private implementation join, never public authority.
- *
- * Widen the EXISTING checked activation edge to soac_checked_activation;
- * no second field or lifetime frame is introduced.
- * Existing generated-dataclass activations keep their own exact type and
- * behavior. All users must dispatch on exact activation type before accessing
- * masks, value sites, phase or the invocation. Unknown type fails closed.
- * Existing frame init/GC traverse/copy-MOVE/clear sites carry that one edge.
+/* Private source-execution metadata, never public authority. The existing
+ * frame init/GC traverse/copy-MOVE/clear sites carry this one metadata edge.
+ * Unknown activation types fail closed. It owns no argument-type obligations.
  */
 typedef struct {
     PyObject_HEAD
@@ -36,7 +31,6 @@ typedef struct {
     PyCodeObject *code;               /* Borrowed, actual f_executable pins. */
     uint32_t kind;
     uint32_t phase;
-    uint32_t boundary_snapshot;
     uint32_t source_authority;        /* Only after authenticated original entry. */
     uint32_t return_attempted;
     uint32_t failure_attempted;
@@ -61,7 +55,6 @@ struct _PySoacInterpreterFrameViewV1 {
  */
 typedef struct {
     uint32_t kind;
-    uint32_t boundary_snapshot;
     PyObject *subject_owner;          /* Borrowed, caller/frame supports it. */
     const PySoacInterpreterFrameViewV1 *parent;
     PyObject **namespace_state_out;   /* NULL except namespace; *out starts NULL. */
@@ -208,10 +201,10 @@ PyAPI_FUNC(int) _PySOAC_InterpreterDefinitionStore(
  * - Common native init enforces actual source owners, including a restored
  *   stock vectorcall or a semantics-preserving C forwarder. Do not use public
  *   vectorcall pointer equality as authority; arbitrary/unowned frames refuse.
- * - Capture required bit before binding; later marking never changes this
- *   activation's choice. Incompatible fast calls deopt before operand transfer.
+ * - Capture the actual source owner before binding. Incompatible fast calls
+ *   deopt before operand transfer.
  * - Mark phase/attempted and unpublish borrowed fields BEFORE releases/reentry.
- * - Never route rejected return through callee exception-table search.
+ * - Never route failed definition completion through callee handlers.
  * - _PyFrame_Copy MOVE-transfers the one activation and zeros the source.
  *   Completed activations are cleared before escaped-frame take_ownership.
  * - No SOAC lifetime/code-token/managed-generator/JIT sidecar is involved.

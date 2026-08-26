@@ -122,21 +122,6 @@ func_check_soac_mutable(PyFunctionObject *func)
 }
 
 static int
-func_check_soac_code_mutable(PyFunctionObject *func)
-{
-    if (func_check_soac_mutable(func) < 0) {
-        return -1;
-    }
-    if (func->func_soac_required_boundary) {
-        /* Even an identical code object notifies MODIFY_CODE watchers and
-           can discard the checked vectorcall. */
-        func_soac_mutation_error("cannot assign code on a function with a required strict boundary");
-        return -1;
-    }
-    return 0;
-}
-
-static int
 func_soac_kwdefaults_policy(PyObject *owner, PyObject *dict, PyObject *key,
                             PyObject *value, int operation,
                             PyObject *provenance)
@@ -280,35 +265,6 @@ PyFunction_GetSoacStrictOwner(PyObject *object)
     return func->func_soac_strict_owner;  /* borrowed */
 }
 
-int
-PyFunction_MarkSoacRequiredBoundary(PyObject *object, PyObject *owner)
-{
-    if (!PyFunction_Check(object)) {
-        PyErr_SetString(PyExc_TypeError, "required strict boundary needs an exact function");
-        return -1;
-    }
-    PyFunctionObject *func = (PyFunctionObject *)object;
-    if (owner == NULL ||
-        !_PyFunction_HasSoacStrictOwner(func) ||
-        func->func_soac_strict_owner != owner) {
-        func_soac_runtime_error("required strict boundary needs its attached live function owner");
-        return -1;
-    }
-    func->func_soac_required_boundary = 1;
-    return 0;
-}
-
-int
-PyFunction_HasSoacRequiredBoundary(PyObject *object)
-{
-    if (object == NULL || !PyFunction_Check(object)) {
-        PyErr_SetString(PyExc_TypeError,
-                        "required strict boundary query needs an exact function");
-        return -1;
-    }
-    return ((PyFunctionObject *)object)->func_soac_required_boundary != 0;
-}
-
 PyObject *
 PySoac_CloneAnnotationReplayCode(PyObject *provider, PyObject *expected_owner,
                                PyObject *verified_code)
@@ -425,7 +381,6 @@ _PyFunction_FromConstructor(PyFrameConstructor *constr)
     op->func_soac_strict_id = 0;
     op->func_soac_strict_owner = NULL;
     op->func_soac_strict_owner_state = FUNC_SOAC_OWNER_NONE;
-    op->func_soac_required_boundary = 0;
     // NOTE: functions created via FrameConstructor do not use deferred
     // reference counting because they are typically not part of cycles
     // nor accessed by multiple threads.
@@ -516,7 +471,6 @@ func_new_with_qualname(PyObject *code, PyObject *globals, PyObject *qualname,
     op->func_soac_strict_id = 0;
     op->func_soac_strict_owner = NULL;
     op->func_soac_strict_owner_state = FUNC_SOAC_OWNER_NONE;
-    op->func_soac_required_boundary = 0;
     if (record != NULL && soac_dataclass_attach_record(op, record, producer) < 0) {
         /* Created may have allocated a weak witness whose observer acquired
          * a reference, or changed ordinary constructor metadata. Tombstone
@@ -1098,7 +1052,7 @@ static int
 func_set_code(PyObject *self, PyObject *value, void *Py_UNUSED(ignored))
 {
     PyFunctionObject *op = _PyFunction_CAST(self);
-    if (func_check_soac_code_mutable(op) < 0) {
+    if (func_check_soac_mutable(op) < 0) {
         return -1;
     }
 
@@ -1114,7 +1068,7 @@ func_set_code(PyObject *self, PyObject *value, void *Py_UNUSED(ignored))
                     op, "__code__", value) < 0) {
         return -1;
     }
-    if (func_check_soac_code_mutable(op) < 0) {
+    if (func_check_soac_mutable(op) < 0) {
         return -1;
     }
 
@@ -1141,7 +1095,7 @@ func_set_code(PyObject *self, PyObject *value, void *Py_UNUSED(ignored))
         {
             return -1;
         }
-        if (func_check_soac_code_mutable(op) < 0) {
+        if (func_check_soac_mutable(op) < 0) {
             return -1;
         }
     }
@@ -1149,7 +1103,7 @@ func_set_code(PyObject *self, PyObject *value, void *Py_UNUSED(ignored))
     handle_func_event(PyFunction_EVENT_MODIFY_CODE, op, value);
     /* Audit, warning and watcher callbacks may install an irreversible
        restriction. No callback remains between this check and the store. */
-    if (func_check_soac_code_mutable(op) < 0) {
+    if (func_check_soac_mutable(op) < 0) {
         return -1;
     }
     _PyFunction_ClearVersion(op);

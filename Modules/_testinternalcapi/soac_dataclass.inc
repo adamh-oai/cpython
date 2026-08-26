@@ -64,7 +64,7 @@ soac_dc_test_enter(PyObject *owner, unsigned int stage,
                    const PySoacDataclassFrameView *parent,
                    const PySoacDataclassFrameView *child, unsigned int *role)
 {
-    if (!PyTuple_CheckExact(owner) || PyTuple_GET_SIZE(owner) != 9) {
+    if (!PyTuple_CheckExact(owner) || PyTuple_GET_SIZE(owner) != 8) {
         PyErr_SetString(PyExc_TypeError, "invalid native dataclass fixture owner");
         return -1;
     }
@@ -295,16 +295,16 @@ error:
 }
 
 #include "soac_dataclass_bridges.inc"
-#include "soac_dataclass_boundary.inc"
+#include "soac_dataclass_components.inc"
 
 static PyObject *
 soac_dataclass_fixture(PyObject *self, PyObject *args)
 {
     PyObject *root, *bindings, *edges, *sites, *payload, *members = NULL;
-    PyObject *boundaries = NULL, *components = NULL;
+    PyObject *components = NULL;
     PyObject *slots = Py_None;
-    if (!PyArg_ParseTuple(args, "OOOOO|OOOO", &root, &bindings, &edges, &sites, &payload,
-                          &members, &boundaries, &components, &slots) ||
+    if (!PyArg_ParseTuple(args, "OOOOO|OOO", &root, &bindings, &edges, &sites, &payload,
+                          &members, &components, &slots) ||
         soac_dc_test_check_bindings(bindings) < 0 ||
         soac_dc_test_check_bridge_payload(payload) < 0 ||
         soac_slot_test_check_plan(slots) < 0) {
@@ -318,10 +318,7 @@ soac_dataclass_fixture(PyObject *self, PyObject *args)
         .bridge = soac_dc_test_bridge,
         .compiled = soac_dc_test_compiled,
         .created = soac_dc_test_created,
-        .bound = soac_dc_test_bound,
-        .value = soac_dc_test_checked_value,
         .validate_component = soac_dc_test_component,
-        .init_value = soac_dc_test_init_value,
         .prepare_slots = soac_dc_test_prepare_slots,
     };
     if (PySoac_SetDataclassCallbacks(&callbacks) < 0) {
@@ -351,18 +348,14 @@ soac_dataclass_fixture(PyObject *self, PyObject *args)
         Py_DECREF(normalized_sites);
         return NULL;
     }
-    PyObject *normalized_boundaries = soac_dc_test_boundaries(boundaries);
-    PyObject *normalized_components = normalized_boundaries == NULL ? NULL
-        : soac_dc_test_components(components);
-    PyObject *owner = normalized_components == NULL ? NULL : PyTuple_Pack(9, snapshot, bindings,
+    PyObject *normalized_components = soac_dc_test_components(components);
+    PyObject *owner = normalized_components == NULL ? NULL : PyTuple_Pack(8, snapshot, bindings,
                                   normalized_edges, normalized_sites, payload,
-                                  normalized_members, normalized_boundaries,
-                                  normalized_components, slots);
+                                  normalized_members, normalized_components, slots);
     Py_DECREF(snapshot);
     Py_DECREF(normalized_edges);
     Py_DECREF(normalized_sites);
     Py_DECREF(normalized_members);
-    Py_XDECREF(normalized_boundaries);
     Py_XDECREF(normalized_components);
     if (owner == NULL) {
         return NULL;

@@ -272,7 +272,7 @@ soac_dc_test_prepare_slots(PyObject *owner, const PySoacDataclassFrameView *prod
                             PyObject *namespace, PyObject *original, PyObject **out)
 {
     *out = NULL;
-    PyObject *plan = PyTuple_GET_ITEM(owner, 8);
+    PyObject *plan = PyTuple_GET_ITEM(owner, 7);
     if (plan == Py_None) {
         PyErr_SetString(PySoac_GetStrictRuntimeUnavailableError(),
                         "fixture has no selected replacement plan");

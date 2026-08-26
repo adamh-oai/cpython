@@ -60,7 +60,6 @@ typedef struct {
     PyObject_HEAD
     SoacDataclassInvocation *invocation;
     PyObject *code_weakref;       /* No original-code/co_consts lifetime edge. */
-    PyObject *boundary;          /* Immutable required-check plan, if selected. */
     PyFunctionObject *function;  /* Cleared before weakrefs/decrefs; nonowning. */
     uint64_t identity;
     unsigned int role;
@@ -93,14 +92,9 @@ struct _PySoacDataclassFrameView {
 static PyTypeObject SoacDataclassInvocation_Type;
 static PyTypeObject SoacDataclassRecord_Type;
 static PyTypeObject SoacDataclassMember_Type;
-static PyTypeObject SoacDataclassBoundary_Type;
-static PyTypeObject SoacDataclassActivation_Type;
 static SoacDataclassRecord *soac_dataclass_record(PyFunctionObject *);
 static int soac_dataclass_original_code(SoacDataclassRecord *, PyFunctionObject *);
 static unsigned int soac_dataclass_bridge_kind(PyObject *);
-static int soac_dataclass_boundary_publication(PyFunctionObject *, SoacDataclassRecord *);
-static PyObject *soac_dataclass_checked_value_call(
-    _PyInterpreterFrame *, PyObject *, PyObject *const *, Py_ssize_t, PyObject *);
 static PyObject *soac_dataclass_dispatch_bridge(
     _PyInterpreterFrame *, PyObject *, unsigned int, PyObject *const *,
     Py_ssize_t, PyObject *);
@@ -248,7 +242,6 @@ soac_dataclass_record_traverse(SoacDataclassRecord *record,
 {
     Py_VISIT(record->invocation);
     Py_VISIT(record->code_weakref);
-    Py_VISIT(record->boundary);
     return 0;
 }
 
@@ -259,7 +252,6 @@ soac_dataclass_record_clear(SoacDataclassRecord *record)
     record->phase = SOAC_DC_RECORD_TERMINAL;
     Py_CLEAR(record->invocation);
     Py_CLEAR(record->code_weakref);
-    Py_CLEAR(record->boundary);
     return 0;
 }
 
@@ -308,8 +300,7 @@ PySoac_SetDataclassCallbacks(const PySoacDataclassCallbacks *callbacks)
         callbacks->enter == NULL || callbacks->create == NULL ||
         callbacks->validate_member == NULL || callbacks->bridge == NULL ||
         callbacks->compiled == NULL || callbacks->created == NULL ||
-        callbacks->bound == NULL || callbacks->value == NULL ||
-        callbacks->validate_component == NULL || callbacks->init_value == NULL ||
+        callbacks->validate_component == NULL ||
         callbacks->prepare_slots == NULL) {
         PyErr_SetString(PyExc_TypeError, "invalid native dataclass callback table");
         return -1;
@@ -326,10 +317,7 @@ PySoac_SetDataclassCallbacks(const PySoacDataclassCallbacks *callbacks)
             installed->bridge == callbacks->bridge &&
             installed->compiled == callbacks->compiled &&
             installed->created == callbacks->created &&
-            installed->bound == callbacks->bound &&
-            installed->value == callbacks->value &&
             installed->validate_component == callbacks->validate_component &&
-            installed->init_value == callbacks->init_value &&
             installed->prepare_slots == callbacks->prepare_slots) {
             return 0;
         }
@@ -338,9 +326,7 @@ PySoac_SetDataclassCallbacks(const PySoacDataclassCallbacks *callbacks)
     interp->soac.dataclass_installing = 1;
     if (PyType_Ready(&SoacDataclassInvocation_Type) < 0 ||
         PyType_Ready(&SoacDataclassRecord_Type) < 0 ||
-        PyType_Ready(&SoacDataclassMember_Type) < 0 ||
-        PyType_Ready(&SoacDataclassBoundary_Type) < 0 ||
-        PyType_Ready(&SoacDataclassActivation_Type) < 0) {
+        PyType_Ready(&SoacDataclassMember_Type) < 0) {
         interp->soac.dataclass_installing = 0;
         return -1;
     }
@@ -594,11 +580,6 @@ _PySOAC_DataclassVectorcallFromFrame(_PyInterpreterFrame *parent,
                                     PyObject *callable, PyObject *const *args,
                                     size_t nargsf, PyObject *kwnames)
 {
-    if (parent != NULL && parent->soac_checked_activation != NULL &&
-        _PySOAC_DataclassHasValueSite(parent)) {
-        return soac_dataclass_checked_value_call(
-            parent, callable, args, PyVectorcall_NARGS(nargsf), kwnames);
-    }
     if (parent == NULL || parent->soac_dataclass_invocation == NULL ||
         !soac_dataclass_is_running(
             (SoacDataclassInvocation *)parent->soac_dataclass_invocation)) {
@@ -611,11 +592,6 @@ _PySOAC_DataclassVectorcallFromFrame(_PyInterpreterFrame *parent,
                 (SoacDataclassInvocation *)parent->soac_dataclass_invocation,
                 "dataclass bridge is not the canonical native object");
             return NULL;
-        }
-        if (kind == Py_SOAC_DATACLASS_BRIDGE_VALUE) {
-            /* Only its expected site in a checked frame consumes a value
-             * obligation. Ordinary generated functions stay ordinary. */
-            return PyObject_Vectorcall(callable, args, nargsf, kwnames);
         }
         return soac_dataclass_dispatch_bridge(
             parent, callable, kind, args, PyVectorcall_NARGS(nargsf), kwnames);
@@ -676,12 +652,9 @@ _PySOAC_DataclassObjectCallFromFrame(_PyInterpreterFrame *parent,
                                     PyObject *callable, PyObject *args,
                                     PyObject *kwargs)
 {
-    int checked_site = parent != NULL &&
-        parent->soac_checked_activation != NULL &&
-        _PySOAC_DataclassHasValueSite(parent);
-    if (!checked_site && (parent == NULL || parent->soac_dataclass_invocation == NULL ||
+    if (parent == NULL || parent->soac_dataclass_invocation == NULL ||
         (!soac_dataclass_direct_python_callable(callable) &&
-         !_PySOAC_DataclassIsBridgeImplementation(callable)))) {
+         !_PySOAC_DataclassIsBridgeImplementation(callable))) {
         return PyObject_Call(callable, args, kwargs);
     }
     /* Use the same unpacking and release order as PyVectorcall_Call. The
@@ -1104,7 +1077,6 @@ soac_dataclass_new_record(_PyInterpreterFrame *producer, PyObject *code)
     record->invocation = (SoacDataclassInvocation *)Py_NewRef(
         producer->soac_dataclass_invocation);
     record->code_weakref = code_weakref;
-    record->boundary = NULL;
     record->function = NULL;
     record->identity = ++interp->soac.dataclass_creation_counter;
     record->role = role;
@@ -1136,7 +1108,7 @@ soac_dataclass_attach_record(PyFunctionObject *function, SoacDataclassRecord *re
     int status = _PyInterpreterState_GET()->soac.dataclass_callbacks.created(
         owner, (PyObject *)record->invocation, &view,
         (PyObject *)function, role);
-    /* Created may allocate an immutable check plan. Publish no function until
+    /* Created may allocate its weak birth witness. Publish no function until
      * its exact executing producer and all native binding coordinates survive
      * those callbacks. Constructor attributes are populated only afterward. */
     unsigned int rechecked_role = 0;
@@ -1147,8 +1119,7 @@ soac_dataclass_attach_record(PyFunctionObject *function, SoacDataclassRecord *re
         producer->soac_dataclass_invocation != (PyObject *)record->invocation ||
         function->func_soac_strict_owner != (PyObject *)record ||
         function->func_soac_strict_owner_state != FUNC_SOAC_OWNER_ATTACHED ||
-        !soac_dataclass_original_code(record, function) ||
-        soac_dataclass_boundary_publication(function, record) < 0) {
+        !soac_dataclass_original_code(record, function)) {
         /* Releasing the captured owner can run observers of an allocated
          * weak function witness. They must see a terminal actual function
          * even before the constructor performs its normal reference drop. */
@@ -1444,5 +1415,5 @@ _PySOAC_DataclassFinishMember(PyObject *object, int succeeded)
     }
 }
 
-#include "soac_dataclass_boundary.inc"
+#include "soac_dataclass_components.inc"
 #include "soac_dataclass_bridge.inc"

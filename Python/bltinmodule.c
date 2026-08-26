@@ -394,7 +394,6 @@ builtin_build_class_with_source(
     if (source_namespace) {
         const _PySoacInterpreterEntryV1 entry = {
             .kind = Py_SOAC_INTERPRETER_CLASS_NAMESPACE,
-            .boundary_snapshot = 0,
             .subject_owner = ((PyFunctionObject *)func)->func_soac_strict_owner,
             .parent = source_parent,
             .namespace_state_out = &namespace_state,

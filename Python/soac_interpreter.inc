@@ -36,16 +36,16 @@ soac_interpreter_xdecref_preserving_error(PyObject *object)
     PyErr_SetRaisedException(saved);
 }
 
-static const PySoacInterpreterCallbacksV1 *
+static const PySoacInterpreterCallbacksV2 *
 soac_interpreter_callbacks(void)
 {
 #ifdef Py_GIL_DISABLED
-    soac_interpreter_error("interpreter enforcement V1 requires a GIL build");
+    soac_interpreter_error("interpreter callbacks V2 require a GIL build");
     return NULL;
 #else
     PyInterpreterState *interp = _PyInterpreterState_GET();
     if (interp->soac.interpreter_closed ||
-        interp->soac.interpreter_callbacks.abi_version != Py_SOAC_INTERPRETER_ABI_V1) {
+        interp->soac.interpreter_callbacks.abi_version != Py_SOAC_INTERPRETER_CALLBACKS_ABI_V2) {
         soac_interpreter_error("interpreter enforcement callbacks are unavailable");
         return NULL;
     }
@@ -54,18 +54,18 @@ soac_interpreter_callbacks(void)
 }
 
 int
-PySoac_SetInterpreterCallbacksV1(
-    const PySoacInterpreterCallbacksV1 *callbacks, size_t callbacks_size)
+PySoac_SetInterpreterCallbacksV2(
+    const PySoacInterpreterCallbacksV2 *callbacks, size_t callbacks_size)
 {
 #ifdef Py_GIL_DISABLED
-    return soac_interpreter_error("interpreter enforcement V1 requires a GIL build");
+    return soac_interpreter_error("interpreter callbacks V2 require a GIL build");
 #else
     if (callbacks == NULL || callbacks_size != sizeof(*callbacks) ||
-        callbacks->abi_version != Py_SOAC_INTERPRETER_ABI_V1 ||
+        callbacks->abi_version != Py_SOAC_INTERPRETER_CALLBACKS_ABI_V2 ||
         callbacks->flags != 0 || callbacks->root_begin == NULL ||
         callbacks->root_end == NULL || callbacks->birth == NULL ||
         callbacks->function_attribute == NULL || callbacks->enter == NULL ||
-        callbacks->bound == NULL || callbacks->started == NULL ||
+        callbacks->started == NULL ||
         callbacks->call == NULL || callbacks->selected_call_finished == NULL ||
         callbacks->returned == NULL || callbacks->failed == NULL ||
         callbacks->leave == NULL ||
@@ -76,7 +76,7 @@ PySoac_SetInterpreterCallbacksV1(
     if (interp->soac.interpreter_closed) {
         return soac_interpreter_error("interpreter enforcement callbacks are closed");
     }
-    PySoacInterpreterCallbacksV1 *installed = &interp->soac.interpreter_callbacks;
+    PySoacInterpreterCallbacksV2 *installed = &interp->soac.interpreter_callbacks;
     if (installed->abi_version != 0) {
         if (installed->abi_version == callbacks->abi_version &&
             installed->flags == callbacks->flags &&
@@ -85,7 +85,6 @@ PySoac_SetInterpreterCallbacksV1(
             installed->birth == callbacks->birth &&
             installed->function_attribute == callbacks->function_attribute &&
             installed->enter == callbacks->enter &&
-            installed->bound == callbacks->bound &&
             installed->started == callbacks->started &&
             installed->call == callbacks->call &&
             installed->selected_call_finished == callbacks->selected_call_finished &&
@@ -268,9 +267,9 @@ soac_interpreter_retire(_PySoacInterpreterActivationV1 *activation, uint32_t rea
         /* Closing an interpreter blocks NEW entry but retains this immutable
          * scalar table until its already-entered ordinary frames are cleared.
          */
-        const PySoacInterpreterCallbacksV1 *callbacks =
+        const PySoacInterpreterCallbacksV2 *callbacks =
             &_PyInterpreterState_GET()->soac.interpreter_callbacks;
-        assert(callbacks->abi_version == Py_SOAC_INTERPRETER_ABI_V1);
+        assert(callbacks->abi_version == Py_SOAC_INTERPRETER_CALLBACKS_ABI_V2);
         callbacks->leave(state, reason);  /* No Python/allocation/error mutation. */
         soac_interpreter_xdecref_preserving_error(state);
     }
@@ -350,7 +349,6 @@ soac_interpreter_capture_entry(
     }
     *snapshot = (_PySoacInterpreterEntryV1) {
         .kind = Py_SOAC_INTERPRETER_FUNCTION,
-        .boundary_snapshot = function->func_soac_required_boundary != 0,
         .subject_owner = function->func_soac_strict_owner,
         .parent = NULL,
         .namespace_state_out = NULL,
@@ -365,7 +363,7 @@ _PySOAC_InterpreterInitFrame(
     if (entry == NULL) {
         return 0;
     }
-    const PySoacInterpreterCallbacksV1 *callbacks = soac_interpreter_callbacks();
+    const PySoacInterpreterCallbacksV2 *callbacks = soac_interpreter_callbacks();
     if (callbacks == NULL) {
         return -1;
     }
@@ -377,10 +375,8 @@ _PySOAC_InterpreterInitFrame(
         !PyFunction_Check(function) || entry->subject_owner == NULL ||
         entry->kind < Py_SOAC_INTERPRETER_ROOT ||
         entry->kind > Py_SOAC_INTERPRETER_CLASS_NAMESPACE ||
-        entry->boundary_snapshot > 1 ||
         (original_source && code->_co_soac_strict_source_id == 0) ||
-        (!original_source &&
-         (entry->kind != Py_SOAC_INTERPRETER_FUNCTION || entry->boundary_snapshot != 0)) ||
+        (!original_source && entry->kind != Py_SOAC_INTERPRETER_FUNCTION) ||
         (entry->kind == Py_SOAC_INTERPRETER_CLASS_NAMESPACE) !=
             (entry->namespace_state_out != NULL) ||
         (entry->namespace_state_out != NULL && *entry->namespace_state_out != NULL)) {
@@ -400,7 +396,6 @@ _PySOAC_InterpreterInitFrame(
     activation->code = code;
     activation->kind = entry->kind;
     activation->phase = Py_SOAC_INTERPRETER_BINDING;
-    activation->boundary_snapshot = entry->boundary_snapshot;
     activation->source_authority = 0;
     activation->return_attempted = 0;
     activation->failure_attempted = 0;
@@ -416,8 +411,7 @@ _PySOAC_InterpreterInitFrame(
     }
     PyObject *state = NULL;
     int status = callbacks->enter(
-        entry->kind, entry->subject_owner, &view, entry->parent,
-        entry->boundary_snapshot, &state);
+        entry->kind, entry->subject_owner, &view, entry->parent, &state);
     view.self = NULL;
     if (soac_interpreter_status(status, "interpreter entry callback failed") < 0 ||
         state == NULL) {
@@ -460,7 +454,8 @@ _PySOAC_CheckedFrameBound(_PyInterpreterFrame *frame)
 {
     PyObject *object = frame->soac_checked_activation;
     if (!_PySOAC_InterpreterIsActivation(object)) {
-        return object == NULL ? 0 : _PySOAC_DataclassCheckBound(frame);
+        return object == NULL ? 0
+            : soac_interpreter_error("interpreter binding has unknown frame metadata");
     }
     _PySoacInterpreterActivationV1 *activation = (_PySoacInterpreterActivationV1 *)object;
     if (activation->phase != Py_SOAC_INTERPRETER_BINDING ||
@@ -471,27 +466,6 @@ _PySOAC_CheckedFrameBound(_PyInterpreterFrame *frame)
         return -1;
     }
     activation->phase = Py_SOAC_INTERPRETER_BOUND;
-    if (!activation->boundary_snapshot ||
-        (activation->code->co_flags & (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR))) {
-        return 0;
-    }
-    const PySoacInterpreterCallbacksV1 *callbacks = soac_interpreter_callbacks();
-    if (callbacks == NULL) {
-        return -1;
-    }
-    PySoacInterpreterFrameViewV1 view;
-    if (_PySOAC_InterpreterView(frame, NULL, activation->phase, activation->state, &view) < 0) {
-        return -1;
-    }
-    int status = callbacks->bound(activation->state, &view);
-    view.self = NULL;
-    if (soac_interpreter_status(status, "interpreter parameter check failed") < 0) {
-        return -1;
-    }
-    if (!soac_interpreter_activation_matches(activation, frame) ||
-        soac_interpreter_closure_complete(activation) < 0) {
-        return soac_interpreter_error("interpreter parameter check changed its frame");
-    }
     return 0;
 }
 
@@ -556,12 +530,11 @@ _PySOAC_CheckedFrameExecution(_PyInterpreterFrame *frame)
         return soac_interpreter_error(
             "interpreter-owned function needs its initialized native activation");
     }
-    if (object != NULL ||
-        (function != NULL && PyFunction_Check(function) &&
-         ((PyFunctionObject *)function)->func_soac_required_boundary)) {
-        if (_PySOAC_DataclassCheckRequiredFrame(frame) < 0) {
-            return -1;
-        }
+    if (object != NULL) {
+        return soac_interpreter_error("interpreter frame has unknown metadata");
+    }
+    if (_PySOAC_DataclassCheckFrameConstruction(frame) < 0) {
+        return -1;
     }
     if (frame->soac_dataclass_invocation != NULL ||
         (frame->previous != NULL && frame->previous->soac_dataclass_invocation != NULL)) {
@@ -571,8 +544,8 @@ _PySOAC_CheckedFrameExecution(_PyInterpreterFrame *frame)
 }
 
 /* An arbitrary PEP 523 evaluator can consume the frame and manufacture a
- * result without any native RETURN_VALUE. V1 refuses that actual dispatch,
- * rather than silently omitting its boundary or adding a second state owner.
+ * result without any native RETURN_VALUE. Refuse that actual dispatch,
+ * which would skip pending-definition completion and source ownership checks.
  * Generic VM CALL's already-committed default-evaluator choice bypasses this
  * dispatch exactly as ordinary CPython does. Tracing/monitoring are unchanged. */
 int
@@ -612,7 +585,7 @@ _PySOAC_InterpreterBirth(_PyInterpreterFrame *parent,
     if (!activation->source_authority) {
         return 0;  /* Authenticated ordinary replacement: no source child grant. */
     }
-    const PySoacInterpreterCallbacksV1 *callbacks = soac_interpreter_callbacks();
+    const PySoacInterpreterCallbacksV2 *callbacks = soac_interpreter_callbacks();
     if (callbacks == NULL || activation->phase != Py_SOAC_INTERPRETER_RUNNING ||
         !soac_interpreter_activation_matches(activation, parent)) {
         return soac_interpreter_error("function birth has no active interpreter parent");
@@ -625,11 +598,10 @@ _PySOAC_InterpreterBirth(_PyInterpreterFrame *parent,
         return -1;
     }
     PyObject *owner = NULL;
-    uint32_t required = 0;
-    int status = callbacks->birth(&view, (PyObject *)function, &owner, &required);
+    int status = callbacks->birth(&view, (PyObject *)function, &owner);
     view.self = NULL;
     if (soac_interpreter_status(status, "interpreter function birth failed") < 0 ||
-        owner == NULL || required > 1 || function->func_code != code ||
+        owner == NULL || function->func_code != code ||
         function->func_globals != globals ||
         function->func_soac_strict_owner_state != FUNC_SOAC_OWNER_NONE ||
         function->func_soac_strict_owner != NULL || function->func_soac_strict_id != 0 ||
@@ -639,12 +611,11 @@ _PySOAC_InterpreterBirth(_PyInterpreterFrame *parent,
         return -1;
     }
     /* No callback after this MOVE and before the ordinary CREATE watcher.
-     * Stock vectorcall is intentional: common native binding checks owned
-     * source functions while generic VM CALL still consumes its input tokens.
+     * Stock vectorcall is intentional: common native entry validates source
+     * ownership while generic VM CALL still consumes its input tokens.
      */
     function->func_soac_strict_owner = owner;
     function->func_soac_strict_owner_state = FUNC_SOAC_OWNER_INTERPRETER_ATTACHED;
-    function->func_soac_required_boundary = (unsigned char)required;
     return 0;
 }
 
@@ -710,7 +681,7 @@ _PySOAC_InterpreterDefinitionStore(
     if (!activation->source_authority) {
         return 0;
     }
-    const PySoacInterpreterCallbacksV1 *callbacks = soac_interpreter_callbacks();
+    const PySoacInterpreterCallbacksV2 *callbacks = soac_interpreter_callbacks();
     if (callbacks == NULL || activation->phase != Py_SOAC_INTERPRETER_RUNNING ||
         !soac_interpreter_activation_matches(activation, frame) || lane > 1) {
         return soac_interpreter_error("definition Store has no active interpreter frame");
@@ -748,7 +719,7 @@ _PySOAC_CheckedFrameReturn(_PyInterpreterFrame *frame,
         (activation->code->co_flags & (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR))) {
         return 0;
     }
-    const PySoacInterpreterCallbacksV1 *callbacks = soac_interpreter_callbacks();
+    const PySoacInterpreterCallbacksV2 *callbacks = soac_interpreter_callbacks();
     if (callbacks == NULL) {
         return -1;
     }
@@ -759,7 +730,7 @@ _PySOAC_CheckedFrameReturn(_PyInterpreterFrame *frame,
     }
     int status = callbacks->returned(activation->state, &view, value);
     view.self = NULL;
-    return soac_interpreter_status(status, "interpreter return check failed");
+    return soac_interpreter_status(status, "interpreter return completion failed");
 }
 
 int
@@ -781,7 +752,7 @@ _PySOAC_CheckedFrameFailed(_PyInterpreterFrame *frame,
     activation->phase = Py_SOAC_INTERPRETER_FAILING;
     int status = -1;
     PySoacInterpreterFrameViewV1 view;
-    const PySoacInterpreterCallbacksV1 *callbacks = soac_interpreter_callbacks();
+    const PySoacInterpreterCallbacksV2 *callbacks = soac_interpreter_callbacks();
     if (callbacks != NULL &&
         soac_interpreter_activation_matches(activation, frame) &&
         _PySOAC_InterpreterView(frame, instruction, activation->phase,
@@ -850,7 +821,7 @@ PySoac_EvalInterpreterModuleV1(PyObject *module, PyObject *root_code,
     if (PyErr_Occurred()) {
         return NULL;
     }
-    const PySoacInterpreterCallbacksV1 *callbacks = soac_interpreter_callbacks();
+    const PySoacInterpreterCallbacksV2 *callbacks = soac_interpreter_callbacks();
     if (callbacks == NULL) {
         return NULL;
     }
@@ -884,7 +855,6 @@ PySoac_EvalInterpreterModuleV1(PyObject *module, PyObject *root_code,
         if (function != NULL) {
             const _PySoacInterpreterEntryV1 entry = {
                 .kind = Py_SOAC_INTERPRETER_ROOT,
-                .boundary_snapshot = 0,
                 .subject_owner = module_owner,
                 .parent = NULL,
                 .namespace_state_out = NULL,
@@ -1182,7 +1152,7 @@ soac_selected_finished(
     PyObject *primary = PyErr_GetRaisedException();
     int status = -1;
     PySoacInterpreterFrameViewV1 view = {0};
-    const PySoacInterpreterCallbacksV1 *callbacks = soac_interpreter_callbacks();
+    const PySoacInterpreterCallbacksV2 *callbacks = soac_interpreter_callbacks();
     if (callbacks != NULL && caller == _PyThreadState_GET()->current_frame &&
         ((kind == Py_SOAC_INTERPRETER_CALL_BUILTIN_DESCRIPTOR &&
           metadata != NULL && dataclass_owner == NULL && stage == 0) ||

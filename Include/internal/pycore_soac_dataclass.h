@@ -72,20 +72,9 @@ extern PyObject *_PySOAC_TypeFromDataclassSlotsHandle(
     _PySoacDataclassSlotsContext *, PyObject *);
 extern void _PySOAC_ClearDataclassSlotsHandle(PyObject *);
 
-/* Generated checks are owned by an actual frame activation, not an ambient
- * invocation or a permission on shared code. A C forwarding vectorcall may
- * call this captured entry; restoring stock entry cannot create activation. */
-PyAPI_FUNC(PyObject *) _PySOAC_DataclassCheckedVectorcall(
-    PyObject *function, PyObject *const *args, size_t nargsf, PyObject *kwnames);
-extern PyObject *_PySOAC_DataclassEvalCheckedVector(
-    PyThreadState *tstate, PyFunctionObject *function,
-    PyObject *const *args, size_t argcount, PyObject *kwnames,
-    PyObject *activation);
-extern unsigned char *_PySOAC_DataclassSuppliedMask(PyObject *activation);
-extern int _PySOAC_DataclassCheckBound(_PyInterpreterFrame *frame);
-PyAPI_FUNC(int) _PySOAC_DataclassCheckRequiredFrame(_PyInterpreterFrame *frame);
-/* Pure dispatch/deoptimization predicate. It never grants entry authority. */
-PyAPI_FUNC(int) _PySOAC_DataclassHasValueSite(_PyInterpreterFrame *frame);
+/* Structural safety for a generated function exposed before its closure
+ * attributes have been populated. No argument or return type predicates. */
+extern int _PySOAC_DataclassCheckFrameConstruction(_PyInterpreterFrame *frame);
 
 /* Begin consumes the exact fresh record before allocating the operation.
  * The returned opaque GC owner pins this operation's operands. Both the

@@ -3928,8 +3928,6 @@ dummy_func(
                 // commits this evaluator before any callback-capable binding.
                 _PyFrameEvalFunction eval_frame_before_binding;
                 if (Py_TYPE(callable_o) == &PyFunction_Type &&
-                    (frame->soac_checked_activation == NULL ||
-                     !_PySOAC_DataclassHasValueSite(frame)) &&
                     (eval_frame_before_binding = tstate->interp->eval_frame) == NULL &&
                     ((PyFunctionObject *)callable_o)->vectorcall == _PyFunction_Vectorcall)
                 {
@@ -4869,8 +4867,6 @@ dummy_func(
                 // commits this evaluator before any callback-capable binding.
                 _PyFrameEvalFunction eval_frame_before_binding;
                 if (Py_TYPE(callable_o) == &PyFunction_Type &&
-                    (frame->soac_checked_activation == NULL ||
-                     !_PySOAC_DataclassHasValueSite(frame)) &&
                     (eval_frame_before_binding = tstate->interp->eval_frame) == NULL &&
                     ((PyFunctionObject *)callable_o)->vectorcall == _PyFunction_Vectorcall)
                 {
