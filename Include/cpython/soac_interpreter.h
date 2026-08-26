@@ -11,34 +11,6 @@ extern "C" {
 #define Py_SOAC_INTERPRETER_ABI_V1 1u
 #define Py_SOAC_INTERPRETER_CALLBACKS_ABI_V2 2u
 
-/* GIL-only observer refusal for SOAC execution. This does not create or link
- * Python frames, reconstruct tracebacks, retain values or grant execution.
- * The caller zero-initializes the storage, keeps its address stable while
- * active, and pins actual_code through the existing call activation. All
- * fields are private borrowed state: do not copy, modify or free an active
- * scope. Nested scopes must leave in LIFO order on their entering tstate. */
-#define Py_SOAC_OBSERVER_SCOPE_ABI_V1 1u
-typedef struct PySoacObserverScopeV1 {
-    struct PySoacObserverScopeV1 *_previous;
-    PyThreadState *_thread;
-    PyCodeObject *_code;
-} PySoacObserverScopeV1;
-
-/* Call with an attached current tstate and the GIL. Enter validates the exact
- * size/alignment, empty storage and actual observer configuration before
- * publication. An incoming pending exception rejects entry unchanged.
- * Return 0 on success, -1 on refusal without publishing a partial scope. */
-PyAPI_FUNC(int) PySoac_EnterObserverScopeV1(
-    PySoacObserverScopeV1 *scope, size_t scope_size, PyCodeObject *actual_code);
-
-/* Leave before releasing the activation's code owner. A successful leave
- * unlinks and zeros the storage without allocation, callbacks or decrefs.
- * Success and refusal both preserve any incoming pending exception. Storage
- * may be reused after a successful leave. Return 0 on success, -1 on invalid
- * size/alignment, thread or LIFO position, without a partial pop. */
-PyAPI_FUNC(int) PySoac_LeaveObserverScopeV1(
-    PySoacObserverScopeV1 *scope, size_t scope_size);
-
 #define Py_SOAC_INTERPRETER_ROOT 1u
 #define Py_SOAC_INTERPRETER_FUNCTION 2u
 #define Py_SOAC_INTERPRETER_CLASS_NAMESPACE 3u

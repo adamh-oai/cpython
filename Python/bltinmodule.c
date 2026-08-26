@@ -1,7 +1,6 @@
 /* Built-in functions */
 
 #include "Python.h"
-#include "pycore_soac_observers.h"
 #include "pycore_ast.h"           // _PyAST_Validate()
 #include "pycore_call.h"          // _PyObject_CallNoArgs()
 #include "pycore_cell.h"          // PyCell_GetRef()
@@ -3874,8 +3873,7 @@ PySoac_VectorcallWithContext(PyObject *callable, PyObject *const *args,
                              size_t nargsf, PyObject *kwnames,
                              PyObject *actual_globals, PyObject *actual_locals)
 {
-    if (PyErr_Occurred() ||
-        _PySoacSource_CheckCallObservers(_PyThreadState_GET()) < 0) {
+    if (PyErr_Occurred()) {
         return NULL;
     }
 
@@ -3900,8 +3898,7 @@ PyObject *
 PySoac_ObjectCallWithContext(PyObject *callable, PyObject *args, PyObject *kwargs,
                              PyObject *actual_globals, PyObject *actual_locals)
 {
-    if (PyErr_Occurred() ||
-        _PySoacSource_CheckCallObservers(_PyThreadState_GET()) < 0) {
+    if (PyErr_Occurred()) {
         return NULL;
     }
 

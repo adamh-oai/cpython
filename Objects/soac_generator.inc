@@ -267,12 +267,6 @@ soac_gen_new_managed(PyTypeObject *type, int code_kind,
                         "managed generator code does not match the native family");
         return NULL;
     }
-    if (type == &PyCoro_Type &&
-        _PyThreadState_GET()->coroutine_origin_tracking_depth != 0) {
-        PyErr_SetString(PyExc_NotImplementedError,
-                        "optimized coroutine origin tracking is not supported");
-        return NULL;
-    }
     PyFunctionObject *func = (PyFunctionObject *)function;
     PyObject *public_name = name == NULL ? func->func_name : name;
     PyObject *public_qualname = qualname == NULL ? func->func_qualname : qualname;

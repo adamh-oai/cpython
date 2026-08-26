@@ -495,6 +495,10 @@ soac_dataclass_enter(SoacDataclassInvocation *invocation, unsigned int stage,
     int status = _PyInterpreterState_GET()->soac.dataclass_callbacks.enter(
         invocation->owner, stage, parent == NULL ? NULL : &parent_view,
         &child_view, &role);
+    /* An authenticated helper must execute the native generation and
+     * pending-construction completion hooks. A replacement evaluator could
+     * return without those hooks; this protects generated-code provenance,
+     * not tracing, profiling or monitoring event compatibility. */
     if (status < 0 || status > 1 || PyErr_Occurred() ||
         !soac_dataclass_is_running(invocation) || invocation->owner == NULL ||
         (status == 1 && (role == 0 || !soac_dataclass_frame_valid(frame) ||
@@ -691,6 +695,9 @@ soac_dataclass_begin_root(PyObject *object, unsigned int stage, PyObject *callab
         return soac_dataclass_fail(invocation, "invalid dataclass root stage");
     SoacDataclassPhase expected = stage == Py_SOAC_DATACLASS_ROOT_FACTORY
         ? SOAC_DC_NEW : SOAC_DC_CLASS_BOUND;
+    /* The root recipe authenticates native generated-code provenance and
+     * pending construction completion. A replacement evaluator may skip
+     * those hooks, independently of any observer event policy. */
     if (invocation->root_transport != SOAC_DC_ROOT_INACTIVE ||
         invocation->phase != expected ||
         invocation->owner == NULL || callable == NULL ||

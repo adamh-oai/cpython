@@ -2,7 +2,6 @@
 /* Thread and interpreter state structures and their interfaces */
 
 #include "Python.h"
-#include "pycore_soac_observers.h"
 #include "pycore_abstract.h"      // _PyIndex_Check()
 #include "pycore_audit.h"         // _Py_AuditHookEntry
 #include "pycore_backoff.h"       // JUMP_BACKWARD_INITIAL_VALUE, SIDE_EXIT_INITIAL_VALUE
@@ -3014,39 +3013,25 @@ _PyInterpreterState_GetEvalFrameFunc(PyInterpreterState *interp)
 }
 
 
-int
-_PyInterpreterState_SetEvalFrameFuncChecked(PyInterpreterState *interp,
-                                          _PyFrameEvalFunction eval_frame)
+void
+_PyInterpreterState_SetEvalFrameFunc(PyInterpreterState *interp,
+                                     _PyFrameEvalFunction eval_frame)
 {
-    if (PyErr_Occurred()) return -1;
-    if (eval_frame == _PyEval_EvalFrameDefault) eval_frame = NULL;
-    if (eval_frame == interp->eval_frame) return 0;
-
-    _PyEval_StopTheWorld(interp);
-    if (eval_frame != NULL && _PySoacSource_HasProtectedInterval(interp, NULL)) {
-        _PyEval_StartTheWorld(interp);
-        return _PySoacSource_ResolveObserverStatus(_Py_SOAC_OBSERVER_REFUSED);
+    if (eval_frame == _PyEval_EvalFrameDefault) {
+        eval_frame = NULL;
+    }
+    if (eval_frame == interp->eval_frame) {
+        return;
     }
 #ifdef _Py_TIER2
     if (eval_frame != NULL) {
-        /* Invalidation is callback-free. No fallible admission work follows
-         * it before the actual hook field is committed. */
         _Py_Executors_InvalidateAll(interp, 1);
     }
 #endif
     RARE_EVENT_INC(set_eval_frame_func);
+    _PyEval_StopTheWorld(interp);
     interp->eval_frame = eval_frame;
     _PyEval_StartTheWorld(interp);
-    return 0;
-}
-
-void
-_PyInterpreterState_SetEvalFrameFunc(PyInterpreterState *interp,
-                                    _PyFrameEvalFunction eval_frame)
-{
-    PyObject *saved = PyErr_GetRaisedException();
-    int status = _PyInterpreterState_SetEvalFrameFuncChecked(interp, eval_frame);
-    _PySoacSource_FinishVoidSetter(status, saved, "_PyInterpreterState_SetEvalFrameFunc");
 }
 
 

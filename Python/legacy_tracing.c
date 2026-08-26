@@ -3,7 +3,6 @@
  */
 
 #include "Python.h"
-#include "pycore_soac_observers.h"
 #include "pycore_audit.h"         // _PySys_Audit()
 #include "pycore_ceval.h"         // export _PyEval_SetProfile()
 #include "pycore_frame.h"         // PyFrameObject members
@@ -128,7 +127,7 @@ sys_profile_call_or_return(
 }
 
 static int
-set_opcode_trace_world_stopped(PyCodeObject *code, bool enable, bool thread_list_locked)
+set_opcode_trace_world_stopped(PyCodeObject *code, bool enable)
 {
     _PyMonitoringEventSet events = 0;
     if (_PyMonitoring_GetLocalEvents(code, PY_MONITORING_SYS_TRACE_ID, &events) < 0) {
@@ -146,9 +145,7 @@ set_opcode_trace_world_stopped(PyCodeObject *code, bool enable, bool thread_list
         }
         events &= (~(1 << PY_MONITORING_EVENT_INSTRUCTION));
     }
-    return thread_list_locked
-        ? _PyMonitoring_SetLocalEventsThreadListLocked(code, PY_MONITORING_SYS_TRACE_ID, events)
-        : _PyMonitoring_SetLocalEvents(code, PY_MONITORING_SYS_TRACE_ID, events);
+    return _PyMonitoring_SetLocalEvents(code, PY_MONITORING_SYS_TRACE_ID, events);
 }
 
 int
@@ -172,9 +169,9 @@ _PyEval_SetOpcodeTrace(PyFrameObject *frame, bool enable)
 
     PyInterpreterState *interp = _PyInterpreterState_GET();
     _PyEval_StopTheWorld(interp);
-    int res = set_opcode_trace_world_stopped(code, enable, false);
+    int res = set_opcode_trace_world_stopped(code, enable);
     _PyEval_StartTheWorld(interp);
-    return _PySoacSource_ResolveObserverStatus(res);
+    return res;
 }
 
 static PyObject *
@@ -539,24 +536,17 @@ _PyEval_SetProfile(PyThreadState *tstate, Py_tracefunc func, PyObject *arg)
     }
 
     PyInterpreterState *interp = tstate->interp;
-    if (func != NULL && _PySoacSource_HasProtectedInterval(interp, NULL)) {
-        return _PySoacSource_ResolveObserverStatus(_Py_SOAC_OBSERVER_REFUSED);
-    }
     if (_PyOnceFlag_CallOnce(&interp->sys_profile_once_flag,
                              setup_profile_callbacks, NULL) < 0) {
         return -1;
     }
 
     _PyEval_StopTheWorld(interp);
-    if (func != NULL && _PySoacSource_HasProtectedInterval(interp, NULL)) {
-        _PyEval_StartTheWorld(interp);
-        return _PySoacSource_ResolveObserverStatus(_Py_SOAC_OBSERVER_REFUSED);
-    }
     PyObject *old_profileobj = swap_profile_func_arg(tstate, func, arg);
     int ret = set_monitoring_profile_events(interp);
     _PyEval_StartTheWorld(interp);
     Py_XDECREF(old_profileobj);  // needs to be decref'd outside of stop-the-world
-    return _PySoacSource_ResolveObserverStatus(ret);
+    return ret;
 }
 
 int
@@ -570,9 +560,6 @@ _PyEval_SetProfileAllThreads(PyInterpreterState *interp, Py_tracefunc func, PyOb
         return -1;
     }
 
-    if (func != NULL && _PySoacSource_HasProtectedInterval(interp, NULL)) {
-        return _PySoacSource_ResolveObserverStatus(_Py_SOAC_OBSERVER_REFUSED);
-    }
     if (_PyOnceFlag_CallOnce(&interp->sys_profile_once_flag,
                              setup_profile_callbacks, NULL) < 0) {
         return -1;
@@ -580,10 +567,6 @@ _PyEval_SetProfileAllThreads(PyInterpreterState *interp, Py_tracefunc func, PyOb
 
     PyObject *old_profileobjs = NULL;
     _PyEval_StopTheWorld(interp);
-    if (func != NULL && _PySoacSource_HasProtectedInterval(interp, NULL)) {
-        _PyEval_StartTheWorld(interp);
-        return _PySoacSource_ResolveObserverStatus(_Py_SOAC_OBSERVER_REFUSED);
-    }
     HEAD_LOCK(&_PyRuntime);
     Py_ssize_t num_thread_states = 0;
     _Py_FOR_EACH_TSTATE_UNLOCKED(interp, p) {
@@ -603,7 +586,7 @@ _PyEval_SetProfileAllThreads(PyInterpreterState *interp, Py_tracefunc func, PyOb
     int ret = set_monitoring_profile_events(interp);
     _PyEval_StartTheWorld(interp);
     Py_XDECREF(old_profileobjs);  // needs to be decref'd outside of stop-the-world
-    return _PySoacSource_ResolveObserverStatus(ret);
+    return ret;
 }
 
 static int
@@ -690,7 +673,7 @@ set_monitoring_trace_events(PyInterpreterState *interp)
 
 // Enable opcode tracing for the thread's current frame if needed.
 static int
-maybe_set_opcode_trace(PyThreadState *tstate, bool thread_list_locked)
+maybe_set_opcode_trace(PyThreadState *tstate)
 {
     _PyInterpreterFrame *iframe = tstate->current_frame;
     if (iframe == NULL) {
@@ -700,7 +683,7 @@ maybe_set_opcode_trace(PyThreadState *tstate, bool thread_list_locked)
     if (frame == NULL || !frame->f_trace_opcodes) {
         return 0;
     }
-    return set_opcode_trace_world_stopped(_PyFrame_GetCode(iframe), true, thread_list_locked);
+    return set_opcode_trace_world_stopped(_PyFrame_GetCode(iframe), true);
 }
 
 int
@@ -718,9 +701,6 @@ _PyEval_SetTrace(PyThreadState *tstate, Py_tracefunc func, PyObject *arg)
     }
 
     PyInterpreterState *interp = tstate->interp;
-    if (func != NULL && _PySoacSource_HasProtectedInterval(interp, NULL)) {
-        return _PySoacSource_ResolveObserverStatus(_Py_SOAC_OBSERVER_REFUSED);
-    }
     if (_PyOnceFlag_CallOnce(&interp->sys_trace_once_flag,
                              setup_trace_callbacks, NULL) < 0) {
         return -1;
@@ -728,22 +708,18 @@ _PyEval_SetTrace(PyThreadState *tstate, Py_tracefunc func, PyObject *arg)
 
     int err = 0;
     _PyEval_StopTheWorld(interp);
-    if (func != NULL && _PySoacSource_HasProtectedInterval(interp, NULL)) {
-        _PyEval_StartTheWorld(interp);
-        return _PySoacSource_ResolveObserverStatus(_Py_SOAC_OBSERVER_REFUSED);
-    }
     PyObject *old_traceobj = swap_trace_func_arg(tstate, func, arg);
     err = set_monitoring_trace_events(interp);
     if (err != 0) {
         goto done;
     }
     if (interp->sys_tracing_threads) {
-        err = maybe_set_opcode_trace(tstate, false);
+        err = maybe_set_opcode_trace(tstate);
     }
 done:
     _PyEval_StartTheWorld(interp);
     Py_XDECREF(old_traceobj);  // needs to be decref'd outside stop-the-world
-    return _PySoacSource_ResolveObserverStatus(err);
+    return err;
 }
 
 int
@@ -757,9 +733,6 @@ _PyEval_SetTraceAllThreads(PyInterpreterState *interp, Py_tracefunc func, PyObje
         return -1;
     }
 
-    if (func != NULL && _PySoacSource_HasProtectedInterval(interp, NULL)) {
-        return _PySoacSource_ResolveObserverStatus(_Py_SOAC_OBSERVER_REFUSED);
-    }
     if (_PyOnceFlag_CallOnce(&interp->sys_trace_once_flag,
                              setup_trace_callbacks, NULL) < 0) {
         return -1;
@@ -767,10 +740,6 @@ _PyEval_SetTraceAllThreads(PyInterpreterState *interp, Py_tracefunc func, PyObje
 
     PyObject *old_trace_objs = NULL;
     _PyEval_StopTheWorld(interp);
-    if (func != NULL && _PySoacSource_HasProtectedInterval(interp, NULL)) {
-        _PyEval_StartTheWorld(interp);
-        return _PySoacSource_ResolveObserverStatus(_Py_SOAC_OBSERVER_REFUSED);
-    }
     HEAD_LOCK(&_PyRuntime);
     Py_ssize_t num_thread_states = 0;
     _Py_FOR_EACH_TSTATE_UNLOCKED(interp, p) {
@@ -788,12 +757,12 @@ _PyEval_SetTraceAllThreads(PyInterpreterState *interp, Py_tracefunc func, PyObje
     }
     if (interp->sys_tracing_threads) {
         _Py_FOR_EACH_TSTATE_UNLOCKED(interp, tstate) {
-            int err = maybe_set_opcode_trace(tstate, true);
+            int err = maybe_set_opcode_trace(tstate);
             if (err != 0) {
                 HEAD_UNLOCK(&_PyRuntime);
                 _PyEval_StartTheWorld(interp);
                 Py_XDECREF(old_trace_objs);
-                return _PySoacSource_ResolveObserverStatus(err);
+                return -1;
             }
         }
     }
@@ -801,5 +770,5 @@ _PyEval_SetTraceAllThreads(PyInterpreterState *interp, Py_tracefunc func, PyObje
     int err = set_monitoring_trace_events(interp);
     _PyEval_StartTheWorld(interp);
     Py_XDECREF(old_trace_objs);  // needs to be decref'd outside of stop-the-world
-    return _PySoacSource_ResolveObserverStatus(err);
+    return err;
 }

@@ -695,7 +695,6 @@ PyEval_EvalFrameEx(PyFrameObject *f, int throwflag)
 }
 
 #include "ceval_macros.h"
-#include "soac_source_observers.inc"
 
 
 /* Helper functions to keep the size of the largest uops down */
@@ -2639,36 +2638,40 @@ void
 PyEval_SetProfile(Py_tracefunc func, PyObject *arg)
 {
     PyThreadState *tstate = _PyThreadState_GET();
-    PyObject *saved = PyErr_GetRaisedException();
-    int status = _PyEval_SetProfile(tstate, func, arg);
-    _PySoacSource_FinishVoidSetter(status, saved, "PyEval_SetProfile");
+    if (_PyEval_SetProfile(tstate, func, arg) < 0) {
+        /* Log _PySys_Audit() error */
+        PyErr_FormatUnraisable("Exception ignored in PyEval_SetProfile");
+    }
 }
 
 void
 PyEval_SetProfileAllThreads(Py_tracefunc func, PyObject *arg)
 {
     PyInterpreterState *interp = _PyInterpreterState_GET();
-    PyObject *saved = PyErr_GetRaisedException();
-    int status = _PyEval_SetProfileAllThreads(interp, func, arg);
-    _PySoacSource_FinishVoidSetter(status, saved, "PyEval_SetProfileAllThreads");
+    if (_PyEval_SetProfileAllThreads(interp, func, arg) < 0) {
+        /* Log _PySys_Audit() error */
+        PyErr_FormatUnraisable("Exception ignored in PyEval_SetProfileAllThreads");
+    }
 }
 
 void
 PyEval_SetTrace(Py_tracefunc func, PyObject *arg)
 {
     PyThreadState *tstate = _PyThreadState_GET();
-    PyObject *saved = PyErr_GetRaisedException();
-    int status = _PyEval_SetTrace(tstate, func, arg);
-    _PySoacSource_FinishVoidSetter(status, saved, "PyEval_SetTrace");
+    if (_PyEval_SetTrace(tstate, func, arg) < 0) {
+        /* Log _PySys_Audit() error */
+        PyErr_FormatUnraisable("Exception ignored in PyEval_SetTrace");
+    }
 }
 
 void
 PyEval_SetTraceAllThreads(Py_tracefunc func, PyObject *arg)
 {
     PyInterpreterState *interp = _PyInterpreterState_GET();
-    PyObject *saved = PyErr_GetRaisedException();
-    int status = _PyEval_SetTraceAllThreads(interp, func, arg);
-    _PySoacSource_FinishVoidSetter(status, saved, "PyEval_SetTraceAllThreads");
+    if (_PyEval_SetTraceAllThreads(interp, func, arg) < 0) {
+        /* Log _PySys_Audit() error */
+        PyErr_FormatUnraisable("Exception ignored in PyEval_SetTraceAllThreads");
+    }
 }
 
 int
