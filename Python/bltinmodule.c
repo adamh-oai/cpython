@@ -417,7 +417,7 @@ builtin_build_class_with_source(
         if (source_namespace) {
             if (tstate->interp->soac.interpreter_closed ||
                 tstate->interp->soac.interpreter_callbacks.abi_version !=
-                    Py_SOAC_INTERPRETER_ABI_V1) {
+                    Py_SOAC_INTERPRETER_CALLBACKS_ABI_V2) {
                 interpreter_build_class_error("interpreter class preparation is unavailable");
                 goto error;
             }
