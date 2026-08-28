@@ -233,6 +233,21 @@ soac_policy(PyDictObject *dict)
     return policy;
 }
 
+/* Admission-only dictionaries keep ordinary lookup and bulk-update semantics.
+ * Do not hold a mutation guard across arbitrary hash/equality/iterator calls:
+ * those may legitimately mutate the same dictionary. The ordinary kernels
+ * still acquire and validate the permanent owner at each resolved commit.
+ * Installation, validator reentrancy and terminal storage keep their existing
+ * early refusals, including for otherwise-no-op mutation entrypoints. */
+static inline int
+soac_needs_mutation_transaction(PyDictObject *dict)
+{
+    if (!_PyDict_HasSoacPolicy(dict)) return 0;
+    SoacDictPolicy *policy = soac_policy(dict);
+    return policy->flags != PyDict_SOAC_ADMISSION_ONLY ||
+        soac_policy_terminal(dict, policy) || soac_policy_mutating(dict, policy);
+}
+
 int
 PyDict_HasSoacPolicy(PyObject *dict)
 {
@@ -336,6 +351,11 @@ soac_validate(SoacDictPolicy *policy, PyDictObject *dict,
            commit path, even if the owner's callback would approve it. */
         PyErr_SetString(soac_mutation_error(),
                         "cannot mutate a read-only SOAC dictionary");
+        return -1;
+    }
+    if (operation == PyDict_SOAC_CLONE && policy->flags != PyDict_SOAC_ADMISSION_ONLY) {
+        PyErr_SetString(soac_mutation_error(),
+                        "ordinary dictionary cloning requires admission-only ownership");
         return -1;
     }
     if (operation == PyDict_SOAC_DELETE && soac_clear_key_pending(policy, key)) {
@@ -766,7 +786,7 @@ PyDict_SetSoacPolicy(PyObject *op, PyObject *owner,
     if (op == NULL || !PyDict_CheckExact(op) || owner == NULL ||
         validate == NULL ||
         (flags != 0 && flags != PyDict_SOAC_ALLOW_NONSTRING_KEYS &&
-         flags != PyDict_SOAC_READ_ONLY)) {
+         flags != PyDict_SOAC_READ_ONLY && flags != PyDict_SOAC_ADMISSION_ONLY)) {
         PyErr_SetString(PyExc_TypeError,
                         "SOAC policy requires an exact dict, owner, callback and supported flags");
         return -1;
@@ -780,6 +800,11 @@ PyDict_SetSoacPolicy(PyObject *op, PyObject *owner,
     }
     if (_PyDict_HasSoacPolicy(dict)) {
         PyErr_SetString(soac_mutation_error(), "SOAC dictionary policy is permanent");
+        return -1;
+    }
+    if (flags == PyDict_SOAC_ADMISSION_ONLY && _PyDict_HasIndexedTable(dict)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "SOAC admission-only policy requires ordinary dictionary storage");
         return -1;
     }
     if (dict->_ma_watcher_tag & _PyDict_SOAC_SPLIT_CLEAR_TAG) {
@@ -4964,7 +4989,7 @@ setitem_take2_lock_held(PyDictObject *mp, PyObject *key, PyObject *value)
     assert(key);
     assert(value);
     assert(PyDict_Check(mp));
-    if (_PyDict_HasSoacPolicy(mp)) {
+    if (soac_needs_mutation_transaction(mp)) {
         if (soac_policy(mp)->dictionary_mode == Py_SOAC_INSTANCE_DICT_ORDINARY) {
             return soac_ordinary_setitem_take2(mp, key, value, PyDict_SOAC_SET, NULL, 1, -1);
         }
@@ -5031,7 +5056,7 @@ int
 _PyDict_SetItem_KnownHash_LockHeld(PyDictObject *mp, PyObject *key, PyObject *value,
                                    Py_hash_t hash)
 {
-    if (_PyDict_HasSoacPolicy(mp)) {
+    if (soac_needs_mutation_transaction(mp)) {
         return soac_setitem_resolved(mp, key, value, PyDict_SOAC_SET, NULL, 1, hash);
     }
     if (mp->ma_keys == Py_EMPTY_KEYS) {
@@ -5050,7 +5075,8 @@ _PyDict_SetItemForRuntimeCache(PyObject *dict, PyObject *key, PyObject *value,
                         "SOAC runtime cache insertion requires provider provenance");
         return -1;
     }
-    if (!PyDict_HasSoacPolicy(dict)) {
+    if (!PyDict_HasSoacPolicy(dict) ||
+        soac_policy((PyDictObject *)dict)->flags == PyDict_SOAC_ADMISSION_ONLY) {
         return PyDict_SetItem(dict, key, value);
     }
     return soac_setitem_lock_held((PyDictObject *)dict, key, value,
@@ -5377,9 +5403,19 @@ _PyDict_SetItemAndDeleteForModule(PyObject *op, PyObject *key,
     }
     PyDictObject *dict = (PyDictObject *)op;
     SoacDictPolicy *policy = soac_policy(dict);
-    if (policy->flags != 0 || PyObject_RichCompareBool(key, companion, Py_EQ) != 0) {
+    if ((policy->flags != 0 && policy->flags != PyDict_SOAC_ADMISSION_ONLY) ||
+        PyObject_RichCompareBool(key, companion, Py_EQ) != 0) {
         PyErr_SetString(PyExc_TypeError, "SOAC module composite requires distinct namespace names");
         return -1;
+    }
+    if (policy->flags == PyDict_SOAC_ADMISSION_ONLY) {
+        /* Module identity remains protected, but annotation setters retain
+         * ordinary sequential mutation and displaced-value callback order. */
+        int result = value == NULL
+            ? PyDict_Pop(op, key, NULL)
+            : (PyDict_SetItem(op, key, value) < 0 ? -1 : 1);
+        if (result <= 0) return result;
+        return PyDict_Pop(op, companion, NULL) < 0 ? -1 : 1;
     }
     if (soac_begin_mutation(dict, policy) < 0) {
         return -1;
@@ -5419,7 +5455,8 @@ int
 PyDict_DelItem(PyObject *op, PyObject *key)
 {
     assert(key);
-    if (PyDict_HasSoacPolicy(op)) {
+    if (PyDict_HasSoacPolicy(op) &&
+        soac_needs_mutation_transaction((PyDictObject *)op)) {
         int status = soac_remove_lock_held((PyDictObject *)op, key, -1, 0, NULL);
         if (status == 0) {
             _PyErr_SetKeyError(key);
@@ -5452,7 +5489,7 @@ _PyDict_DelItem_KnownHash_LockHeld(PyObject *op, PyObject *key, Py_hash_t hash)
     assert(key);
     assert(hash != -1);
     mp = (PyDictObject *)op;
-    if (_PyDict_HasSoacPolicy(mp)) {
+    if (soac_needs_mutation_transaction(mp)) {
         int status = soac_remove_lock_held(mp, key, hash, 0, NULL);
         if (status == 0) {
             _PyErr_SetKeyError(key);
@@ -5500,7 +5537,8 @@ delitemif_lock_held(PyObject *op, PyObject *key,
     ASSERT_DICT_LOCKED(op);
 
     assert(key);
-    if (PyDict_HasSoacPolicy(op)) {
+    if (PyDict_HasSoacPolicy(op) &&
+        soac_needs_mutation_transaction((PyDictObject *)op)) {
         mp = (PyDictObject *)op;
         SoacDictPolicy *policy = soac_policy(mp);
         if (soac_check_key(mp, key) < 0 || soac_begin_mutation(mp, policy) < 0) {
@@ -5825,7 +5863,8 @@ static int
 soac_clear_lock_held(PyDictObject *dict)
 {
     SoacDictPolicy *policy = soac_policy(dict);
-    if (policy->dictionary_mode == Py_SOAC_INSTANCE_DICT_ORDINARY) {
+    if (policy->dictionary_mode == Py_SOAC_INSTANCE_DICT_ORDINARY ||
+        policy->flags == PyDict_SOAC_ADMISSION_ONLY) {
         return clear_lock_held((PyObject *)dict, NULL);
     }
     if (soac_begin_mutation(dict, policy) < 0) {
@@ -6115,7 +6154,7 @@ _PyDict_Pop_KnownHash(PyDictObject *mp, PyObject *key, Py_hash_t hash,
 
     ASSERT_DICT_LOCKED(mp);
 
-    if (_PyDict_HasSoacPolicy(mp)) {
+    if (soac_needs_mutation_transaction(mp)) {
         return soac_remove_lock_held(mp, key, hash, 1, result);
     }
 
@@ -6177,7 +6216,7 @@ pop_lock_held(PyObject *op, PyObject *key, PyObject **result)
     }
     PyDictObject *dict = (PyDictObject *)op;
 
-    if (_PyDict_HasSoacPolicy(dict)) {
+    if (soac_needs_mutation_transaction(dict)) {
         return soac_remove_lock_held(dict, key, -1, 1, result);
     }
 
@@ -6310,7 +6349,8 @@ _PyDict_FromKeys(PyObject *cls, PyObject *iterable, PyObject *value)
     if (d == NULL)
         return NULL;
 
-    if (PyDict_HasSoacPolicy(d)) {
+    if (PyDict_HasSoacPolicy(d) &&
+        soac_needs_mutation_transaction((PyDictObject *)d)) {
         PyErr_SetString(soac_mutation_error(),
                         "fromkeys cannot reuse a SOAC-owned dictionary");
         Py_DECREF(d);
@@ -6916,7 +6956,8 @@ validation_error:
 static int
 dict_update_arg(PyObject *self, PyObject *arg)
 {
-    if (PyDict_HasSoacPolicy(self)) {
+    if (PyDict_HasSoacPolicy(self) &&
+        soac_needs_mutation_transaction((PyDictObject *)self)) {
         return soac_merge((PyDictObject *)self, arg, 1, !PyDict_CheckExact(arg));
     }
     if (PyDict_CheckExact(arg)) {
@@ -6988,7 +7029,7 @@ merge_from_seq2_lock_held(PyObject *d, PyObject *seq2, int override)
     assert(PyDict_Check(d));
     assert(seq2 != NULL);
 
-    if (PyDict_HasSoacPolicy(d)) {
+    if (soac_needs_mutation_transaction((PyDictObject *)d)) {
         return soac_merge((PyDictObject *)d, seq2, override != 0, 1);
     }
 
@@ -7101,16 +7142,30 @@ dict_dict_merge(PyDictObject *mp, PyDictObject *other, int override)
             (DK_LOG_SIZE(okeys) == PyDict_LOG_MINSIZE ||
              USABLE_FRACTION(DK_SIZE(okeys)/2) < other->ma_used)
         ) {
+            SoacDictCommitGuard guard = {0};
+            if (soac_commit_begin(mp, &guard, NULL, NULL, NULL, PyDict_SOAC_CLONE) < 0) {
+                return -1;
+            }
             _PyDict_NotifyEvent(PyDict_EVENT_CLONED, mp, (PyObject *)other, NULL);
             if (_PyDict_HasSoacPolicy(mp)) {
-                /* No source key has been looked up or hashed yet. Preserve
-                   the newly installed policy's ordinary staged bulk path. */
-                return soac_merge(mp, (PyObject *)other, override, 0);
+                if (soac_policy(mp)->flags != PyDict_SOAC_ADMISSION_ONLY) {
+                    assert(guard.validated == NULL);
+                    /* No source key has been looked up or hashed yet. Preserve
+                       the newly installed policy's staged bulk path. */
+                    return soac_merge(mp, (PyObject *)other, override, 0);
+                }
+                if (soac_commit_begin(mp, &guard, NULL, NULL, NULL, PyDict_SOAC_CLONE) < 0) {
+                    soac_commit_end(&guard);
+                    return -1;
+                }
             }
             PyDictKeysObject *keys = clone_combined_dict_keys(other);
-            if (keys == NULL)
+            if (keys == NULL) {
+                soac_commit_end(&guard);
                 return -1;
+            }
 
+            soac_commit_end(&guard);
             ensure_shared_on_resize(mp);
             dictkeys_decref(mp->ma_keys, IS_DICT_SHARED(mp));
             set_keys(mp, keys);
@@ -7195,7 +7250,7 @@ dict_merge(PyObject *a, PyObject *b, int override)
         return -1;
     }
     mp = (PyDictObject*)a;
-    if (_PyDict_HasSoacPolicy(mp)) {
+    if (soac_needs_mutation_transaction(mp)) {
         return soac_merge(mp, b, override, 0);
     }
     int res = 0;
@@ -7674,7 +7729,7 @@ dict_setdefault_ref_lock_held(PyObject *d, PyObject *key, PyObject *default_valu
         return -1;
     }
 
-    if (_PyDict_HasSoacPolicy(mp)) {
+    if (soac_needs_mutation_transaction(mp)) {
         if (result != NULL) {
             *result = NULL;
         }
@@ -8014,7 +8069,7 @@ indexed_error:
         Py_DECREF(res);
         return NULL;
     }
-    if (_PyDict_HasSoacPolicy(self) &&
+    if (soac_needs_mutation_transaction(self) &&
         soac_policy(self)->dictionary_mode != Py_SOAC_INSTANCE_DICT_ORDINARY) {
         SoacDictPolicy *policy = soac_policy(self);
         if (soac_begin_mutation(self, policy) < 0) {

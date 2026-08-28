@@ -41,6 +41,307 @@ class SoacDictPolicyTests(unittest.TestCase):
         return _testcapi.dict_set_soac_policy(
             dictionary, schema, finals, callback, keepalive, flags)
 
+    def test_admission_only_registration_is_permanent_without_indexed_storage(self):
+        key, value = object(), object()
+        d = {key: value, "x": "not an int"}
+        owner = self.protect(d, {"x": int}, ("x",), flags=4)
+        self.assertFalse(_testinternalcapi.dict_has_indexed_keys(d))
+        self.assertTrue(_testcapi.dict_matches_soac_policy(d, owner, 4))
+        for flags in (0, 1, 2):
+            self.assertFalse(_testcapi.dict_matches_soac_policy(d, owner, flags))
+        self.assertIs(d[key], value)
+        self.assertIs(next(iter(d)), key)
+        d["x"] = []
+        copied = d.copy()
+        self.assertFalse(_testcapi.dict_has_soac_policy(copied))
+        copied.clear()
+        self.assertEqual(len(d), 2)
+        with self.assertRaises(TypeError):
+            _testcapi.dict_seal_soac_namespace(d)
+        for flags in (0, 2, 4):
+            with self.assertRaises(TypeError):
+                self.protect(d, {}, flags=flags)
+        for flags in (5, 6, 7):
+            with self.assertRaises(TypeError):
+                self.protect({}, {}, flags=flags)
+        indexed = _testinternalcapi.dict_new_indexed(("x",))
+        with self.assertRaises(TypeError):
+            self.protect(indexed, {}, flags=4)
+        self.assertFalse(_testcapi.dict_has_soac_policy(indexed))
+
+    def test_admission_only_python_and_c_mutators_match_ordinary_dicts(self):
+        operations = (
+            lambda d: d.__setitem__(42, []),
+            lambda d: d.__setitem__(43, "new"),
+            lambda d: d.__delitem__(42),
+            lambda d: d.pop(42),
+            lambda d: d.popitem(),
+            lambda d: d.clear(),
+            lambda d: d.setdefault(43, []),
+            lambda d: d.update(UserDict({42: [], 43: "new"})),
+            lambda d: d.__ior__([(42, []), (43, "new")]),
+            lambda d: d.__init__([(42, []), (43, "new")]),
+            lambda d: _testlimitedcapi.dict_setitem(d, 42, []),
+            lambda d: _testlimitedcapi.dict_delitem(d, 42),
+            lambda d: _testinternalcapi.dict_setitem_knownhash(d, 42, [], 42),
+            lambda d: _testinternalcapi.dict_delitem_knownhash(d, 42, 42),
+            lambda d: _testcapi.dict_pop(d, 42),
+            lambda d: _testcapi.dict_pop_null(d, 42),
+            lambda d: _testcapi.dict_setdefaultref(d, 43, []),
+            lambda d: _testlimitedcapi.dict_update(d, {42: [], 43: "new"}),
+            lambda d: _testlimitedcapi.dict_merge(d, {42: [], 43: "new"}, 0),
+            lambda d: _testlimitedcapi.dict_merge(d, {42: [], 43: "new"}, 1),
+            lambda d: _testlimitedcapi.dict_mergefromseq2(d, [(42, []), (43, "new")], 1),
+            lambda d: _testlimitedcapi.dict_clear(d),
+        )
+        for index, operation in enumerate(operations):
+            with self.subTest(operation=index):
+                ordinary, admitted = {42: 1, "x": 2}, {42: 1, "x": 2}
+                owner = self.protect(admitted, {}, flags=4)
+                self.assertEqual(operation(admitted), operation(ordinary))
+                self.assertEqual(list(admitted.items()), list(ordinary.items()))
+                self.assertTrue(_testcapi.dict_matches_soac_policy(admitted, owner, 4))
+                self.assertFalse(_testinternalcapi.dict_has_indexed_keys(admitted))
+
+    def test_admission_only_fromkeys_and_popitem_keep_ordinary_key_protocols(self):
+        armed = False
+
+        class Key:
+            def __hash__(self):
+                if armed:
+                    raise AssertionError("popitem must not hash the stored key")
+                return 17
+
+        d, key = {}, Key()
+        owner = self.protect(d, {}, flags=4)
+
+        class Factory(dict):
+            def __new__(cls):
+                return d
+
+        self.assertIs(Factory.fromkeys([key], "value"), d)
+        armed = True
+        actual, value = d.popitem()
+        self.assertIs(actual, key)
+        self.assertEqual(value, "value")
+        self.assertEqual(d, {})
+        self.assertTrue(_testcapi.dict_matches_soac_policy(d, owner, 4))
+
+    def test_admission_only_bulk_protocols_keep_partial_writes(self):
+        for operation in (
+            lambda d, pairs: d.update(pairs),
+            lambda d, pairs: d.__ior__(pairs),
+            lambda d, pairs: d.__init__(pairs),
+            lambda d, pairs: _testlimitedcapi.dict_mergefromseq2(d, pairs, 1),
+        ):
+            for admitted in (False, True):
+                with self.subTest(operation=operation, admitted=admitted):
+                    d, events = {}, []
+                    if admitted:
+                        self.protect(d, {}, flags=4)
+
+                    def pairs():
+                        yield 42, "first"
+                        events.append(dict(d))
+                        yield "x", []
+                        yield "invalid",
+
+                    with self.assertRaises(ValueError):
+                        operation(d, pairs())
+                    self.assertEqual(events, [{42: "first"}])
+                    self.assertEqual(d, {42: "first", "x": []})
+
+        failure = LookupError("mapping failure")
+        for admitted in (False, True):
+            d, events = {}, []
+            if admitted:
+                self.protect(d, {}, flags=4)
+
+            class Mapping:
+                def keys(self):
+                    events.append("keys")
+                    return [42, "bad"]
+
+                def __getitem__(self, key):
+                    events.append((key, dict(d)))
+                    if key == "bad":
+                        raise failure
+                    return "first"
+
+            with self.assertRaises(LookupError) as caught:
+                d.update(Mapping())
+            self.assertIs(caught.exception, failure)
+            self.assertEqual(events, ["keys", (42, {}), ("bad", {42: "first"})])
+            self.assertEqual(d, {42: "first"})
+
+    def test_admission_only_empty_dict_bulk_clone_does_not_repeat_lookup(self):
+        armed = False
+
+        class Key:
+            def __hash__(self):
+                if armed:
+                    raise AssertionError("cloning must not hash stored keys")
+                return 17
+
+            def __eq__(self, other):
+                if armed:
+                    raise AssertionError("cloning must not compare stored keys")
+                return False
+
+        source = {Key(): value for value in range(3)}
+        armed = True
+        d = {}
+        failed = False
+
+        def validate(*args):
+            if failed:
+                raise RuntimeError("owner failed")
+
+        owner = self.protect(d, {}, callback=validate, flags=4)
+        d.update(source)
+        self.assertTrue(all(left is right for left, right in zip(d, source)))
+        self.assertEqual(list(d.values()), [0, 1, 2])
+        self.assertTrue(_testcapi.dict_matches_soac_policy(d, owner, 4))
+        d.clear()
+        failed = True
+        with self.assertRaisesRegex(RuntimeError, "owner failed"):
+            d.update(source)
+        self.assertEqual(d, {})
+
+    def test_admission_only_lookup_reentrancy_matches_ordinary_dicts(self):
+        def exercise(operation, admitted):
+            d, events = {}, []
+            active = False
+
+            class Key:
+                def __hash__(self):
+                    if active:
+                        events.append("hash")
+                        d["from_hash"] = 1
+                    return 17
+
+                def __eq__(self, other):
+                    if not isinstance(other, Key):
+                        return NotImplemented
+                    if active:
+                        events.append("eq")
+                        d["from_eq"] = 2
+                    return True
+
+            d[Key()] = "old"
+            if admitted:
+                self.protect(d, {}, flags=4)
+            active = True
+            result = operation(d, Key())
+            return result, events, [("key" if isinstance(k, Key) else k, v)
+                                    for k, v in d.items()]
+
+        operations = (
+            lambda d, k: d.__setitem__(k, "new"),
+            lambda d, k: d.__delitem__(k),
+            lambda d, k: d.pop(k),
+            lambda d, k: d.setdefault(k, "new"),
+            lambda d, k: d.update([(k, "new")]),
+            lambda d, k: _testlimitedcapi.dict_setitem(d, k, "new"),
+            lambda d, k: _testinternalcapi.dict_setitem_knownhash(d, k, "new", 17),
+            lambda d, k: _testinternalcapi.dict_delitem_knownhash(d, k, 17),
+        )
+        for index, operation in enumerate(operations):
+            with self.subTest(operation=index):
+                self.assertEqual(exercise(operation, True), exercise(operation, False))
+
+    def test_admission_only_post_commit_callbacks_can_mutate(self):
+        for clear in (False, True):
+            for admitted in (False, True):
+                with self.subTest(clear=clear, admitted=admitted):
+                    d, events = {}, []
+                    if admitted:
+                        self.protect(d, {}, flags=4)
+
+                    class Previous:
+                        def __del__(self):
+                            events.append(dict(d))
+                            d[42] = "from callback"
+
+                    d["x"] = Previous()
+                    if clear:
+                        d.clear()
+                    else:
+                        d["x"] = "new"
+                    self.assertEqual(events, [{} if clear else {"x": "new"}])
+                    self.assertEqual(d[42], "from callback")
+
+    def test_admission_only_warmed_stores_keep_owner_checks(self):
+        class Item:
+            pass
+
+        def write(obj, value):
+            obj.x = value
+
+        def write_dict(d, value):
+            d["x"] = value
+
+        for combined in (False, True):
+            with self.subTest(combined=combined):
+                obj = Item()
+                if combined:
+                    for index in range(50):
+                        setattr(obj, f"extra_{index}", index)
+                for index in range(1000):
+                    write(obj, index)
+                d = vars(obj)
+                for index in range(1000):
+                    write_dict(d, index)
+                failed = False
+
+                def validate(*args):
+                    if failed:
+                        raise RuntimeError("owner failed")
+
+                owner = self.protect(d, {"x": int}, callback=validate, flags=4)
+                write(obj, "untyped")
+                write_dict(d, [])
+                self.assertEqual(obj.x, [])
+                failed = True
+                for operation in (lambda: write(obj, 1), lambda: write_dict(d, 1)):
+                    with self.assertRaisesRegex(RuntimeError, "owner failed"):
+                        operation()
+                    self.assertEqual(obj.x, [])
+                self.assertTrue(_testcapi.dict_matches_soac_policy(d, owner, 4))
+
+    def test_admission_only_module_setters_preserve_namespace_identity(self):
+        import types
+        module = types.ModuleType("admission_only")
+        d = vars(module)
+        owner = self.protect(d, {}, flags=4)
+        annotate = lambda format: {"x": int}
+        module.__annotations__ = {"old": str}
+        module.__annotate__ = annotate
+        self.assertNotIn("__annotations__", d)
+        self.assertIs(d["__annotate__"], annotate)
+        module.__annotations__ = {"new": float}
+        self.assertNotIn("__annotate__", d)
+        self.assertEqual(d["__annotations__"], {"new": float})
+        del module.__annotations__
+        with self.assertRaises(AttributeError):
+            del module.__annotations__
+
+        class OtherModule(types.ModuleType):
+            pass
+
+        with self.assertRaises(TypeError):
+            module.__class__ = OtherModule
+        ctypes = import_helper.import_module("ctypes")
+        generic_set_dict = ctypes.pythonapi.PyObject_GenericSetDict
+        generic_set_dict.argtypes = [ctypes.py_object, ctypes.py_object, ctypes.c_void_p]
+        generic_set_dict.restype = ctypes.c_int
+        with self.assertRaises(TypeError):
+            generic_set_dict(module, {}, None)
+        self.assertIs(vars(module), d)
+        d.clear()
+        d[42] = []
+        self.assertTrue(_testcapi.dict_matches_soac_policy(d, owner, 4))
+
     def test_read_only_registration_preserves_arbitrary_keys_and_layout(self):
         events = []
 
@@ -822,16 +1123,21 @@ class SoacDictPolicyTests(unittest.TestCase):
         class Token:
             pass
 
-        token = Token()
-        ref = weakref.ref(token)
-        d = {"fixed": ref, "mutable": ref}
-        self.protect(d, {"fixed": weakref.ReferenceType,
-                         "mutable": weakref.ReferenceType}, ("fixed",))
-        del token
-        with self.assertRaises(TypeError):
-            _weakref._remove_dead_weakref(d, "fixed")
-        _weakref._remove_dead_weakref(d, "mutable")
-        self.assertEqual(d, {"fixed": ref})
+        for flags in (0, 4):
+            with self.subTest(flags=flags):
+                token = Token()
+                ref = weakref.ref(token)
+                d = {"fixed": ref, "mutable": ref}
+                self.protect(d, {"fixed": weakref.ReferenceType,
+                                 "mutable": weakref.ReferenceType}, ("fixed",), flags=flags)
+                del token
+                if flags == 0:
+                    with self.assertRaises(TypeError):
+                        _weakref._remove_dead_weakref(d, "fixed")
+                else:
+                    _weakref._remove_dead_weakref(d, "fixed")
+                _weakref._remove_dead_weakref(d, "mutable")
+                self.assertEqual(d, {"fixed": ref} if flags == 0 else {})
 
     def test_post_commit_finalizers_can_write_other_checked_fields(self):
         d = {}
@@ -1082,7 +1388,7 @@ class SoacDictPolicyTests(unittest.TestCase):
         class Token:
             pass
 
-        for flags in (0, 2):
+        for flags in (0, 2, 4):
             with self.subTest(flags=flags):
                 token = Token()
                 ref = weakref.ref(token)
@@ -1110,26 +1416,39 @@ class SoacDictPolicyTests(unittest.TestCase):
         get_error.restype = ctypes.c_void_p
         # The native getter is borrowed, not a new py_object reference.
         unavailable = ctypes.cast(get_error(), ctypes.py_object).value
-        d = {"x": 1}
-        owner = self.protect(d, {"x": int})
-        self.assertTrue(_testcapi.dict_matches_soac_policy(d, owner))
-        self.assertFalse(_testcapi.dict_matches_soac_policy(d, object()))
-        _testcapi.dict_seal_soac_namespace(d)
-        owner.clear_for_test()
-        self.assertTrue(owner.terminal)
-        self.assertTrue(_testcapi.dict_has_soac_policy(d))
-        self.assertFalse(_testcapi.dict_matches_soac_policy(d, owner))
-        self.assertEqual(d, {})
-        with self.assertRaises(unavailable):
-            d["x"] = 2
-        with self.assertRaises(unavailable):
-            d.update({"x": 2})
-        with self.assertRaises(unavailable):
-            _testcapi.dict_seal_soac_namespace(d)
+        for flags in (0, 4):
+            with self.subTest(flags=flags):
+                d = {"x": 1}
+                owner = self.protect(d, {"x": int}, flags=flags)
+                self.assertTrue(_testcapi.dict_matches_soac_policy(d, owner, flags))
+                self.assertFalse(_testcapi.dict_matches_soac_policy(d, object(), flags))
+                if flags == 0:
+                    _testcapi.dict_seal_soac_namespace(d)
+                owner.clear_for_test()
+                self.assertTrue(owner.terminal)
+                self.assertTrue(_testcapi.dict_has_soac_policy(d))
+                self.assertFalse(_testcapi.dict_matches_soac_policy(d, owner, flags))
+                self.assertEqual(d, {})
+                for operation in (
+                    lambda: d.__setitem__("x", 2),
+                    lambda: d.update({"x": 2}),
+                    lambda: d.update({}),
+                    lambda: d.setdefault("x", []),
+                    lambda: d.pop("x", None),
+                    lambda: d.clear(),
+                ):
+                    with self.assertRaises(unavailable):
+                        operation()
+                if flags == 4:
+                    with self.assertRaises(unavailable):
+                        d[42] = []
+                if flags == 0:
+                    with self.assertRaises(unavailable):
+                        _testcapi.dict_seal_soac_namespace(d)
 
     @support.requires_subprocess()
     def test_void_clear_has_explicit_fatal_boundary(self):
-        for flags in (0, 2):
+        for flags in (0, 2, 4):
             with self.subTest(flags=flags):
                 _, _, stderr = assert_python_failure("-c", f"""
 import _testcapi, _testlimitedcapi
@@ -1137,6 +1456,8 @@ d = {{"x": 1}}
 owner = _testcapi.dict_set_soac_policy(d, {{"x": int}}, (), None, None, {flags})
 if {flags} == 0:
     _testcapi.dict_seal_soac_namespace(d)
+if {flags} == 4:
+    owner.clear_for_test()
 _testlimitedcapi.dict_clear(d)
 """)
                 self.assertIn(b"PyDict_Clear cannot report a SOAC policy violation", stderr)

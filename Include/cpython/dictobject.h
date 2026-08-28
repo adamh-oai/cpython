@@ -72,10 +72,18 @@ enum {
     /* Only type_ready's explicit canonical physical-member publication.
      * Provenance is that exact native descriptor, checked after watchers. */
     PyDict_SOAC_SLOT_DESCRIPTOR_INSERT = 12,
-    PyDict_SOAC_SLOT_DESCRIPTOR_REPLACE = 13
+    PyDict_SOAC_SLOT_DESCRIPTOR_REPLACE = 13,
+    /* Admission-only liveness check before an ordinary empty-dict bulk clone.
+     * key/value/provenance are NULL; no per-key hash/equality is repeated. */
+    PyDict_SOAC_CLONE = 14
 };
 #define PyDict_SOAC_ALLOW_NONSTRING_KEYS 1u
 #define PyDict_SOAC_READ_ONLY 2u
+/* Authentication/lifetime ownership without namespace or field restrictions.
+ * Mutually exclusive with the other modes; requires ordinary dict storage.
+ * The trusted owner validates liveness at resolved write commits, not keys or
+ * values. Installation is permanent and this mode cannot be sealed. */
+#define PyDict_SOAC_ADMISSION_ONLY 4u
 typedef int (*PyDict_SoacPolicyCallback)(
     PyObject *owner, PyObject *dict, PyObject *key, PyObject *value,
     int operation, PyObject *provenance);

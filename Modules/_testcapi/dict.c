@@ -138,6 +138,11 @@ soac_test_validate(PyObject *op, PyObject *dict, PyObject *key,
         return 0;
     }
     assert(!owner->terminal);
+    if (owner->flags == PyDict_SOAC_ADMISSION_ONLY) {
+        /* Deliberately no field or binding restrictions in this mode. The
+         * optional callback can still model a failed native owner. */
+        goto callback;
+    }
     if (operation == PyDict_SOAC_CLEAR) {
         Py_ssize_t pos = 0;
         PyObject *stored_key;
@@ -184,6 +189,7 @@ soac_test_validate(PyObject *op, PyObject *dict, PyObject *key,
             return -1;
         }
     }
+callback:
     if (operation != PyDict_SOAC_VALIDATE_INITIAL && owner->callback != Py_None) {
         PyObject *result = PyObject_CallFunction(
             owner->callback, "OOOi", dict, key == NULL ? Py_None : key,
