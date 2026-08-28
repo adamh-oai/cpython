@@ -48,7 +48,9 @@ typedef struct {
 #define FUTURE_STRICT "strict"
 
 /* Trusted native loader boundary. The caller must first authenticate these
- * exact source bytes against the immutable startup deployment authority.
+ * exact source bytes and their resolved opt-in policy against the immutable
+ * startup deployment authority. This entrypoint sets CO_FUTURE_STRICT without
+ * changing source bytes or requiring an explicit strict future statement.
  * Returned original code is inspectable, never an ordinary native fallback. */
 PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSource(
     const char *source, Py_ssize_t length, PyObject *filename, int optimize);

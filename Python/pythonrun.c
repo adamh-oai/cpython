@@ -1710,9 +1710,14 @@ soac_compile_verified_source(const char *source, Py_ssize_t length,
         return NULL;
     }
     /* Like an import, this entrypoint never inherits caller future flags.
+     * Its trusted caller already authenticated the exact source and resolved
+     * opt-in policy. Set the ownership flag here so comment-selected source
+     * need not be rewritten to contain a strict future import. Ordinary
+     * compilation still cannot mint the native verified-source identity.
      * Keep the one native AST alive until optional metadata is extracted;
      * no extra parse, compile audit event, or Python AST helper is involved. */
     PyCompilerFlags flags = _PyCompilerFlags_INIT;
+    flags.cf_flags = CO_FUTURE_STRICT;
     mod_ty mod = _PyParser_ASTFromString(terminated, filename, Py_file_input,
                                          &flags, arena, NULL);
     PyObject *bindings = NULL;
@@ -1734,8 +1739,8 @@ soac_compile_verified_source(const char *source, Py_ssize_t length,
         Py_XDECREF(bindings);
         Py_DECREF(result);
         _PyArena_Free(arena);
-        PyErr_SetString(PyExc_ValueError,
-                        "authenticated strict source must explicitly opt in");
+        PyErr_SetString(PyExc_SystemError,
+                        "authenticated source compilation lost its strict ownership flag");
         return NULL;
     }
     if (details) {
