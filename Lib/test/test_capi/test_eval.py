@@ -10,6 +10,10 @@ class Tests(unittest.TestCase):
         import __future__
         import types
         ctypes = import_helper.import_module("ctypes")
+        get_error = ctypes.pythonapi.PySoac_GetStrictRuntimeUnavailableError
+        get_error.argtypes = []
+        get_error.restype = ctypes.c_void_p
+        unavailable = ctypes.cast(get_error(), ctypes.py_object).value
         source = b"# authenticated offline selection\nvalue = 1\ndef read():\n    return value\n"
         flag = __future__.strict.compiler_flag
         ordinary = compile(source, "selected.py", "exec", dont_inherit=True)
@@ -32,7 +36,7 @@ class Tests(unittest.TestCase):
                 self.assertEqual(nested.co_firstlineno, 3)
                 # A trusted compile supplies source identity, not runtime
                 # activation/actual-owner authority. No ordinary fallback.
-                with self.assertRaises(RuntimeError):
+                with self.assertRaises(unavailable):
                     exec(code, {})
 
     def test_eval_get_func_name(self):

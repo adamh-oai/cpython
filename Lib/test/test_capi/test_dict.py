@@ -1373,16 +1373,27 @@ class SoacDictPolicyTests(unittest.TestCase):
                 write(obj, 3)
                 with self.assertRaises(TypeError):
                     write(obj, "bad")
-                with self.assertRaises(TypeError):
-                    obj.__dict__ = {}
-                with self.assertRaises(TypeError):
-                    del obj.__dict__
                 self.assertIs(obj.__dict__, d)
                 self.assertEqual(obj.x, 3)
                 del obj.x
                 self.assertNotIn("x", d)
                 obj.x = 4
                 self.assertEqual(d["x"], 4)
+                # This is an ordinary instance with a foreign protected
+                # dictionary, not a type-owned field contract. Detachment is
+                # permitted; it must not revoke the escaped dictionary policy.
+                obj.__dict__ = {}
+                write(obj, "ordinary")
+                self.assertEqual(obj.x, "ordinary")
+                self.assertEqual(d["x"], 4)
+                with self.assertRaises(TypeError):
+                    d["x"] = "bad"
+                del obj.__dict__
+                write(obj, "new ordinary dictionary")
+                self.assertEqual(obj.x, "new ordinary dictionary")
+                self.assertEqual(d["x"], 4)
+                with self.assertRaises(TypeError):
+                    d["x"] = "still bad"
 
     def test_native_owner_edge_is_visible_to_gc(self):
         class Token:
