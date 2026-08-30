@@ -22,6 +22,8 @@ typedef struct _PySoacInterpreterCallV1 _PySoacInterpreterCallV1;
 /* Private source-execution metadata, never public authority. The existing
  * frame init/GC traverse/copy-MOVE/clear sites carry this one metadata edge.
  * Unknown activation types fail closed. It owns no argument-type obligations.
+ * Native identity/phase belong to this invocation even when state reuses the
+ * actual function's permanent owner. Frame moves transfer this object whole.
  */
 typedef struct {
     PyObject_HEAD
@@ -29,6 +31,8 @@ typedef struct {
     PyThreadState *thread;            /* Comparison only during active frame. */
     PyFunctionObject *function;       /* Borrowed, actual native frame pins. */
     PyCodeObject *code;               /* Borrowed, actual f_executable pins. */
+    int64_t interpreter_id;
+    uint64_t activation_id;           /* Reserved before callback-capable entry. */
     uint32_t kind;
     uint32_t phase;
     uint32_t source_authority;        /* Only after authenticated original entry. */
@@ -45,7 +49,11 @@ struct _PySoacInterpreterFrameViewV1 {
     PyObject *call_state;             /* Borrowed, enter may expose NULL. */
     Py_ssize_t instruction_units;     /* Freeze BEFORE callback/reentry. */
     Py_ssize_t instruction_ordinal;   /* Trusted base-op/cache walk, also frozen. */
-    uint32_t phase;
+    uint32_t phase;                   /* Frozen native activation facts below. */
+    uint32_t kind;
+    uint32_t source_authority;
+    int64_t interpreter_id;
+    uint64_t activation_id;
 };
 
 /* Stack-local explicit entry context. Never stored in tstate or a Python

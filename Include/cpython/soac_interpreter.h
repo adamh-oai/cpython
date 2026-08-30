@@ -8,7 +8,7 @@ extern "C" {
 /* Versioned ordinary-interpreter enforcement ABI.
  * The trusted loader, not these hooks, authenticates the ty/source artifact.
  * Ordinary native frames/binding/closures/recursion/observers remain in use. */
-#define Py_SOAC_INTERPRETER_ABI_V1 1u
+#define Py_SOAC_INTERPRETER_ABI_V2 2u
 #define Py_SOAC_INTERPRETER_CALLBACKS_ABI_V3 3u
 
 #define Py_SOAC_INTERPRETER_ROOT 1u
@@ -32,9 +32,17 @@ extern "C" {
 typedef struct _PySoacInterpreterFrameViewV1
     PySoacInterpreterFrameViewV1;
 
+/* Callback-local native execution facts. The interpreter/activation pair is
+ * reserved before entry callbacks, survives suspension and native frame moves,
+ * and is never reused during that interpreter's lifetime. It is an identity,
+ * not independent execution authority or ownership of a Python value. */
 typedef struct {
-    uint32_t abi_version;             /* Set by GetInfo, exactly V1. */
+    uint32_t abi_version;             /* Set by GetInfo, exactly V2. */
     uint32_t phase;
+    uint32_t kind;
+    uint32_t source_authority;        /* Granted only after enter authenticates. */
+    int64_t interpreter_id;
+    uint64_t activation_id;           /* Nonzero, never reused by this interpreter. */
     PyObject *function;               /* Borrowed actual frame f_funcobj. */
     PyObject *code;                   /* Borrowed actual frame f_executable. */
     PyObject *globals;                /* Borrowed actual native frame view. */
@@ -44,7 +52,7 @@ typedef struct {
     Py_ssize_t instruction_units;     /* Captured actual opcode, code units. */
     Py_ssize_t instruction_ordinal;   /* Final ordinal, no EXTENDED_ARG/CACHE. */
     Py_ssize_t localsplus_count;
-} PySoacInterpreterFrameInfoV1;
+} PySoacInterpreterFrameInfoV2;
 
 /* Native call-operand projection. The enclosing unpublished callback table
  * remains a single exact-size table: no old-table or no-call fallback. */
@@ -185,7 +193,9 @@ typedef struct {
      * actual function's permanent owner edge supports it. No extra value pin.
      * Success supplies ONE owned metadata state, transferred into the existing
      * checked-activation frame slot. New-state may be the owner's NewRef; its
-     * contents must not duplicate function/code/maps/argument ownership. */
+     * contents must not duplicate function/code/maps/argument ownership. A
+     * reused owner must not hold mutable per-invocation phase or identity:
+     * GetInterpreterFrameInfoV2 supplies those frozen native activation facts. */
     int (*enter)(uint32_t kind, PyObject *subject_owner,
                  const PySoacInterpreterFrameViewV1 *frame,
                  const PySoacInterpreterFrameViewV1 *parent,
@@ -264,7 +274,8 @@ typedef struct {
     /* Scalar/metadata retirement, no Python, allocation or error replacement.
      * Once per successful enter. Namespace success reports TRANSFERRED before
      * its ONE state edge moves from frame to __build_class__'s C stack; no
-     * views may be retained. Every other reason retires the state outright. */
+     * views may be retained. Every other reason retires per-call state; a
+     * reused permanent function owner remains live and unchanged. */
     void (*leave)(PyObject *state, uint32_t reason);
 
     /* Only the actual opcode-dispatched builtin __build_class__ with exact
@@ -319,9 +330,9 @@ PyAPI_FUNC(int) PySoac_SetInterpreterCallbacksV3(
 PyAPI_FUNC(PyObject *) PySoac_EvalInterpreterModuleV1(
     PyObject *module, PyObject *root_code, PyObject *module_owner);
 
-PyAPI_FUNC(int) PySoac_GetInterpreterFrameInfoV1(
+PyAPI_FUNC(int) PySoac_GetInterpreterFrameInfoV2(
     const PySoacInterpreterFrameViewV1 *view,
-    PySoacInterpreterFrameInfoV1 *out, size_t out_size);
+    PySoacInterpreterFrameInfoV2 *out, size_t out_size);
 
 /* Borrowed raw slot, not implicit CellGet. NULL/no error means native Unbound;
  * NULL/error means invalid view/index. In particular Py_None is not Unbound. */

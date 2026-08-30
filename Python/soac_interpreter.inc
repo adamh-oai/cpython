@@ -186,12 +186,29 @@ _PySOAC_InterpreterView(_PyInterpreterFrame *frame,
         !PyFunction_Check(PyStackRef_AsPyObjectBorrow(frame->f_funcobj))) {
         return soac_interpreter_error("interpreter callback requires its actual ordinary frame");
     }
+    if (!_PySOAC_InterpreterIsActivation(frame->soac_checked_activation)) {
+        return soac_interpreter_error("interpreter callback has no native activation");
+    }
+    _PySoacInterpreterActivationV1 *activation =
+        (_PySoacInterpreterActivationV1 *)frame->soac_checked_activation;
+    if (activation->function !=
+            (PyFunctionObject *)PyStackRef_AsPyObjectBorrow(frame->f_funcobj) ||
+        activation->code != _PyFrame_GetCode(frame) ||
+        activation->phase != phase || activation->state != state ||
+        activation->interpreter_id != _PyInterpreterState_GET()->id ||
+        activation->activation_id == 0) {
+        return soac_interpreter_error("interpreter callback activation changed");
+    }
     memset(view, 0, sizeof(*view));
     view->frame = frame;
     view->thread = _PyThreadState_GET();
     view->self = view;
     view->call_state = state;
     view->phase = phase;
+    view->kind = activation->kind;
+    view->source_authority = activation->source_authority;
+    view->interpreter_id = activation->interpreter_id;
+    view->activation_id = activation->activation_id;
     return soac_interpreter_site(
         frame, this_instr, &view->instruction_units, &view->instruction_ordinal);
 }
@@ -210,9 +227,9 @@ soac_interpreter_check_view(const PySoacInterpreterFrameViewV1 *view)
 }
 
 int
-PySoac_GetInterpreterFrameInfoV1(
+PySoac_GetInterpreterFrameInfoV2(
     const PySoacInterpreterFrameViewV1 *view,
-    PySoacInterpreterFrameInfoV1 *out, size_t out_size)
+    PySoacInterpreterFrameInfoV2 *out, size_t out_size)
 {
     if (out == NULL || out_size != sizeof(*out) ||
         soac_interpreter_check_view(view) < 0) {
@@ -220,9 +237,13 @@ PySoac_GetInterpreterFrameInfoV1(
     }
     _PyInterpreterFrame *frame = view->frame;
     PyCodeObject *code = _PyFrame_GetCode(frame);
-    *out = (PySoacInterpreterFrameInfoV1) {
-        .abi_version = Py_SOAC_INTERPRETER_ABI_V1,
+    *out = (PySoacInterpreterFrameInfoV2) {
+        .abi_version = Py_SOAC_INTERPRETER_ABI_V2,
         .phase = view->phase,
+        .kind = view->kind,
+        .source_authority = view->source_authority,
+        .interpreter_id = view->interpreter_id,
+        .activation_id = view->activation_id,
         .function = PyStackRef_AsPyObjectBorrow(frame->f_funcobj),
         .code = (PyObject *)code,
         .globals = frame->f_globals,
@@ -381,6 +402,14 @@ _PySOAC_InterpreterInitFrame(
         (entry->namespace_state_out != NULL && *entry->namespace_state_out != NULL)) {
         return soac_interpreter_error("invalid checked interpreter frame entry");
     }
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    if (interp->soac.interpreter_activation_counter == UINT64_MAX) {
+        return soac_interpreter_error("interpreter activation identity space is exhausted");
+    }
+    /* The GIL-build-only ABI serializes this counter. Reserve before metadata
+     * allocation can reenter; failed entries leave holes, never reused tokens.
+     * The interpreter identity separates independently advancing counters. */
+    uint64_t activation_id = ++interp->soac.interpreter_activation_counter;
     if (PyType_Ready(&SoacInterpreterActivation_Type) < 0) {
         return -1;
     }
@@ -393,6 +422,8 @@ _PySOAC_InterpreterInitFrame(
     activation->thread = _PyThreadState_GET();
     activation->function = function;
     activation->code = code;
+    activation->interpreter_id = interp->id;
+    activation->activation_id = activation_id;
     activation->kind = entry->kind;
     activation->phase = Py_SOAC_INTERPRETER_BINDING;
     activation->source_authority = 0;

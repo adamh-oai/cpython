@@ -58,6 +58,9 @@ typedef struct {
 typedef struct {
     int event;
     Py_ssize_t node, serial, units, ordinal;
+    int64_t interpreter_id;
+    uint64_t activation_id;
+    uint32_t kind, source_authority;
     unsigned int lane;
     uintptr_t value;
     Py_ssize_t refcount;
@@ -96,6 +99,9 @@ typedef struct {
     PyObject_HEAD
     SoacInterpreterFixture *fixture; /* One actual metadata edge. */
     Py_ssize_t node, serial;
+    int64_t interpreter_id;
+    uint64_t activation_id;
+    uint32_t kind, source_authority;
     uint32_t phase;
 } SoacInterpreterTestCall;
 
@@ -185,18 +191,46 @@ soac_ip_call(PyObject *object)
 
 static int
 soac_ip_info(const PySoacInterpreterFrameViewV1 *view,
-             PySoacInterpreterFrameInfoV1 *info)
+             PySoacInterpreterFrameInfoV2 *info)
 {
     memset(info, 0, sizeof(*info));
-    if (PySoac_GetInterpreterFrameInfoV1(view, info, sizeof(*info)) < 0) {
+    if (PySoac_GetInterpreterFrameInfoV2(view, info, sizeof(*info)) < 0) {
         return -1;
     }
-    if (info->abi_version != Py_SOAC_INTERPRETER_ABI_V1 ||
+    if (info->abi_version != Py_SOAC_INTERPRETER_ABI_V2 ||
+        info->interpreter_id != PyInterpreterState_GetID(_PyInterpreterState_GET()) ||
+        info->activation_id == 0 || info->kind < Py_SOAC_INTERPRETER_ROOT ||
+        info->kind > Py_SOAC_INTERPRETER_CLASS_NAMESPACE ||
+        info->source_authority > 1 ||
         info->function == NULL || !PyFunction_Check(info->function) ||
         info->code == NULL || !PyCode_Check(info->code)) {
         return soac_ip_error("interpreter fixture has an invalid actual frame view");
     }
+    if (info->call_state != NULL) {
+        SoacInterpreterTestCall *state = soac_ip_call(info->call_state);
+        if (state == NULL) return -1;
+        if (state->interpreter_id != info->interpreter_id ||
+            state->activation_id != info->activation_id ||
+            state->kind != info->kind ||
+            state->source_authority != info->source_authority) {
+            return soac_ip_error("interpreter fixture activation identity changed");
+        }
+    }
     return 0;
+}
+
+/* Record only the native invocation's scalar identity, never its frame,
+ * function, code or operands. ENTER deliberately has no authority yet. */
+static void
+soac_ip_event_frame(SoacInterpreterTestEvent *event,
+                    const PySoacInterpreterFrameInfoV2 *info)
+{
+    if (event != NULL) {
+        event->interpreter_id = info->interpreter_id;
+        event->activation_id = info->activation_id;
+        event->kind = info->kind;
+        event->source_authority = info->source_authority;
+    }
 }
 
 static Py_ssize_t
@@ -408,7 +442,7 @@ static int
 soac_ip_birth(const PySoacInterpreterFrameViewV1 *parent, PyObject *function,
               PyObject **new_owner)
 {
-    PySoacInterpreterFrameInfoV1 info;
+    PySoacInterpreterFrameInfoV2 info;
     if (soac_ip_info(parent, &info) < 0 || !PyFunction_Check(function)) return -1;
     SoacInterpreterTestCall *state = soac_ip_call(info.call_state);
     if (state == NULL) return -1;
@@ -465,7 +499,7 @@ static int
 soac_ip_function_attribute(const PySoacInterpreterFrameViewV1 *parent,
                            PyObject *function, uint32_t flag, PyObject *value)
 {
-    PySoacInterpreterFrameInfoV1 info;
+    PySoacInterpreterFrameInfoV2 info;
     if (soac_ip_info(parent, &info) < 0) return -1;
     SoacInterpreterTestCall *state = soac_ip_call(info.call_state);
     SoacInterpreterTestFunction *record = soac_ip_function(function);
@@ -549,7 +583,7 @@ static int
 soac_ip_started(PyObject *object, const PySoacInterpreterFrameViewV1 *view)
 {
     SoacInterpreterTestCall *state = soac_ip_call(object);
-    PySoacInterpreterFrameInfoV1 info;
+    PySoacInterpreterFrameInfoV2 info;
     if (state == NULL || soac_ip_info(view, &info) < 0) return -1;
     if (info.call_state != object || info.phase != Py_SOAC_INTERPRETER_RUNNING ||
         (state->phase != Py_SOAC_INTERPRETER_BINDING &&
@@ -562,6 +596,7 @@ soac_ip_started(PyObject *object, const PySoacInterpreterFrameViewV1 *view)
     SoacInterpreterTestEvent *event = soac_ip_event(
         state->fixture, SOAC_IP_STARTED, state->node, state->serial);
     if (event == NULL) return soac_ip_error("interpreter fixture overflow");
+    soac_ip_event_frame(event, &info);
     event->aux = first != 0;
     /* Success is scalar only: never invoke the fixture's Python probe here. */
     return 0;
@@ -573,7 +608,7 @@ soac_ip_enter(uint32_t kind, PyObject *owner,
               const PySoacInterpreterFrameViewV1 *parent,
               PyObject **new_state)
 {
-    PySoacInterpreterFrameInfoV1 info;
+    PySoacInterpreterFrameInfoV2 info;
     if (soac_ip_info(view, &info) < 0) return -1;
     SoacInterpreterTestFunction *record = NULL;
     SoacInterpreterFixture *fixture;
@@ -604,7 +639,8 @@ soac_ip_enter(uint32_t kind, PyObject *owner,
     if (node < 0 || (record != NULL && record->node != node) ||
         kind != fixture->nodes[node].kind ||
         (uintptr_t)info.globals != fixture->globals ||
-        info.phase != Py_SOAC_INTERPRETER_BINDING || info.call_state != NULL) {
+        info.phase != Py_SOAC_INTERPRETER_BINDING || info.call_state != NULL ||
+        info.kind != kind || info.source_authority != 0) {
         return soac_ip_error("interpreter fixture entry has wrong frame/kind/phase");
     }
     if (kind != Py_SOAC_INTERPRETER_ROOT &&
@@ -615,7 +651,7 @@ soac_ip_enter(uint32_t kind, PyObject *owner,
         return soac_ip_error("interpreter fixture root entry has no consumed attempt");
     }
     if (kind == Py_SOAC_INTERPRETER_CLASS_NAMESPACE) {
-        PySoacInterpreterFrameInfoV1 caller;
+        PySoacInterpreterFrameInfoV2 caller;
         if (parent == NULL || soac_ip_info(parent, &caller) < 0) return -1;
         SoacInterpreterTestCall *caller_state = soac_ip_call(caller.call_state);
         if (caller_state == NULL || caller_state->fixture != fixture ||
@@ -629,9 +665,14 @@ soac_ip_enter(uint32_t kind, PyObject *owner,
     state->fixture = (SoacInterpreterFixture *)Py_NewRef((PyObject *)fixture);
     state->node = node;
     state->serial = ++fixture->serial;
+    state->interpreter_id = info.interpreter_id;
+    state->activation_id = info.activation_id;
+    state->kind = kind;
+    state->source_authority = ordinary_replacement == 0;
     state->phase = Py_SOAC_INTERPRETER_BINDING;
     PyObject_GC_Track(state);
     SoacInterpreterTestEvent *event = soac_ip_event(fixture, SOAC_IP_ENTER, node, state->serial);
+    soac_ip_event_frame(event, &info);
     if (event != NULL) {
         event->aux = ordinary_replacement != 0;
         event->value = (uintptr_t)info.code; /* Captured frame code; scalar only. */
@@ -651,7 +692,7 @@ soac_ip_returned(PyObject *object, const PySoacInterpreterFrameViewV1 *view,
                  PyObject *result)
 {
     SoacInterpreterTestCall *state = soac_ip_call(object);
-    PySoacInterpreterFrameInfoV1 info;
+    PySoacInterpreterFrameInfoV2 info;
     if (state == NULL || soac_ip_info(view, &info) < 0) return -1;
     if (state->phase != Py_SOAC_INTERPRETER_RUNNING ||
         info.phase != Py_SOAC_INTERPRETER_RETURNING || info.call_state != object ||
@@ -662,6 +703,7 @@ soac_ip_returned(PyObject *object, const PySoacInterpreterFrameViewV1 *view,
     SoacInterpreterFixture *fixture = state->fixture;
     SoacInterpreterTestEvent *event = soac_ip_event(fixture, SOAC_IP_RETURN, state->node, state->serial);
     if (event == NULL) return soac_ip_error("interpreter fixture overflow");
+    soac_ip_event_frame(event, &info);
     event->value = (uintptr_t)result;
     event->refcount = Py_REFCNT(result);
     event->units = info.instruction_units;
@@ -680,7 +722,7 @@ static int
 soac_ip_failed(PyObject *object, const PySoacInterpreterFrameViewV1 *view)
 {
     SoacInterpreterTestCall *state = soac_ip_call(object);
-    PySoacInterpreterFrameInfoV1 info;
+    PySoacInterpreterFrameInfoV2 info;
     if (state == NULL || soac_ip_info(view, &info) < 0) return -1;
     if (info.call_state != object || info.phase != Py_SOAC_INTERPRETER_FAILING ||
         state->phase == Py_SOAC_INTERPRETER_FAILING ||
@@ -690,6 +732,7 @@ soac_ip_failed(PyObject *object, const PySoacInterpreterFrameViewV1 *view)
     state->phase = Py_SOAC_INTERPRETER_FAILING; /* Before any probe/reentry. */
     SoacInterpreterTestEvent *event = soac_ip_event(
         state->fixture, SOAC_IP_FAILED, state->node, state->serial);
+    soac_ip_event_frame(event, &info);
     if (event != NULL) {
         event->units = info.instruction_units;
         event->ordinal = info.instruction_ordinal;
@@ -712,7 +755,13 @@ soac_ip_leave(PyObject *object, uint32_t reason)
     state->phase = Py_SOAC_INTERPRETER_RETIRED;
     SoacInterpreterTestEvent *event = soac_ip_event(
         state->fixture, SOAC_IP_LEAVE, state->node, state->serial);
-    if (event != NULL) event->aux = reason;
+    if (event != NULL) {
+        event->aux = reason;
+        event->interpreter_id = state->interpreter_id;
+        event->activation_id = state->activation_id;
+        event->kind = state->kind;
+        event->source_authority = state->source_authority;
+    }
 }
 
 static int
@@ -750,7 +799,7 @@ soac_ip_prepare_type(PyObject *object,
                      PyObject **new_handle)
 {
     SoacInterpreterTestCall *state = soac_ip_call(object);
-    PySoacInterpreterFrameInfoV1 info;
+    PySoacInterpreterFrameInfoV2 info;
     if (state == NULL || soac_ip_info(parent, &info) < 0) return -1;
     SoacInterpreterFixture *fixture = state->fixture;
     if (state->phase != Py_SOAC_INTERPRETER_RETIRED ||
@@ -781,7 +830,7 @@ soac_ip_prepare_type(PyObject *object,
     event->slots = call_info->decorator_count;
     event->incoming_node = event->incoming_ordinal = -1;
     if (call_info->direct_caller != NULL) {
-        PySoacInterpreterFrameInfoV1 direct;
+        PySoacInterpreterFrameInfoV2 direct;
         if (soac_ip_info(call_info->direct_caller->frame, &direct) < 0) return -1;
         SoacInterpreterTestCall *incoming = soac_ip_call(direct.call_state);
         if (incoming == NULL || incoming->fixture != fixture) return -1;
@@ -857,7 +906,7 @@ soac_ip_stack_contains(const PySoacInterpreterFrameViewV1 *view, PyObject *value
 static int
 soac_ip_complete(const PySoacInterpreterFrameViewV1 *view, PyObject *value)
 {
-    PySoacInterpreterFrameInfoV1 info;
+    PySoacInterpreterFrameInfoV2 info;
     if (soac_ip_info(view, &info) < 0) return -1;
     SoacInterpreterTestCall *state = soac_ip_call(info.call_state);
     if (state == NULL) return -1;
@@ -889,7 +938,7 @@ soac_ip_complete(const PySoacInterpreterFrameViewV1 *view, PyObject *value)
     /* The scalar test observer may collect or reenter without adding a value
      * owner. Production never invokes this Python probe. */
     if (soac_ip_probe(fixture, SOAC_IP_COMPLETE, state->node, state->serial) < 0) return -1;
-    PySoacInterpreterFrameInfoV1 after;
+    PySoacInterpreterFrameInfoV2 after;
     if (soac_ip_info(view, &after) < 0 ||
         after.instruction_ordinal != info.instruction_ordinal ||
         after.instruction_units != info.instruction_units ||
@@ -997,7 +1046,7 @@ soac_ip_select_call(PyObject *object, const PySoacInterpreterCallInfoV1 *info,
                     PySoacInterpreterCallDecisionV1 *out, size_t out_size)
 {
     SoacInterpreterTestCall *state = soac_ip_call(object);
-    PySoacInterpreterFrameInfoV1 frame;
+    PySoacInterpreterFrameInfoV2 frame;
     if (state == NULL || info == NULL || out == NULL || out_size != sizeof(*out) ||
         info->abi_version != Py_SOAC_INTERPRETER_CALL_ABI_V1 ||
         info->phase != Py_SOAC_INTERPRETER_CALL_SELECT ||
@@ -1093,7 +1142,7 @@ soac_ip_selected_finished(PyObject *object, const PySoacInterpreterFrameViewV1 *
                           uint32_t stage, PyObject *result)
 {
     SoacInterpreterTestCall *state = soac_ip_call(object);
-    PySoacInterpreterFrameInfoV1 info;
+    PySoacInterpreterFrameInfoV2 info;
     if (state == NULL || kind != Py_SOAC_INTERPRETER_CALL_BUILTIN_DESCRIPTOR ||
         metadata != object || dataclass_owner != NULL || stage != 0 ||
         soac_ip_info(caller, &info) < 0 || info.call_state != object)
@@ -1533,7 +1582,7 @@ soac_interpreter_events(PyObject *self, PyObject *object)
         }
         PyObject *row = Py_BuildValue(
             "{s:i,s:n,s:n,s:n,s:n,s:I,s:K,s:n,s:I,s:O,"
-            "s:I,s:I,s:I,s:I,s:n,s:n,s:n,s:n}",
+            "s:I,s:I,s:I,s:I,s:n,s:n,s:n,s:n,s:L,s:K,s:I,s:I}",
             "event", event->event, "node", event->node, "serial", event->serial,
             "units", event->units, "ordinal", event->ordinal,
             "lane", event->lane,
@@ -1542,7 +1591,10 @@ soac_interpreter_events(PyObject *self, PyObject *object)
             "call_form", event->call_form, "channel", event->channel,
             "call_flags", event->call_flags, "decorator_source", event->decorator_source,
             "positional", event->positional, "keywords", event->keywords,
-            "incoming_node", event->incoming_node, "incoming_ordinal", event->incoming_ordinal);
+            "incoming_node", event->incoming_node, "incoming_ordinal", event->incoming_ordinal,
+            "interpreter_id", (long long)event->interpreter_id,
+            "activation_id", (unsigned long long)event->activation_id,
+            "kind", event->kind, "source_authority", event->source_authority);
         Py_DECREF(slots);
         if (row == NULL) goto error;
         PyList_SET_ITEM(result, i, row);
