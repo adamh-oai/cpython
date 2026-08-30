@@ -1167,6 +1167,18 @@ codegen_apply_decorators(compiler *c, stmt_ty owner, asdl_expr_seq* decos)
 }
 
 static int
+codegen_complete_definition(compiler *c, location loc, stmt_ty original, int kind)
+{
+    if (!(FUTURE_FEATURES(c) & CO_FUTURE_STRICT)) {
+        return SUCCESS;
+    }
+    /* Construction completes after metadata and decorators, independently of
+     * the later binding. Merely collecting ordinary source adds no opcode. */
+    ADDOP(c, loc, SOAC_COMPLETE_DEFINITION);
+    return _PyCompile_SoacDefinitionComplete(c, LOC(original), original, kind);
+}
+
+static int
 codegen_kwonlydefaults(compiler *c, location loc,
                        asdl_arg_seq *kwonlyargs, asdl_expr_seq *kw_defaults)
 {
@@ -1699,6 +1711,8 @@ codegen_function(compiler *c, stmt_ty s, int is_async)
     }
 
     RETURN_IF_ERROR(codegen_apply_decorators(c, s, decos));
+    RETURN_IF_ERROR(codegen_complete_definition(c, loc, s,
+        is_async ? Py_SOAC_BINDING_ASYNC_FUNCTION : Py_SOAC_BINDING_FUNCTION));
     return codegen_binding_nameop(c, loc, name, LOC(s), s,
         is_async ? Py_SOAC_BINDING_ASYNC_FUNCTION : Py_SOAC_BINDING_FUNCTION);
 }
@@ -1927,6 +1941,7 @@ codegen_class(compiler *c, stmt_ty s)
 
     /* 6. apply decorators */
     RETURN_IF_ERROR(codegen_apply_decorators(c, s, decos));
+    RETURN_IF_ERROR(codegen_complete_definition(c, loc, s, Py_SOAC_BINDING_CLASS));
 
     /* 7. store into <name> */
     RETURN_IF_ERROR(codegen_binding_nameop(

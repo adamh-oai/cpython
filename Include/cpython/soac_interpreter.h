@@ -9,7 +9,7 @@ extern "C" {
  * The trusted loader, not these hooks, authenticates the ty/source artifact.
  * Ordinary native frames/binding/closures/recursion/observers remain in use. */
 #define Py_SOAC_INTERPRETER_ABI_V1 1u
-#define Py_SOAC_INTERPRETER_CALLBACKS_ABI_V2 2u
+#define Py_SOAC_INTERPRETER_CALLBACKS_ABI_V3 3u
 
 #define Py_SOAC_INTERPRETER_ROOT 1u
 #define Py_SOAC_INTERPRETER_FUNCTION 2u
@@ -141,7 +141,7 @@ typedef struct {
 
 typedef struct {
     uint32_t abi_version;
-    uint32_t flags;                   /* Callback ABI V2 requires zero. */
+    uint32_t flags;                   /* Callback ABI V3 requires zero. */
 
     /* Authenticate the actual module/dict/root/owner and consume this root
      * initialization attempt before its wrapper's CREATE notification.
@@ -285,19 +285,17 @@ typedef struct {
                         PyObject *namespace_dict, PyObject *keywords,
                         PyObject **new_handle);
 
-    /* BEFORE each actual Name-binding STORE lane. A production callback does
-     * callback-free (code, ordinal, lane) lookup in the authenticated operation
-     * table and immediately returns 0 for a non-definition origin: no Python,
-     * allocation or name inference. Selected FUNCTION/ASYNC_FUNCTION/CLASS
-     * stores complete definitions AFTER decorators at their real final lane.
-     * The native producer/callsite association is required: neither spelling,
-     * final SET_FUNCTION_ATTRIBUTE nor an arbitrary code pointer is authority.
-     * Fused stores retain their real lane/order or use safe generic fallback. */
-    int (*definition_store)(const PySoacInterpreterFrameViewV1 *frame,
-                            uint32_t lane, PyObject *borrowed_value);
-} PySoacInterpreterCallbacksV2;
+    /* The explicit SOAC_COMPLETE_DEFINITION operation runs AFTER metadata and
+     * decorators, BEFORE the final binding. Its authenticated completion
+     * receipt identifies the source definition and actual native site; the
+     * value still needs its actual creation owner. No local/cell store invokes
+     * this callback. Neither a following STORE shape, spelling, final
+     * SET_FUNCTION_ATTRIBUTE nor an arbitrary code pointer is authority. */
+    int (*definition_complete)(const PySoacInterpreterFrameViewV1 *frame,
+                               PyObject *borrowed_value);
+} PySoacInterpreterCallbacksV3;
 
-/* GIL-build-only callback ABI V2; unchanged frame and call views remain V1.
+/* GIL-build-only callback ABI V3; unchanged frame and call views remain V1.
  * Free-threaded registration/evaluation fail explicitly. Per-interpreter immutable callback
  * table, exact sizeof required, every function non-NULL, unknown flags reject.
  * Semantics-preserving C forwarding/restoration of _PyFunction_Vectorcall
@@ -315,8 +313,8 @@ typedef struct {
  * NULL/out-of-range use fails; no promise validates arbitrary stale C memory.
  * Returned Python references may not outlive their actual native support.
  */
-PyAPI_FUNC(int) PySoac_SetInterpreterCallbacksV2(
-    const PySoacInterpreterCallbacksV2 *callbacks, size_t callbacks_size);
+PyAPI_FUNC(int) PySoac_SetInterpreterCallbacksV3(
+    const PySoacInterpreterCallbacksV3 *callbacks, size_t callbacks_size);
 
 PyAPI_FUNC(PyObject *) PySoac_EvalInterpreterModuleV1(
     PyObject *module, PyObject *root_code, PyObject *module_owner);

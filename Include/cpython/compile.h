@@ -56,7 +56,7 @@ PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSource(
     const char *source, Py_ssize_t length, PyObject *filename, int optimize);
 
 /* Compile authenticated source once, returning (code, strings,
- * (7, CodeNodes, ScopeBindingRecipes, OperationTables)). All containers are
+ * (8, CodeNodes, ScopeBindingRecipes, OperationTables)). All containers are
  * exact immutable tuples. This compiler output supplies source correspondence;
  * the caller separately authenticates and admits actual runtime objects.
  * node=(id,parent_id,exact_code,scope_kind,symtable_kind,source_span)
@@ -77,16 +77,16 @@ PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSource(
  * handler-protection proof, fused-read recipe or normal-completion trace.
  * SOAC owns its cleanup policy.
  * OperationTables remain independently required by interpreter enforcement:
- * they identify actual definition publication and class/decorator CALL sites.
+ * they identify explicit definition completion and class/decorator CALL sites.
  */
 PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSourceDetails(
     const char *source, Py_ssize_t length, PyObject *filename, int optimize);
 
 /* Fixed wire values, independent of internal compiler enum numbering. */
-#define Py_SOAC_CLASS_BINDINGS_SCHEMA 7
+#define Py_SOAC_CLASS_BINDINGS_SCHEMA 8
 /* Source-operation receipts share the SAME final code-node tree.
  * table = (code_id, instruction_count, code_size_bytes, exact_native_names,
- *          stores, calls, gaps)
+ *          stores, calls, gaps, completions)
  * store = (binding_origin, emissions)
  * binding_origin = (kind, original_AST_span, phase, detail_or_None)
  * store_emission = (ordinal, form, first_operand, second_operand_or_None,
@@ -98,17 +98,23 @@ PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSourceDetails(
  * input_layout = (channel, preloaded_count, positional_plan, keyword_plan)
  * positional_plan = (kind, ordered (kind, original_span_or_None) entries)
  * keyword_plan = (kind, native_names_or_None, original_entries, emitted_groups)
+ * completion = (completion_origin, emissions)
+ * completion_origin = (definition_kind, original_AST_span)
+ * completion_emission = (ordinal, opcode_byte_offset, semantic_context_or_None)
  * context = tuple of (owner_kind, owner_span, item_or_None, entry_kind,
  *                    transfer_span_or_None, payload_kind), or None if unproven
  * gap = (reason, operation_origin_or_None, ordinal_or_None, lane_or_None,
  *        native_opcode_or_None, context_or_None)
- * operation_origin = (family, binding_origin / call_origin)
+ * operation_origin = (family, binding_origin / call_origin / completion_origin)
  *
- * Final ordinals precede EXTENDED_ARG expansion. CALL opcode byte offsets come
- * from the native assembler, never from line tables or disassembly matching.
+ * Final ordinals precede EXTENDED_ARG expansion. CALL/completion opcode byte
+ * offsets come from the native assembler, never from line tables or
+ * disassembly matching. Completion origins do not describe storage or grant
+ * authority to a following STORE. Ordinary compilation never emits completion
+ * operations merely because source metadata collection is enabled.
  * All source emissions survive as rows or explicit gaps. Missing/ambiguous
- * receipts grant no execution authority. The tags retain Store/CALL source
- * meanings in wire6; no earlier-wire decoder fallback exists. */
+ * receipts grant no execution authority. Store/CALL meanings are unchanged;
+ * completion is a separate wire8 operation. No earlier-wire decoder exists. */
 
 #define Py_SOAC_BINDING_NAME 0
 #define Py_SOAC_BINDING_FUNCTION 1
@@ -123,6 +129,8 @@ PyAPI_FUNC(PyObject *) PySoac_CompileVerifiedSourceDetails(
 #define Py_SOAC_OPERATION_GAP_DIVERGENT 4
 #define Py_SOAC_OPERATION_STORE 1
 #define Py_SOAC_OPERATION_CALL 2
+#define Py_SOAC_OPERATION_DEFINITION 3
+#define Py_SOAC_OPERATION_GAP_MISSING_COMPLETION 12
 #define Py_SOAC_BINDING_TYPEVAR 7
 #define Py_SOAC_BINDING_TYPEVARTUPLE 8
 #define Py_SOAC_BINDING_PARAMSPEC 9

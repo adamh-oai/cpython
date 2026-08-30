@@ -189,6 +189,7 @@ typedef struct {
 enum soac_origin_family {
     SOAC_ORIGIN_STORE = Py_SOAC_OPERATION_STORE,
     SOAC_ORIGIN_CALL = Py_SOAC_OPERATION_CALL,
+    SOAC_ORIGIN_DEFINITION = Py_SOAC_OPERATION_DEFINITION,
     SOAC_ORIGIN_PATTERN_LEAF,  /* transient constituent, not a physical Store */
     SOAC_ORIGIN_CALL_PREPARATION,
 };
@@ -1535,6 +1536,36 @@ _PyCompile_SoacReferenceOrigin(compiler *c, location source_loc,
 }
 
 int
+_PyCompile_SoacDefinitionComplete(compiler *c, location source_loc,
+                                  const void *original, int kind)
+{
+    soac_code_bindings *unit = c->u->u_metadata.u_soac_bindings;
+    if (unit == NULL) {
+        return SUCCESS;
+    }
+    instr_sequence *seq = c->u->u_instr_sequence;
+    if (!(c->c_future.ff_features & CO_FUTURE_STRICT) || original == NULL ||
+        seq->s_used == 0 || !soac_operation_location(source_loc) ||
+        kind < Py_SOAC_BINDING_FUNCTION || kind > Py_SOAC_BINDING_CLASS) {
+        return soac_binding_error("invalid original definition completion");
+    }
+    _PyInstruction *instruction = &seq->s_instrs[seq->s_used - 1];
+    if (instruction->i_opcode != SOAC_COMPLETE_DEFINITION || instruction->i_oparg != 0) {
+        return soac_binding_error("definition completion has no explicit native operation");
+    }
+    soac_reference_origin origin = {
+        .origin = original, .loc = source_loc, .kind = kind,
+        .family = SOAC_ORIGIN_DEFINITION,
+        .initial_opcode = SOAC_COMPLETE_DEFINITION, .initial_slot = -1,
+        .emission_context = unit->active_emission_context,
+        .keyword_constant = -1,
+    };
+    uint32_t id;
+    RETURN_IF_ERROR(soac_push_operation(unit, origin, &id));
+    return soac_attach_operation(c, id);
+}
+
+int
 _PyCompile_SoacCallStart(compiler *c, location source_loc,
                         const void *original, int kind, int detail,
                         PyCodeObject *child, uint32_t *out)
@@ -2152,6 +2183,15 @@ soac_binding_origin_row(soac_reference_origin *origin)
 }
 
 static PyObject *
+soac_definition_origin_row(soac_reference_origin *origin)
+{
+    PyObject *span = soac_source_span(origin->loc);
+    PyObject *row = span == NULL ? NULL : Py_BuildValue("(iO)", origin->kind, span);
+    Py_XDECREF(span);
+    return row;
+}
+
+static PyObject *
 soac_call_origin_row(soac_binding_collector *collector, soac_code_bindings *unit,
                      soac_reference_origin *origin)
 {
@@ -2232,6 +2272,7 @@ soac_operation_origin_row(soac_binding_collector *collector, soac_code_bindings 
     switch (origin->family) {
         case SOAC_ORIGIN_STORE: payload = soac_binding_origin_row(origin); break;
         case SOAC_ORIGIN_CALL: payload = soac_call_origin_row(collector, unit, origin); break;
+        case SOAC_ORIGIN_DEFINITION: payload = soac_definition_origin_row(origin); break;
         default:
             soac_binding_error("transient preparation cannot become a source operation");
             return NULL;
@@ -2510,6 +2551,13 @@ soac_physical_operation_gaps(soac_binding_collector *collector, soac_code_bindin
             RETURN_IF_ERROR(soac_operation_gap(collector, unit, gaps, Py_SOAC_OPERATION_GAP_MISSING_CALL,
                 NULL, instruction->ordinal, 0, instruction->opcode, -2));
         }
+        if (instruction->opcode == SOAC_COMPLETE_DEFINITION &&
+            (origin == NULL || origin->family != SOAC_ORIGIN_DEFINITION ||
+             instruction->origins.lane[1] != 0)) {
+            RETURN_IF_ERROR(soac_operation_gap(collector, unit, gaps,
+                Py_SOAC_OPERATION_GAP_MISSING_COMPLETION, NULL,
+                instruction->ordinal, 0, instruction->opcode, -2));
+        }
         if (instruction->opcode == MAKE_CELL || instruction->opcode == COPY_FREE_VARS ||
             instruction->opcode == LOAD_FAST_AND_CLEAR) {
             RETURN_IF_ERROR(soac_operation_gap(collector, unit, gaps, Py_SOAC_OPERATION_GAP_COMPILER_ORIGIN,
@@ -2615,6 +2663,16 @@ soac_operation_emissions(soac_binding_collector *collector, soac_code_bindings *
                     }
                 }
             }
+            else if (origin->family == SOAC_ORIGIN_DEFINITION && lane == 0 &&
+                     instruction->opcode == SOAC_COMPLETE_DEFINITION &&
+                     instruction->oparg == 0) {
+                /* The operation itself proves completion. Its later binding
+                 * may use any native storage domain or become a fused store. */
+                form = 0;
+                emission = Py_BuildValue("(inO)", instruction->ordinal,
+                    instruction->opcode_offset, context);
+                key = PyTuple_New(0);
+            }
             Py_DECREF(context);
             if (form < 0) {
                 unsupported = 1;
@@ -2672,10 +2730,10 @@ error:
 static PyObject *
 soac_reference_table(soac_binding_collector *collector, soac_code_bindings *unit)
 {
-    PyObject *rows[2] = {PyList_New(0), PyList_New(0)};
+    PyObject *rows[3] = {PyList_New(0), PyList_New(0), PyList_New(0)};
     PyObject *gaps = PyList_New(0), *result = NULL;
     Py_ssize_t *representatives = NULL;
-    if (rows[0] == NULL || rows[1] == NULL || gaps == NULL ||
+    if (rows[0] == NULL || rows[1] == NULL || rows[2] == NULL || gaps == NULL ||
         soac_check_assembled_operations(unit) < 0 ||
         soac_physical_operation_gaps(collector, unit, gaps) < 0) {
         goto done;
@@ -2695,7 +2753,7 @@ soac_reference_table(soac_binding_collector *collector, soac_code_bindings *unit
     for (Py_ssize_t id = 0; id < count; id++) {
         representatives[id] = id;
         soac_reference_origin *origin = &unit->reference_origins.items[id];
-        if (origin->family > SOAC_ORIGIN_CALL) {
+        if (origin->family > SOAC_ORIGIN_DEFINITION) {
             continue;
         }
         int retained = soac_operation_has_retained_child(collector, unit, (uint32_t)id + 1);
@@ -2723,7 +2781,7 @@ soac_reference_table(soac_binding_collector *collector, soac_code_bindings *unit
     }
     for (Py_ssize_t id = 0; id < count; id++) {
         soac_reference_origin *origin = &unit->reference_origins.items[id];
-        if (representatives[id] != id || origin->family > SOAC_ORIGIN_CALL) {
+        if (representatives[id] != id || origin->family > SOAC_ORIGIN_DEFINITION) {
             continue;
         }
         PyObject *source = soac_operation_origin_row(collector, unit, origin);
@@ -2740,17 +2798,20 @@ soac_reference_table(soac_binding_collector *collector, soac_code_bindings *unit
     PyObject *stores = PyList_AsTuple(rows[0]);
     PyObject *calls = stores == NULL ? NULL : PyList_AsTuple(rows[1]);
     PyObject *missing = calls == NULL ? NULL : PyList_AsTuple(gaps);
-    if (missing != NULL) {
-        result = Py_BuildValue("(ninOOOO)", unit->final_id, unit->reference_instruction_count,
-            unit->assembled_code_size, unit->code->co_names, stores, calls, missing);
+    PyObject *completions = missing == NULL ? NULL : PyList_AsTuple(rows[2]);
+    if (completions != NULL) {
+        result = Py_BuildValue("(ninOOOOO)", unit->final_id, unit->reference_instruction_count,
+            unit->assembled_code_size, unit->code->co_names, stores, calls, missing, completions);
     }
     Py_XDECREF(stores);
     Py_XDECREF(calls);
     Py_XDECREF(missing);
+    Py_XDECREF(completions);
 done:
     PyMem_Free(representatives);
     Py_XDECREF(rows[0]);
     Py_XDECREF(rows[1]);
+    Py_XDECREF(rows[2]);
     Py_XDECREF(gaps);
     return result;
 }

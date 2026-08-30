@@ -2898,6 +2898,7 @@ optimize_load_fast(cfg_builder *g)
                 // how many inputs should be left on the stack.
 
                 // Opcodes that consume no inputs
+                case SOAC_COMPLETE_DEFINITION:
                 case FORMAT_SIMPLE:
                 case GET_ANEXT:
                 case GET_ITER:

@@ -126,6 +126,8 @@ void _PyCompile_SoacRestoreScopeBindingContext(
 int _PyCompile_SoacBindingOrigin(struct _PyCompiler *, _Py_SourceLocation,
                                 const void *, int kind, int phase,
                                 expr_context_ty);
+int _PyCompile_SoacDefinitionComplete(struct _PyCompiler *, _Py_SourceLocation,
+                                      const void *original, int kind);
 int _PyCompile_SoacCallStart(struct _PyCompiler *, _Py_SourceLocation,
                             const void *, int kind, int detail,
                             PyCodeObject *child, uint32_t *origin);

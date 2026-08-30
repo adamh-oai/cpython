@@ -190,9 +190,9 @@ extern PyObject *_PySOAC_InterpreterBuildClassFromFrame(
     PyObject *builtin,
     PyObject *const *args, size_t nargsf, PyObject *kwnames,
     _PySoacInterpreterCallV1 *call);
-PyAPI_FUNC(int) _PySOAC_InterpreterDefinitionStore(
+PyAPI_FUNC(int) _PySOAC_InterpreterCompleteDefinition(
     _PyInterpreterFrame *frame, const _Py_CODEUNIT *this_instr,
-    uint32_t actual_lane, PyObject *borrowed_value);
+    PyObject *borrowed_value);
 
 /* Required implementation invariants:
  * - Exact owner/source/native code+parent checks precede callback grants.

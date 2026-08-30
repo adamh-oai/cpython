@@ -315,16 +315,6 @@ dummy_func(
         macro(STORE_FAST) = _SWAP_FAST + POP_TOP;
 
         replicate(8) op(_SWAP_FAST, (value -- trash)) {
-            if (frame->soac_checked_activation != NULL) {
-                /* Tier one's actual opcode prologue has saved this native
-                 * instruction before any callback. Capture it once. */
-                const _Py_CODEUNIT *soac_instr = frame->instr_ptr;
-                int checked = _PySOAC_InterpreterDefinitionStore(
-                    frame, soac_instr, 0, PyStackRef_AsPyObjectBorrow(value));
-                if (checked < 0) {
-                    ERROR_NO_POP();
-                }
-            }
             _PyStackRef tmp = GETLOCAL(oparg);
             GETLOCAL(oparg) = value;
             DEAD(value);
@@ -336,14 +326,6 @@ dummy_func(
         };
 
         inst(STORE_FAST_LOAD_FAST, (value1 -- value2)) {
-            if (frame->soac_checked_activation != NULL) {
-                const _Py_CODEUNIT *soac_instr = frame->instr_ptr;
-                int checked = _PySOAC_InterpreterDefinitionStore(
-                    frame, soac_instr, 0, PyStackRef_AsPyObjectBorrow(value1));
-                if (checked < 0) {
-                    ERROR_NO_POP();
-                }
-            }
             uint32_t oparg1 = oparg >> 4;
             uint32_t oparg2 = oparg & 15;
             _PyStackRef tmp = GETLOCAL(oparg1);
@@ -354,29 +336,12 @@ dummy_func(
         }
 
         inst(STORE_FAST_STORE_FAST, (value2, value1 --)) {
-            const _Py_CODEUNIT *soac_instr = frame->instr_ptr;
-            if (frame->soac_checked_activation != NULL) {
-                int checked = _PySOAC_InterpreterDefinitionStore(
-                    frame, soac_instr, 0, PyStackRef_AsPyObjectBorrow(value1));
-                if (checked < 0) {
-                    ERROR_NO_POP();
-                }
-            }
             uint32_t oparg1 = oparg >> 4;
             uint32_t oparg2 = oparg & 15;
             _PyStackRef tmp = GETLOCAL(oparg1);
             GETLOCAL(oparg1) = value1;
             DEAD(value1);
             PyStackRef_XCLOSE(tmp);
-            /* Lane zero publishes and closes its old owner before lane one's
-             * callback. A rejected second lane does not undo lane zero. */
-            if (frame->soac_checked_activation != NULL) {
-                int checked = _PySOAC_InterpreterDefinitionStore(
-                    frame, soac_instr, 1, PyStackRef_AsPyObjectBorrow(value2));
-                if (checked < 0) {
-                    ERROR_NO_POP();
-                }
-            }
             tmp = GETLOCAL(oparg2);
             GETLOCAL(oparg2) = value2;
             DEAD(value2);
@@ -1663,14 +1628,6 @@ dummy_func(
         }
 
         inst(STORE_NAME, (v -- )) {
-            if (frame->soac_checked_activation != NULL) {
-                const _Py_CODEUNIT *soac_instr = frame->instr_ptr;
-                int checked = _PySOAC_InterpreterDefinitionStore(
-                    frame, soac_instr, 0, PyStackRef_AsPyObjectBorrow(v));
-                if (checked < 0) {
-                    ERROR_NO_POP();
-                }
-            }
             PyObject *name = GETITEM(FRAME_CO_NAMES, oparg);
             PyObject *ns = LOCALS();
             int err;
@@ -1831,14 +1788,6 @@ dummy_func(
         }
 
         inst(STORE_GLOBAL, (v --)) {
-            if (frame->soac_checked_activation != NULL) {
-                const _Py_CODEUNIT *soac_instr = frame->instr_ptr;
-                int checked = _PySOAC_InterpreterDefinitionStore(
-                    frame, soac_instr, 0, PyStackRef_AsPyObjectBorrow(v));
-                if (checked < 0) {
-                    ERROR_NO_POP();
-                }
-            }
             PyObject *name = GETITEM(FRAME_CO_NAMES, oparg);
             int err = PyDict_SetItem(GLOBALS(), name, PyStackRef_AsPyObjectBorrow(v));
             PyStackRef_CLOSE(v);
@@ -2092,14 +2041,6 @@ dummy_func(
         }
 
         inst(STORE_DEREF, (v --)) {
-            if (frame->soac_checked_activation != NULL) {
-                const _Py_CODEUNIT *soac_instr = frame->instr_ptr;
-                int checked = _PySOAC_InterpreterDefinitionStore(
-                    frame, soac_instr, 0, PyStackRef_AsPyObjectBorrow(v));
-                if (checked < 0) {
-                    ERROR_NO_POP();
-                }
-            }
             PyCellObject *cell = (PyCellObject *)PyStackRef_AsPyObjectBorrow(GETLOCAL(oparg));
             PyCell_SetTakeRef(cell, PyStackRef_AsPyObjectSteal(v));
         }
@@ -5356,6 +5297,18 @@ dummy_func(
             }
             /* The callback may replace attr: do not read that borrowed
              * installed value again after the publication event. */
+        }
+
+        inst(SOAC_COMPLETE_DEFINITION, (value -- value)) {
+            /* Only the compiler's explicit post-decoration operation reaches
+             * this boundary. Ordinary local/cell stores do no SOAC work. The
+             * actual value stays published for callback reentry and unwind. */
+            const _Py_CODEUNIT *soac_instr = frame->instr_ptr;
+            int err = _PySOAC_InterpreterCompleteDefinition(
+                frame, soac_instr, PyStackRef_AsPyObjectBorrow(value));
+            if (err < 0) {
+                ERROR_NO_POP();
+            }
         }
 
         inst(RETURN_GENERATOR, (-- res)) {

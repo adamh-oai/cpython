@@ -1,7 +1,7 @@
 /* Trusted native KERNEL fixture, not production ty authentication.
  *
  * Installs the proposed interpreter callbacks. It borrows exact source
- * nodes/store coordinates from one native schema-5 Details result during cold
+ * nodes/completion coordinates from one native schema-8 Details result during cold
  * setup, then stores scalar identities only. It does NOT retain that result,
  * any source code/function/module/globals, or any argument/result object.
  * Deliberate Python probes are test observers, not production checks.
@@ -10,6 +10,7 @@
  * fallback exports, fake bodies, or default-PyEval permission stubs here.
  */
 #include "cpython/soac_interpreter.h"
+#include "opcode_ids.h"
 #include "pycore_soac_interpreter.h"
 #include "pycore_interpframe.h"
 #include "pycore_opcode_utils.h"
@@ -30,7 +31,7 @@ enum {
 enum {
     SOAC_IP_ROOT_BEGIN = 1, SOAC_IP_ROOT_END, SOAC_IP_BIRTH,
     SOAC_IP_ENTER, SOAC_IP_RETURN = 6, SOAC_IP_LEAVE,
-    SOAC_IP_PREPARE_TYPE, SOAC_IP_BIND_TYPE, SOAC_IP_STORE,
+    SOAC_IP_PREPARE_TYPE, SOAC_IP_BIND_TYPE, SOAC_IP_COMPLETE,
     SOAC_IP_ATTRIBUTE, SOAC_IP_STARTED, SOAC_IP_FAILED,
     SOAC_IP_CALL, SOAC_IP_SELECTED_FINISHED
 };
@@ -44,8 +45,8 @@ typedef struct {
 } SoacInterpreterTestNode;
 
 typedef struct {
-    Py_ssize_t node, ordinal;
-    unsigned int lane, origin, form;
+    Py_ssize_t node, ordinal, units;
+    unsigned int origin;
     Py_ssize_t definition_node;  /* Exact native parent+declaration span join. */
 } SoacInterpreterTestSite;
 
@@ -830,7 +831,7 @@ soac_ip_prepare_type(PyObject *object,
 
 /* Test-only stack-publication discriminator. It does not create a value owner
  * or infer source authority; the production callback sees only opaque views.
- * Analyze/regenerate every callback-bearing store with a genuinely published
+ * Analyze/regenerate definition completion with a genuinely published
  * native SP before entering this fixture or a Python/GC callback. */
 static int
 soac_ip_stack_contains(const PySoacInterpreterFrameViewV1 *view, PyObject *value)
@@ -854,48 +855,46 @@ soac_ip_stack_contains(const PySoacInterpreterFrameViewV1 *view, PyObject *value
 }
 
 static int
-soac_ip_store(const PySoacInterpreterFrameViewV1 *view,
-              uint32_t lane, PyObject *value)
+soac_ip_complete(const PySoacInterpreterFrameViewV1 *view, PyObject *value)
 {
     PySoacInterpreterFrameInfoV1 info;
     if (soac_ip_info(view, &info) < 0) return -1;
     SoacInterpreterTestCall *state = soac_ip_call(info.call_state);
     if (state == NULL) return -1;
     SoacInterpreterFixture *fixture = state->fixture;
+    /* Record EVERY callback before receipt selection. Local-store tests must
+     * not mistake a filtered receipt miss for absence of a native callback. */
+    SoacInterpreterTestEvent *event = soac_ip_event(
+        fixture, SOAC_IP_COMPLETE, state->node, state->serial);
+    if (event == NULL) return soac_ip_error("interpreter fixture overflow");
+    event->units = info.instruction_units;
+    event->ordinal = info.instruction_ordinal;
+    event->value = (uintptr_t)value;
+    event->refcount = Py_REFCNT(value);
     const SoacInterpreterTestSite *site = NULL;
     for (Py_ssize_t i = 0; i < fixture->site_count; i++) {
         const SoacInterpreterTestSite *candidate = &fixture->sites[i];
         if (candidate->node == state->node &&
             candidate->ordinal == info.instruction_ordinal &&
-            candidate->lane == lane) {
-            if (site != NULL) return soac_ip_error("ambiguous fixture Store receipt");
+            candidate->units == info.instruction_units) {
+            if (site != NULL) return soac_ip_error("ambiguous fixture completion receipt");
             site = candidate;
         }
     }
-    /* Compiler-created stores lack original binding rows. Production likewise
-     * performs its no-effect scalar lookup and returns for non-definitions. */
-    if (site == NULL) return 0;
-    SoacInterpreterTestEvent *event = soac_ip_event(
-        fixture, SOAC_IP_STORE, state->node, state->serial);
-    if (event == NULL) return soac_ip_error("interpreter fixture overflow");
-    event->units = info.instruction_units;
-    event->ordinal = info.instruction_ordinal;
-    event->lane = lane;
-    event->value = (uintptr_t)value;
-    event->refcount = Py_REFCNT(value);
+    if (site == NULL) return soac_ip_error("fixture completion has no native receipt");
     event->aux = soac_ip_stack_contains(view, value) ? 1u : 0u;
     if (!(event->aux & 1u)) {
-        return soac_ip_error("Store callback entered with unpublished operand stack");
+        return soac_ip_error("completion callback entered with unpublished operand stack");
     }
-    /* Stress all original Name stores in TESTS ONLY. Production nondefinition
-     * lookup returns immediately without this probe, allocation or Python. */
-    if (soac_ip_probe(fixture, SOAC_IP_STORE, state->node, state->serial) < 0) return -1;
+    /* The scalar test observer may collect or reenter without adding a value
+     * owner. Production never invokes this Python probe. */
+    if (soac_ip_probe(fixture, SOAC_IP_COMPLETE, state->node, state->serial) < 0) return -1;
     PySoacInterpreterFrameInfoV1 after;
     if (soac_ip_info(view, &after) < 0 ||
         after.instruction_ordinal != info.instruction_ordinal ||
         after.instruction_units != info.instruction_units ||
         !soac_ip_stack_contains(view, value)) {
-        return soac_ip_error("Store callback lost its captured site or live operand");
+        return soac_ip_error("completion callback lost its captured site or live operand");
     }
     event->aux |= 2u;
     if (site->origin == Py_SOAC_BINDING_FUNCTION ||
@@ -1115,8 +1114,8 @@ soac_ip_selected_finished(PyObject *object, const PySoacInterpreterFrameViewV1 *
 }
 #endif
 
-static const PySoacInterpreterCallbacksV2 soac_ip_callbacks = {
-    .abi_version = Py_SOAC_INTERPRETER_CALLBACKS_ABI_V2,
+static const PySoacInterpreterCallbacksV3 soac_ip_callbacks = {
+    .abi_version = Py_SOAC_INTERPRETER_CALLBACKS_ABI_V3,
     .root_begin = soac_ip_root_begin, .root_end = soac_ip_root_end,
     .birth = soac_ip_birth, .function_attribute = soac_ip_function_attribute,
     .enter = soac_ip_enter, .started = soac_ip_started,
@@ -1124,11 +1123,11 @@ static const PySoacInterpreterCallbacksV2 soac_ip_callbacks = {
     .call = soac_ip_select_call, .selected_call_finished = soac_ip_selected_finished,
 #endif
     .returned = soac_ip_returned, .failed = soac_ip_failed, .leave = soac_ip_leave,
-    .prepare_type = soac_ip_prepare_type, .definition_store = soac_ip_store,
+    .prepare_type = soac_ip_prepare_type, .definition_complete = soac_ip_complete,
 };
 
 /* Cold fixture setup only. Actual native Details supplies one code-node tree
- * and final Store receipts. We deliberately do not consume scope/lifetime
+ * and explicit completion receipts. We deliberately do not consume scope/lifetime
  * recipes, and this small fixture parser is not the production Rust parser. */
 static int
 soac_ip_read_nodes(SoacInterpreterFixture *fixture, PyObject *nodes)
@@ -1274,21 +1273,30 @@ soac_ip_read_sites(SoacInterpreterFixture *fixture, PyObject *nodes, PyObject *t
     }
     for (Py_ssize_t i = 0; i < fixture->node_count; i++) {
         PyObject *table = PyTuple_GET_ITEM(tables, i);
-        if (!soac_ip_tuple(table, 7) ||
+        if (!soac_ip_tuple(table, 8) ||
             PyLong_AsSsize_t(PyTuple_GET_ITEM(table, 0)) != i) {
             return soac_ip_error("fixture operation table has wrong code identity");
         }
-        PyObject *stores = PyTuple_GET_ITEM(table, 4);
-        if (!soac_ip_tuple(stores, -1)) return soac_ip_error("fixture Store table is not a tuple");
-        for (Py_ssize_t j = 0; j < PyTuple_GET_SIZE(stores); j++) {
-            PyObject *row = PyTuple_GET_ITEM(stores, j);
+        PyObject *completions = PyTuple_GET_ITEM(table, 7);
+        if (!soac_ip_tuple(completions, -1))
+            return soac_ip_error("fixture completion table is not a tuple");
+        for (Py_ssize_t j = 0; j < PyTuple_GET_SIZE(completions); j++) {
+            PyObject *row = PyTuple_GET_ITEM(completions, j);
             if (!soac_ip_tuple(row, 2) ||
-                !soac_ip_tuple(PyTuple_GET_ITEM(row, 0), 4) ||
+                !soac_ip_tuple(PyTuple_GET_ITEM(row, 0), 2) ||
                 !soac_ip_tuple(PyTuple_GET_ITEM(row, 1), -1)) {
-                return soac_ip_error("fixture Store origin/emissions malformed");
+                return soac_ip_error("fixture completion origin/emissions malformed");
             }
             PyObject *binding = PyTuple_GET_ITEM(row, 0);
             long origin = PyLong_AsLong(PyTuple_GET_ITEM(binding, 0));
+            if (PyErr_Occurred() || origin < Py_SOAC_BINDING_FUNCTION ||
+                origin > Py_SOAC_BINDING_CLASS) {
+                return soac_ip_error("fixture completion has an invalid definition kind");
+            }
+            PyObject *emissions = PyTuple_GET_ITEM(row, 1);
+            if (PyTuple_GET_SIZE(emissions) == 0) {
+                continue;  /* An eliminated definition has no runtime site. */
+            }
             Py_ssize_t definition_node = -1;
             if (origin == Py_SOAC_BINDING_FUNCTION ||
                 origin == Py_SOAC_BINDING_ASYNC_FUNCTION || origin == Py_SOAC_BINDING_CLASS) {
@@ -1312,31 +1320,33 @@ soac_ip_read_sites(SoacInterpreterFixture *fixture, PyObject *nodes, PyObject *t
                 }
                 if (definition_node < 0) return soac_ip_error("fixture definition has no actual native child");
             }
-            PyObject *emissions = PyTuple_GET_ITEM(row, 1);
             for (Py_ssize_t k = 0; k < PyTuple_GET_SIZE(emissions); k++) {
                 PyObject *emission = PyTuple_GET_ITEM(emissions, k);
-                if (!soac_ip_tuple(emission, 6)) return soac_ip_error("fixture Store emission malformed");
+                if (!soac_ip_tuple(emission, 3))
+                    return soac_ip_error("fixture completion emission malformed");
                 Py_ssize_t ordinal = PyLong_AsSsize_t(PyTuple_GET_ITEM(emission, 0));
-                long form = PyLong_AsLong(PyTuple_GET_ITEM(emission, 1));
-                long lane = PyLong_AsLong(PyTuple_GET_ITEM(emission, 4));
-                if (PyErr_Occurred() || ordinal < 0 || lane < 0 || lane > 1) {
-                    return soac_ip_error("fixture Store coordinate malformed");
+                Py_ssize_t offset = PyLong_AsSsize_t(PyTuple_GET_ITEM(emission, 1));
+                PyCodeObject *code = (PyCodeObject *)PyTuple_GET_ITEM(PyTuple_GET_ITEM(nodes, i), 2);
+                if (PyErr_Occurred() || ordinal < 0 || offset < 0 ||
+                    offset >= _PyCode_NBYTES(code) || offset % sizeof(_Py_CODEUNIT) != 0 ||
+                    _PyCode_CODE(code)[offset / sizeof(_Py_CODEUNIT)].op.code !=
+                        SOAC_COMPLETE_DEFINITION) {
+                    return soac_ip_error("fixture completion coordinate malformed");
                 }
-                /* This hook covers Name-binding publication, not object writes,
-                 * Delete or an invented compiler-created binding origin. */
-                if (form < Py_SOAC_STORE_FAST || form > Py_SOAC_STORE_GLOBAL) continue;
                 if (fixture->site_count == SOAC_IP_MAX_SITES) {
-                    return soac_ip_error("fixture Store capacity exceeded");
+                    return soac_ip_error("fixture completion capacity exceeded");
                 }
                 for (Py_ssize_t n = 0; n < fixture->site_count; n++) {
                     SoacInterpreterTestSite *old = &fixture->sites[n];
-                    if (old->node == i && old->ordinal == ordinal && old->lane == (unsigned)lane) {
-                        return soac_ip_error("fixture native Store lane is ambiguous");
+                    if (old->node == i && (old->ordinal == ordinal ||
+                        old->units == offset / (Py_ssize_t)sizeof(_Py_CODEUNIT))) {
+                        return soac_ip_error("fixture native completion site is ambiguous");
                     }
                 }
                 fixture->sites[fixture->site_count++] = (SoacInterpreterTestSite){
-                    .node = i, .ordinal = ordinal, .lane = (unsigned int)lane,
-                    .origin = (unsigned int)origin, .form = (unsigned int)form,
+                    .node = i, .ordinal = ordinal,
+                    .units = offset / (Py_ssize_t)sizeof(_Py_CODEUNIT),
+                    .origin = (unsigned int)origin,
                     .definition_node = definition_node};
             }
         }
@@ -1445,7 +1455,7 @@ soac_interpreter_fixture(PyObject *self, PyObject *args)
     PyObject *catalog = PyTuple_GET_ITEM(details, 2);
     if (!soac_ip_tuple(catalog, 4) ||
         PyLong_AsLong(PyTuple_GET_ITEM(catalog, 0)) != Py_SOAC_CLASS_BINDINGS_SCHEMA) {
-        soac_ip_error("interpreter fixture requires exact native Details schema 5");
+        soac_ip_error("interpreter fixture requires exact native Details schema 8");
         return NULL;
     }
     PyObject *code = PyTuple_GET_ITEM(details, 0);
@@ -1457,7 +1467,7 @@ soac_interpreter_fixture(PyObject *self, PyObject *args)
     if (PyType_Ready(&SoacInterpreterFixture_Type) < 0 ||
         PyType_Ready(&SoacInterpreterTestCall_Type) < 0 ||
         PyType_Ready(&SoacInterpreterTestFunction_Type) < 0 ||
-        PySoac_SetInterpreterCallbacksV2(&soac_ip_callbacks, sizeof(soac_ip_callbacks)) < 0) return NULL;
+        PySoac_SetInterpreterCallbacksV3(&soac_ip_callbacks, sizeof(soac_ip_callbacks)) < 0) return NULL;
     SoacInterpreterFixture *fixture = PyObject_GC_New(
         SoacInterpreterFixture, &SoacInterpreterFixture_Type);
     if (fixture == NULL) return NULL;
