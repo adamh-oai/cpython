@@ -11522,6 +11522,27 @@
             DISPATCH();
         }
 
+        TARGET(SOAC_COMPLETE_DEFINITION) {
+            #if _Py_TAIL_CALL_INTERP
+            int opcode = SOAC_COMPLETE_DEFINITION;
+            (void)(opcode);
+            #endif
+            frame->instr_ptr = next_instr;
+            next_instr += 1;
+            INSTRUCTION_STATS(SOAC_COMPLETE_DEFINITION);
+            _PyStackRef value;
+            value = stack_pointer[-1];
+            const _Py_CODEUNIT *soac_instr = frame->instr_ptr;
+            _PyFrame_SetStackPointer(frame, stack_pointer);
+            int err = _PySOAC_InterpreterCompleteDefinition(
+                frame, soac_instr, PyStackRef_AsPyObjectBorrow(value));
+            stack_pointer = _PyFrame_GetStackPointer(frame);
+            if (err < 0) {
+                JUMP_TO_LABEL(error);
+            }
+            DISPATCH();
+        }
+
         TARGET(STORE_ATTR) {
             #if _Py_TAIL_CALL_INTERP
             int opcode = STORE_ATTR;
@@ -11881,16 +11902,6 @@
             INSTRUCTION_STATS(STORE_DEREF);
             _PyStackRef v;
             v = stack_pointer[-1];
-            if (frame->soac_checked_activation != NULL) {
-                const _Py_CODEUNIT *soac_instr = frame->instr_ptr;
-                _PyFrame_SetStackPointer(frame, stack_pointer);
-                int checked = _PySOAC_InterpreterDefinitionStore(
-                    frame, soac_instr, 0, PyStackRef_AsPyObjectBorrow(v));
-                stack_pointer = _PyFrame_GetStackPointer(frame);
-                if (checked < 0) {
-                    JUMP_TO_LABEL(error);
-                }
-            }
             PyCellObject *cell = (PyCellObject *)PyStackRef_AsPyObjectBorrow(GETLOCAL(oparg));
             _PyFrame_SetStackPointer(frame, stack_pointer);
             PyCell_SetTakeRef(cell, PyStackRef_AsPyObjectSteal(v));
@@ -11913,16 +11924,6 @@
             // _SWAP_FAST
             {
                 value = stack_pointer[-1];
-                if (frame->soac_checked_activation != NULL) {
-                    const _Py_CODEUNIT *soac_instr = frame->instr_ptr;
-                    _PyFrame_SetStackPointer(frame, stack_pointer);
-                    int checked = _PySOAC_InterpreterDefinitionStore(
-                        frame, soac_instr, 0, PyStackRef_AsPyObjectBorrow(value));
-                    stack_pointer = _PyFrame_GetStackPointer(frame);
-                    if (checked < 0) {
-                        JUMP_TO_LABEL(error);
-                    }
-                }
                 _PyStackRef tmp = GETLOCAL(oparg);
                 GETLOCAL(oparg) = value;
                 trash = tmp;
@@ -11950,16 +11951,6 @@
             _PyStackRef value1;
             _PyStackRef value2;
             value1 = stack_pointer[-1];
-            if (frame->soac_checked_activation != NULL) {
-                const _Py_CODEUNIT *soac_instr = frame->instr_ptr;
-                _PyFrame_SetStackPointer(frame, stack_pointer);
-                int checked = _PySOAC_InterpreterDefinitionStore(
-                    frame, soac_instr, 0, PyStackRef_AsPyObjectBorrow(value1));
-                stack_pointer = _PyFrame_GetStackPointer(frame);
-                if (checked < 0) {
-                    JUMP_TO_LABEL(error);
-                }
-            }
             uint32_t oparg1 = oparg >> 4;
             uint32_t oparg2 = oparg & 15;
             _PyStackRef tmp = GETLOCAL(oparg1);
@@ -11984,16 +11975,6 @@
             _PyStackRef value1;
             value1 = stack_pointer[-1];
             value2 = stack_pointer[-2];
-            const _Py_CODEUNIT *soac_instr = frame->instr_ptr;
-            if (frame->soac_checked_activation != NULL) {
-                _PyFrame_SetStackPointer(frame, stack_pointer);
-                int checked = _PySOAC_InterpreterDefinitionStore(
-                    frame, soac_instr, 0, PyStackRef_AsPyObjectBorrow(value1));
-                stack_pointer = _PyFrame_GetStackPointer(frame);
-                if (checked < 0) {
-                    JUMP_TO_LABEL(error);
-                }
-            }
             uint32_t oparg1 = oparg >> 4;
             uint32_t oparg2 = oparg & 15;
             _PyStackRef tmp = GETLOCAL(oparg1);
@@ -12003,15 +11984,6 @@
             _PyFrame_SetStackPointer(frame, stack_pointer);
             PyStackRef_XCLOSE(tmp);
             stack_pointer = _PyFrame_GetStackPointer(frame);
-            if (frame->soac_checked_activation != NULL) {
-                _PyFrame_SetStackPointer(frame, stack_pointer);
-                int checked = _PySOAC_InterpreterDefinitionStore(
-                    frame, soac_instr, 1, PyStackRef_AsPyObjectBorrow(value2));
-                stack_pointer = _PyFrame_GetStackPointer(frame);
-                if (checked < 0) {
-                    JUMP_TO_LABEL(error);
-                }
-            }
             tmp = GETLOCAL(oparg2);
             GETLOCAL(oparg2) = value2;
             stack_pointer += -1;
@@ -12032,16 +12004,6 @@
             INSTRUCTION_STATS(STORE_GLOBAL);
             _PyStackRef v;
             v = stack_pointer[-1];
-            if (frame->soac_checked_activation != NULL) {
-                const _Py_CODEUNIT *soac_instr = frame->instr_ptr;
-                _PyFrame_SetStackPointer(frame, stack_pointer);
-                int checked = _PySOAC_InterpreterDefinitionStore(
-                    frame, soac_instr, 0, PyStackRef_AsPyObjectBorrow(v));
-                stack_pointer = _PyFrame_GetStackPointer(frame);
-                if (checked < 0) {
-                    JUMP_TO_LABEL(error);
-                }
-            }
             PyObject *name = GETITEM(FRAME_CO_NAMES, oparg);
             _PyFrame_SetStackPointer(frame, stack_pointer);
             int err = PyDict_SetItem(GLOBALS(), name, PyStackRef_AsPyObjectBorrow(v));
@@ -12067,16 +12029,6 @@
             INSTRUCTION_STATS(STORE_NAME);
             _PyStackRef v;
             v = stack_pointer[-1];
-            if (frame->soac_checked_activation != NULL) {
-                const _Py_CODEUNIT *soac_instr = frame->instr_ptr;
-                _PyFrame_SetStackPointer(frame, stack_pointer);
-                int checked = _PySOAC_InterpreterDefinitionStore(
-                    frame, soac_instr, 0, PyStackRef_AsPyObjectBorrow(v));
-                stack_pointer = _PyFrame_GetStackPointer(frame);
-                if (checked < 0) {
-                    JUMP_TO_LABEL(error);
-                }
-            }
             PyObject *name = GETITEM(FRAME_CO_NAMES, oparg);
             PyObject *ns = LOCALS();
             int err;

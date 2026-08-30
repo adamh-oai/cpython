@@ -1379,7 +1379,12 @@
             break;
         }
 
-        /* _STORE_NAME is not a viable micro-op for tier 2 */
+        case _STORE_NAME: {
+            CHECK_STACK_BOUNDS(-1);
+            stack_pointer += -1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            break;
+        }
 
         case _DELETE_NAME: {
             break;
@@ -1471,7 +1476,12 @@
             break;
         }
 
-        /* _STORE_GLOBAL is not a viable micro-op for tier 2 */
+        case _STORE_GLOBAL: {
+            CHECK_STACK_BOUNDS(-1);
+            stack_pointer += -1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            break;
+        }
 
         case _DELETE_GLOBAL: {
             break;
@@ -3561,6 +3571,10 @@
         }
 
         /* _SET_FUNCTION_ATTRIBUTE is not a viable micro-op for tier 2 */
+
+        case _SOAC_COMPLETE_DEFINITION: {
+            break;
+        }
 
         case _RETURN_GENERATOR: {
             JitOptRef res;
