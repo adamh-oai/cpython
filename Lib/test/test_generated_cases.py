@@ -445,6 +445,42 @@ class TestFunctionAttributeCallbackStack(unittest.TestCase):
             )
 
 
+class TestSoacTier2FrameErrors(unittest.TestCase):
+    """Frame-changing errors keep ownership cleanup and a cache-free exit."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.analysis = analyzer.analyze_files([
+            os.path.join(test_tools.basepath, "Python", "bytecodes.c")
+        ])
+
+    def test_actual_frame_changes_retain_error_and_guard_ip_metadata(self):
+        push = self.analysis.uops["_PUSH_FRAME"].properties
+        returned = self.analysis.uops["_RETURN_VALUE"].properties
+        self.assertTrue(push.error_with_pop)
+        self.assertFalse(push.error_without_pop)
+        self.assertTrue(returned.error_without_pop)
+        self.assertFalse(returned.error_with_pop)
+        for properties in (push, returned):
+            self.assertTrue(properties.escapes)
+            self.assertTrue(properties.needs_guard_ip)
+
+    def test_saved_ip_error_stub_has_no_target_or_cached_stack_values(self):
+        stub = self.analysis.uops["_ERROR_AT_SAVED_IP"]
+        self.assertEqual(stub.properties.tier, 2)
+        self.assertTrue(stub.properties.sync_sp)
+        self.assertEqual(stub.stack.inputs, [])
+        self.assertEqual(stub.stack.outputs, [])
+        self.assertEqual(stub.caches, [])
+        self.assertEqual(list(analyzer.get_uop_cache_depths(stub)), [(0, 0, 0)])
+        # Ordinary errors still carry a target belonging to their current code.
+        ordinary = self.analysis.uops["_ERROR_POP_N"]
+        self.assertEqual(
+            [(cache.name, cache.size) for cache in ordinary.caches], [("target", 2)]
+        )
+
+
 class TestIndexedGlobalResultStack(unittest.TestCase):
     """Indexed loads must publish their result on the supported GIL path."""
 

@@ -1190,6 +1190,7 @@ prepare_for_execution(_PyUOpInstruction *buffer, int length)
     int32_t current_error = -1;
     int32_t current_error_target = -1;
     int32_t current_popped = -1;
+    int32_t current_error_op = -1;
     int32_t current_exit_op = -1;
     /* Leaving in NOPs slows down the interpreter and messes up the stats */
     _PyUOpInstruction *copy_to = &buffer[0];
@@ -1245,12 +1246,20 @@ prepare_for_execution(_PyUOpInstruction *buffer, int length)
         if (_PyUop_Flags[base_opcode] & HAS_ERROR_FLAG) {
             int popped = (_PyUop_Flags[base_opcode] & HAS_ERROR_NO_POP_FLAG) ?
                 0 : _PyUop_num_popped(base_opcode, inst->oparg);
-            if (target != current_error_target || popped != current_popped) {
+            /* These uops error only after installing a different current
+             * frame. Their trace target belongs to the previous frame. */
+            bool error_at_saved_ip =
+                base_opcode == _PUSH_FRAME || base_opcode == _RETURN_VALUE;
+            int16_t error_op = error_at_saved_ip ?
+                _ERROR_AT_SAVED_IP_r00 : _ERROR_POP_N_r00;
+            if (target != current_error_target || popped != current_popped ||
+                error_op != current_error_op) {
                 current_popped = popped;
+                current_error_op = error_op;
                 current_error = next_spare;
                 current_error_target = target;
-                make_exit(&buffer[next_spare], _ERROR_POP_N_r00, 0, false);
-                buffer[next_spare].operand0 = target;
+                make_exit(&buffer[next_spare], error_op, 0, false);
+                buffer[next_spare].operand0 = error_at_saved_ip ? 0 : target;
                 next_spare++;
             }
             buffer[i].error_target = current_error;
@@ -1345,6 +1354,7 @@ sanity_check(_PyExecutorObject *executor)
             base_opcode == _HANDLE_PENDING_AND_DEOPT ||
             base_opcode == _EXIT_TRACE ||
             base_opcode == _ERROR_POP_N ||
+            base_opcode == _ERROR_AT_SAVED_IP ||
             base_opcode == _DYNAMIC_EXIT);
     }
 }

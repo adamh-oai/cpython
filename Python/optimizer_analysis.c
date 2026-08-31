@@ -663,8 +663,8 @@ remove_unneeded_uops(_PyUOpInstruction *buffer, int buffer_size)
                         break;
                     }
                 }
-                /* _PUSH_FRAME doesn't escape or error, but it
-                 * does need the IP for the return address */
+                /* _PUSH_FRAME also needs the caller's IP for the return
+                 * address, apart from its escaping and erroring checks. */
                 bool needs_ip = (opcode == _PUSH_FRAME || opcode == _YIELD_VALUE || opcode == _DYNAMIC_EXIT || opcode == _EXIT_TRACE);
                 if (_PyUop_Flags[opcode] & HAS_ESCAPES_FLAG) {
                     needs_ip = true;

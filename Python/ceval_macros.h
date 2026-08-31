@@ -423,12 +423,21 @@ _PyFrame_SetStackPointer(frame, stack_pointer)
 
 /* Tier-switching macros. */
 
+/* The tagged-NULL value is reserved for an error at the current frame's
+ * saved IP. Ordinary NULL errors still resume at saved IP + 1, and a tagged
+ * non-NULL bytecode address still requests continued tracing. */
+#define _Py_TIER2_ERROR_AT_SAVED_IP ((_Py_CODEUNIT *)(uintptr_t)1)
+
 #define TIER1_TO_TIER2(EXECUTOR)                        \
 do {                                                   \
     OPT_STAT_INC(traces_executed);                     \
     next_instr = _Py_jit_entry((EXECUTOR), frame, stack_pointer, tstate); \
     frame = tstate->current_frame;                     \
     stack_pointer = _PyFrame_GetStackPointer(frame);   \
+    if (next_instr == _Py_TIER2_ERROR_AT_SAVED_IP) {     \
+        next_instr = frame->instr_ptr;                 \
+        JUMP_TO_LABEL(error);                          \
+    }                                                  \
     int keep_tracing_bit = (uintptr_t)next_instr & 1;   \
     next_instr = (_Py_CODEUNIT *)(((uintptr_t)next_instr) & (~1)); \
     if (next_instr == NULL) {                          \

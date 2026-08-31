@@ -1447,7 +1447,7 @@ def get_uop_cache_depths(uop: Uop) -> Iterator[tuple[int, int, int]]:
     if uop.name in ("_START_EXECUTOR", "_JUMP_TO_TOP", "_COLD_EXIT"):
         yield 0, 0, 0
         return
-    if uop.name == "_ERROR_POP_N":
+    if uop.name in ("_ERROR_POP_N", "_ERROR_AT_SAVED_IP"):
         yield 0, 0, 0
         return
     ideal_inputs = 0

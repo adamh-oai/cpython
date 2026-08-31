@@ -5951,6 +5951,14 @@ dummy_func(
             Py_UNREACHABLE();
         }
 
+        tier2 op(_ERROR_AT_SAVED_IP, (--)) {
+            /* A frame-changing uop has already selected the failing frame.
+             * Its saved IP, not the trace's originating code, locates the error. */
+            SYNC_SP();
+            GOTO_TIER_ONE(_Py_TIER2_ERROR_AT_SAVED_IP);
+            Py_UNREACHABLE();
+        }
+
         tier2 op(_SPILL_OR_RELOAD, (--)) {
         }
 
