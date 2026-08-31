@@ -2873,6 +2873,10 @@
 
         /* _CHECK_NO_SOAC_CONSTRUCTION_CALL is not a viable micro-op for tier 2 */
 
+        case _CHECK_NO_SOAC_SOURCE_CALL: {
+            break;
+        }
+
         case _MAYBE_EXPAND_METHOD: {
             JitOptRef *args;
             JitOptRef self_or_null;
