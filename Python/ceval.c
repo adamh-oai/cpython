@@ -1218,7 +1218,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int 
     if (_Py_EnterRecursiveCallTstate(tstate, "")) {
         assert(frame->owner != FRAME_OWNED_BY_INTERPRETER);
         _PySoacInterpreterRootFinishV1 soac_finish;
-        _PySOAC_InterpreterTakeDataclassRoot(frame, &soac_finish);
+        _PyFrame_TakeSoacDataclassRoot(frame, &soac_finish);
         _PyEval_FrameClearAndPop(tstate, frame);
         _PySOAC_InterpreterFinishDataclassRoot(&soac_finish, NULL);
         return NULL;
@@ -1322,7 +1322,7 @@ early_exit:
     // GH-99729: We need to unlink the frame *before* clearing it:
     _PyInterpreterFrame *dying = frame;
     _PySoacInterpreterRootFinishV1 soac_finish;
-    _PySOAC_InterpreterTakeDataclassRoot(dying, &soac_finish);
+    _PyFrame_TakeSoacDataclassRoot(dying, &soac_finish);
     frame = tstate->current_frame = dying->previous;
     _PyEval_FrameClearAndPop(tstate, dying);
     _PySOAC_InterpreterFinishDataclassRoot(&soac_finish, NULL);

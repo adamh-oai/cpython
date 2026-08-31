@@ -949,6 +949,23 @@ specialize_instance_load_attr(PyObject* owner, _Py_CODEUNIT* instr, PyObject* na
     PyObject *descr = NULL;
     unsigned int tp_version = 0;
     PyTypeObject *type = Py_TYPE(owner);
+    if (type->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
+        /* Generic checked lookup ignores instance shadows of protected
+         * methods/defaults. Never select an instance-value cache for one.
+         * Keep the stock absent-key proof for class-descriptor caches. */
+        if (!PyUnicode_CheckExact(name) || !_PySOAC_TypeReadCacheReady(type)) {
+            SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_OVERRIDDEN);
+            return -1;
+        }
+        if (shadow) {
+            int protected = _PySOAC_ProtectedName(type, name);
+            if (protected != 0) {
+                if (protected < 0) PyErr_Clear();
+                SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_OVERRIDDEN);
+                return -1;
+            }
+        }
+    }
     DescriptorClassification kind = analyze_descriptor_load(type, name, &descr, &tp_version);
     int result = do_specialize_instance_load_attr(owner, instr, name, shadow, shared_keys_version, kind, descr, tp_version);
     Py_XDECREF(descr);
@@ -964,7 +981,9 @@ _Py_Specialize_LoadAttr(_PyStackRef owner_st, _Py_CODEUNIT *instr, PyObject *nam
     assert(_PyOpcode_Caches[LOAD_ATTR] == INLINE_CACHE_ENTRIES_LOAD_ATTR);
     PyTypeObject *type = Py_TYPE(owner);
     bool fail;
-    if (type->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
+    if ((type->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) &&
+        (type->tp_getattro != PyObject_GenericGetAttr || PyType_Check(owner) ||
+         !_PySOAC_TypeReadCacheReady(type))) {
         SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_OVERRIDDEN);
         fail = true;
     }
@@ -1326,7 +1345,12 @@ specialize_load_global_lock_held(
         goto fail;
     }
     PyDictKeysObject * globals_keys = ((PyDictObject *)globals)->ma_keys;
-    if (globals_keys->dk_kind != DICT_KEYS_UNICODE) {
+    bool indexed_globals = false;
+#ifndef Py_GIL_DISABLED
+    indexed_globals = globals_keys->dk_kind == DICT_KEYS_INDEXED_UNICODE &&
+        ((PyDictObject *)globals)->ma_values != NULL;
+#endif
+    if (globals_keys->dk_kind != DICT_KEYS_UNICODE && !indexed_globals) {
         SPECIALIZATION_FAIL(LOAD_GLOBAL, SPEC_FAIL_LOAD_GLOBAL_NON_STRING_OR_SPLIT);
         goto fail;
     }
@@ -1361,7 +1385,8 @@ specialize_load_global_lock_held(
 #endif
         cache->index = (uint16_t)index;
         cache->module_keys_version = (uint16_t)keys_version;
-        specialize(instr, LOAD_GLOBAL_MODULE);
+        specialize(instr, indexed_globals ? LOAD_GLOBAL_MODULE_INDEXED
+                                          : LOAD_GLOBAL_MODULE);
         return;
     }
     if (!PyDict_CheckExact(builtins)) {
@@ -1405,7 +1430,8 @@ specialize_load_global_lock_held(
     cache->index = (uint16_t)index;
     cache->module_keys_version = (uint16_t)globals_version;
     cache->builtin_keys_version = (uint16_t)builtins_version;
-    specialize(instr, LOAD_GLOBAL_BUILTIN);
+    specialize(instr, indexed_globals ? LOAD_GLOBAL_BUILTIN_INDEXED
+                                      : LOAD_GLOBAL_BUILTIN);
     return;
 fail:
     unspecialize(instr);

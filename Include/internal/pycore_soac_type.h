@@ -31,6 +31,10 @@ extern int _PySOAC_PendingTypeCopiedHook(
 extern int _PySOAC_BeginPendingTypeAdapter(PyObject *, PyObject **);
 extern void _PySOAC_EndPendingTypeAdapter(PyObject *, int);
 extern int _PySOAC_ProtectedName(PyTypeObject *, PyObject *);
+/* A cache-routing predicate for an own, permanently sealed native contract.
+ * False defers to generic lookup; it never raises or grants field/call facts.
+ * The generated _testinternalcapi executor also consumes this guard. */
+PyAPI_FUNC(int) _PySOAC_TypeReadCacheReady(PyTypeObject *);
 extern int _PySOAC_CheckInstanceWrite(PyObject *, PyObject *, PyObject *);
 extern int _PySOAC_CheckClassWrite(PyTypeObject *, PyObject *, PyObject *);
 extern int _PySOAC_CheckTypeBases(PyTypeObject *, PyObject *);

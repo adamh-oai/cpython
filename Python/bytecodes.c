@@ -572,6 +572,7 @@ dummy_func(
             unused/1 +
             _RECORD_TOS_TYPE +
             _GUARD_TYPE_VERSION +
+            _GUARD_NO_SOAC_TYPE +
             _REPLACE_WITH_TRUE +
             POP_TOP;
 
@@ -1305,7 +1306,7 @@ dummy_func(
             // GH-99729: We need to unlink the frame *before* clearing it:
             _PyInterpreterFrame *dying = frame;
             _PySoacInterpreterRootFinishV1 soac_finish;
-            _PySOAC_InterpreterTakeDataclassRoot(dying, &soac_finish);
+            _PyFrame_TakeSoacDataclassRoot(dying, &soac_finish);
             frame = tstate->current_frame = dying->previous;
             _PyEval_FrameClearAndPop(tstate, dying);
             int soac_finished = 0;
@@ -1872,6 +1873,8 @@ dummy_func(
         family(LOAD_GLOBAL, INLINE_CACHE_ENTRIES_LOAD_GLOBAL) = {
             LOAD_GLOBAL_MODULE,
             LOAD_GLOBAL_BUILTIN,
+            LOAD_GLOBAL_MODULE_INDEXED,
+            LOAD_GLOBAL_BUILTIN_INDEXED,
         };
 
         specializing op(_SPECIALIZE_LOAD_GLOBAL, (counter/1 -- )) {
@@ -1913,7 +1916,12 @@ dummy_func(
             DEOPT_IF(!PyDict_CheckExact(dict));
             PyDictKeysObject *keys = FT_ATOMIC_LOAD_PTR_ACQUIRE(dict->ma_keys);
             DEOPT_IF(FT_ATOMIC_LOAD_UINT32_RELAXED(keys->dk_version) != version);
-            assert(keys->dk_kind == DICT_KEYS_UNICODE);
+            /* Both immutable empty-key sentinels use version 1. A shared
+             * code object's builtin cache remains valid across those empty
+             * globals: neither layout contains a binding to shadow it. */
+            assert(keys->dk_kind == DICT_KEYS_UNICODE ||
+                   (keys->dk_kind == DICT_KEYS_INDEXED_UNICODE &&
+                    keys->dk_nentries == 0));
         }
 
         op(_LOAD_GLOBAL_MODULE, (version/1, unused/1, index/1 -- res))
@@ -1955,6 +1963,47 @@ dummy_func(
             STAT_INC(LOAD_GLOBAL, hit);
         }
 
+        tier1 op(_GUARD_INDEXED_GLOBALS_VERSION, (version/1 --)) {
+            #ifdef Py_GIL_DISABLED
+            DEOPT_IF(true);
+            #else
+            PyDictObject *dict = (PyDictObject *)GLOBALS();
+            DEOPT_IF(!PyDict_CheckExact(dict));
+            PyDictKeysObject *keys = dict->ma_keys;
+            DEOPT_IF(keys->dk_kind != DICT_KEYS_INDEXED_UNICODE);
+            DEOPT_IF(keys->dk_version != version);
+            DEOPT_IF(dict->ma_values == NULL);
+            /* Only visible bindings occupy the lookup table. Insertion,
+             * deletion and clear invalidate this version, including the
+             * first assignment to an invisible reserved prefix name. */
+            #endif
+        }
+
+        tier1 op(_LOAD_GLOBAL_MODULE_INDEXED,
+                 (version/1, unused/1, index/1 -- res)) {
+            #ifdef Py_GIL_DISABLED
+            DEOPT_IF(true);
+            #else
+            PyDictObject *dict = (PyDictObject *)GLOBALS();
+            DEOPT_IF(!PyDict_CheckExact(dict));
+            PyDictKeysObject *keys = dict->ma_keys;
+            DEOPT_IF(keys->dk_kind != DICT_KEYS_INDEXED_UNICODE);
+            DEOPT_IF(keys->dk_version != version);
+            /* The version binds the visible key to this index. Reload the
+             * values allocation on every read: growth may move it and a
+             * mutable value replacement need not change the key version. */
+            PyDictIndexedValues *values = (PyDictIndexedValues *)dict->ma_values;
+            DEOPT_IF(values == NULL);
+            DEOPT_IF(index >= keys->dk_nentries || index >= values->capacity);
+            DEOPT_IF(DK_UNICODE_ENTRIES(keys)[index].me_key == NULL);
+            PyObject *res_o = values->values[index];
+            DEOPT_IF(res_o == NULL ||
+                     res_o == (PyObject *)&_PyDict_IndexedValueTombstone);
+            res = PyStackRef_FromPyObjectNew(res_o);
+            STAT_INC(LOAD_GLOBAL, hit);
+            #endif
+        }
+
         macro(LOAD_GLOBAL_MODULE) =
             unused/1 + // Skip over the counter
             NOP + // For guard insertion in the JIT optimizer
@@ -1964,6 +2013,19 @@ dummy_func(
         macro(LOAD_GLOBAL_BUILTIN) =
             unused/1 + // Skip over the counter
             _GUARD_GLOBALS_VERSION +
+            _LOAD_GLOBAL_BUILTINS +
+            _PUSH_NULL_CONDITIONAL;
+
+        // Keep indexed storage out of the combined-table Tier 2 constant
+        // folding rules. The ordinary Unicode specializations stay unchanged.
+        macro(LOAD_GLOBAL_MODULE_INDEXED) =
+            unused/1 + // Skip over the counter
+            _LOAD_GLOBAL_MODULE_INDEXED +
+            _PUSH_NULL_CONDITIONAL;
+
+        macro(LOAD_GLOBAL_BUILTIN_INDEXED) =
+            unused/1 + // Skip over the counter
+            _GUARD_INDEXED_GLOBALS_VERSION +
             _LOAD_GLOBAL_BUILTINS +
             _PUSH_NULL_CONDITIONAL;
 
@@ -2430,10 +2492,22 @@ dummy_func(
             unused/8 +
             _LOAD_ATTR;
 
+        op(_GUARD_NO_SOAC_TYPE, (owner -- owner)) {
+            PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
+            EXIT_IF(tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT);
+        }
+
+        op(_GUARD_SOAC_TYPE_READ, (owner -- owner)) {
+            /* Metadata retirement does not necessarily change tp_version.
+             * Keep this actual-state check outside the foldable version op. */
+            PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
+            EXIT_IF((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) &&
+                    !_PySOAC_TypeReadCacheReady(tp));
+        }
+
         op(_GUARD_TYPE_VERSION, (type_version/2, owner -- owner)) {
             PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
             assert(type_version != 0);
-            EXIT_IF(tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT);
             EXIT_IF(FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version);
         }
 
@@ -2478,6 +2552,7 @@ dummy_func(
             unused/1 + // Skip over the counter
             _RECORD_TOS_TYPE +
             _GUARD_TYPE_VERSION +
+            _GUARD_SOAC_TYPE_READ +
             _CHECK_MANAGED_OBJECT_HAS_VALUES +
             _LOAD_ATTR_INSTANCE_VALUE +
             POP_TOP +
@@ -2560,6 +2635,7 @@ dummy_func(
             unused/1 +
             _RECORD_TOS_TYPE +
             _GUARD_TYPE_VERSION +
+            _GUARD_SOAC_TYPE_READ +
             _LOAD_ATTR_WITH_HINT +
             POP_TOP +
             unused/5 +
@@ -2589,6 +2665,7 @@ dummy_func(
             unused/1 +
             _RECORD_TOS_TYPE +
             _GUARD_TYPE_VERSION +
+            _GUARD_NO_SOAC_TYPE +
             _LOAD_ATTR_SLOT +  // NOTE: This action may also deopt
             POP_TOP +
             unused/5 +
@@ -2620,6 +2697,7 @@ dummy_func(
             unused/1 +
             _RECORD_TOS_TYPE +
             _GUARD_TYPE_VERSION +
+            _GUARD_NO_SOAC_TYPE +
             _CHECK_ATTR_CLASS +
             _LOAD_ATTR_CLASS +
             _PUSH_NULL_CONDITIONAL;
@@ -2645,6 +2723,7 @@ dummy_func(
             unused/1 +
             _RECORD_TOS_TYPE +
             _GUARD_TYPE_VERSION +
+            _GUARD_SOAC_TYPE_READ +
             _CHECK_PEP_523 +
             unused/2 +
             _LOAD_ATTR_PROPERTY_FRAME +
@@ -2769,8 +2848,9 @@ dummy_func(
         macro(STORE_ATTR_WITH_HINT) =
             unused/1 +
             _RECORD_TOS_TYPE +
-            _GUARD_NO_ORDINARY_INSTANCE_WRITES +
             _GUARD_TYPE_VERSION +
+            _GUARD_NO_ORDINARY_INSTANCE_WRITES +
+            _GUARD_NO_SOAC_TYPE +
             _STORE_ATTR_WITH_HINT +
             POP_TOP;
 
@@ -2795,6 +2875,7 @@ dummy_func(
             unused/1 +
             _RECORD_TOS_TYPE +
             _GUARD_TYPE_VERSION +
+            _GUARD_NO_SOAC_TYPE +
             _STORE_ATTR_SLOT +
             POP_TOP;
 
@@ -3706,6 +3787,7 @@ dummy_func(
             unused/1 +
             _RECORD_TOS_TYPE +
             _GUARD_TYPE_VERSION +
+            _GUARD_SOAC_TYPE_READ +
             _GUARD_DORV_VALUES_INST_ATTR_FROM_DICT +
             _GUARD_KEYS_VERSION +
             _LOAD_ATTR_METHOD_WITH_VALUES;
@@ -3725,6 +3807,7 @@ dummy_func(
             unused/1 +
             _RECORD_TOS_TYPE +
             _GUARD_TYPE_VERSION +
+            _GUARD_SOAC_TYPE_READ +
             unused/2 +
             _LOAD_ATTR_METHOD_NO_DICT;
 
@@ -3740,6 +3823,7 @@ dummy_func(
             unused/1 +
             _RECORD_TOS_TYPE +
             _GUARD_TYPE_VERSION +
+            _GUARD_SOAC_TYPE_READ +
             _GUARD_DORV_VALUES_INST_ATTR_FROM_DICT +
             _GUARD_KEYS_VERSION +
             _LOAD_ATTR_NONDESCRIPTOR_WITH_VALUES;
@@ -3757,6 +3841,7 @@ dummy_func(
             unused/1 +
             _RECORD_TOS_TYPE +
             _GUARD_TYPE_VERSION +
+            _GUARD_SOAC_TYPE_READ +
             unused/2 +
             _LOAD_ATTR_NONDESCRIPTOR_NO_DICT;
 
@@ -3781,6 +3866,7 @@ dummy_func(
             unused/1 +
             _RECORD_TOS_TYPE +
             _GUARD_TYPE_VERSION +
+            _GUARD_SOAC_TYPE_READ +
             _CHECK_ATTR_METHOD_LAZY_DICT +
             unused/1 +
             _LOAD_ATTR_METHOD_LAZY_DICT;
@@ -3813,7 +3899,7 @@ dummy_func(
         specializing op(_SPECIALIZE_CALL, (counter/1, callable, self_or_null, unused[oparg] -- callable, self_or_null, unused[oparg])) {
             #if ENABLE_SPECIALIZATION
             if (ADAPTIVE_COUNTER_TRIGGERS(counter) &&
-                !_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                !_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                 next_instr = this_instr;
                 _Py_Specialize_Call(callable, self_or_null, next_instr, oparg + !PyStackRef_IsNull(self_or_null));
                 DISPATCH_SAME_OPARG();
@@ -3827,7 +3913,7 @@ dummy_func(
             /* Only preselected construction sites require source CALL dispatch.
              * Ordinary sites retain native CALL specialization even while a
              * surrounding declaration has an active metadata context. */
-            DEOPT_IF(_PySOAC_InterpreterCallRelevant(frame, this_instr));
+            DEOPT_IF(_PyFrame_HasSoacRelevantCall(frame, this_instr));
         }
 
         op(_MAYBE_EXPAND_METHOD, (callable, self_or_null, unused[oparg] -- callable, self_or_null, unused[oparg])) {
@@ -3855,7 +3941,7 @@ dummy_func(
             }
             _PySoacInterpreterCallV1 soac_call_storage;
             _PySoacInterpreterCallV1 *soac_call = NULL;
-            if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+            if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                 soac_call = &soac_call_storage;
                 SAVE_STACK();
                 int soac_selected = _PySOAC_InterpreterSelectCall(
@@ -4802,7 +4888,7 @@ dummy_func(
             int positional_args = total_args - (int)PyTuple_GET_SIZE(kwnames_o);
             _PySoacInterpreterCallV1 soac_call_storage;
             _PySoacInterpreterCallV1 *soac_call = NULL;
-            if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+            if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                 soac_call = &soac_call_storage;
                 SAVE_STACK();
                 int soac_selected = _PySOAC_InterpreterSelectCall(
@@ -4961,7 +5047,7 @@ dummy_func(
         specializing op(_SPECIALIZE_CALL_KW, (counter/1, callable, self_or_null, unused[oparg], unused -- callable, self_or_null, unused[oparg], unused)) {
             #if ENABLE_SPECIALIZATION
             if (ADAPTIVE_COUNTER_TRIGGERS(counter) &&
-                !_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                !_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                 next_instr = this_instr;
                 _Py_Specialize_CallKw(callable, next_instr, oparg + !PyStackRef_IsNull(self_or_null));
                 DISPATCH_SAME_OPARG();
@@ -5054,7 +5140,7 @@ dummy_func(
             _PySoacInterpreterCallV1 soac_call_storage;
             _PySoacInterpreterCallV1 *soac_call = NULL;
             if (opcode != INSTRUMENTED_CALL_FUNCTION_EX) {
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     soac_call = &soac_call_storage;
                     SAVE_STACK();
                     int soac_selected = _PySOAC_InterpreterSelectCall(
@@ -5083,7 +5169,7 @@ dummy_func(
                     if (err) {
                         ERROR_NO_POP();
                     }
-                    if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                    if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                         soac_call = &soac_call_storage;
                         SAVE_STACK();
                         int soac_selected = _PySOAC_InterpreterSelectCall(
@@ -5178,7 +5264,7 @@ dummy_func(
         specializing op(_SPECIALIZE_CALL_FUNCTION_EX, (counter/1, func, unused, unused, unused -- func, unused, unused, unused)) {
         #if ENABLE_SPECIALIZATION
             if (ADAPTIVE_COUNTER_TRIGGERS(counter) &&
-                !_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                !_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                 next_instr = this_instr;
                 _Py_Specialize_CallFunctionEx(func, next_instr);
                 DISPATCH_SAME_OPARG();
@@ -6137,7 +6223,7 @@ dummy_func(
             // GH-99729: We need to unlink the frame *before* clearing it:
             _PyInterpreterFrame *dying = frame;
             _PySoacInterpreterRootFinishV1 soac_finish;
-            _PySOAC_InterpreterTakeDataclassRoot(dying, &soac_finish);
+            _PyFrame_TakeSoacDataclassRoot(dying, &soac_finish);
             frame = tstate->current_frame = dying->previous;
             _PyEval_FrameClearAndPop(tstate, dying);
             _PySOAC_InterpreterFinishDataclassRoot(&soac_finish, NULL);

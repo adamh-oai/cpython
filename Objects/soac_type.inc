@@ -1839,6 +1839,18 @@ PyType_IsSoacSealed(PyObject *object)
 }
 
 int
+_PySOAC_TypeReadCacheReady(PyTypeObject *type)
+{
+    SoacTypeContract *state = soac_type_contract(type);
+    /* Generic lookup retains its own descriptor ordering on a miss. In
+     * particular, pending introspection and a data descriptor on a terminal
+     * type must not acquire a new eager refusal from this cache guard. */
+    return state != NULL && state->phase == Py_SOAC_TYPE_STATE_ENFORCED &&
+        state->sealed && !state->terminal && state->owner != NULL &&
+        state->type == type && state->interpreter == _PyInterpreterState_GET();
+}
+
+int
 PyType_SealSoacContract(PyObject *object, PyObject *owner)
 {
     SoacTypeContract *state = PyType_Check(object) ? soac_type_contract((PyTypeObject *)object) : NULL;

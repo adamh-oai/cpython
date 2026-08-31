@@ -117,7 +117,7 @@ _PyFrame_ClearExceptCode(_PyInterpreterFrame *frame)
     assert(_PyThreadState_GET()->current_frame != frame);
     frame->soac_dataclass_role = 0;
     Py_CLEAR(frame->soac_dataclass_invocation);
-    _PySOAC_CheckedFrameClear(frame, Py_SOAC_INTERPRETER_FRAME_CLEARED);
+    _PyFrame_ClearSoacExecution(frame, Py_SOAC_INTERPRETER_FRAME_CLEARED);
     if (frame->frame_obj) {
         PyFrameObject *f = frame->frame_obj;
         frame->frame_obj = NULL;

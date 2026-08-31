@@ -639,7 +639,9 @@ soac_interpreter_authorize(_PyInterpreterFrame *frame)
         return soac_interpreter_error("namespace source code requires its explicit native construction entry");
     if (!original && ((code->co_flags & CO_FUTURE_STRICT) || code->_co_soac_strict_source_id != 0))
         return soac_interpreter_error("interpreter function captured unrelated strict code");
-    if (!_PySOAC_InterpreterFunctionFastReady(function)) {
+    /* Owner, interpreter, execution liveness and source checks above have
+     * no intervening callbacks. Only these FastReady terms remain unknown. */
+    if (!guard->ready || guard->execution == NULL) {
         const PySoacInterpreterCallbacksV4 *callbacks = soac_interpreter_callbacks();
         PySoacInterpreterFrameViewV1 view;
         if (callbacks == NULL || _PySOAC_InterpreterView(frame, NULL,
@@ -653,7 +655,10 @@ soac_interpreter_authorize(_PyInterpreterFrame *frame)
             function->func_soac_strict_owner_state != FUNC_SOAC_OWNER_INTERPRETER_ATTACHED)
             return soac_interpreter_error("interpreter owner changed during entry");
     }
-    if (PyFunction_CheckSoacStrictDefaults((PyObject *)function) < 0) return -1;
+    /* Read after the cold callback: it can finish or seal the metadata.
+     * A real keyword-default policy still needs its independent live check. */
+    if (function->func_soac_strict_id != 0 && function->func_kwdefaults != NULL &&
+        PyFunction_CheckSoacStrictDefaults((PyObject *)function) < 0) return -1;
     frame->soac_source_authority = original;
     return 0;
 }

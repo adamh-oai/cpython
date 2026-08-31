@@ -428,9 +428,18 @@ class TestOrdinaryInstancePolicyGuard(unittest.TestCase):
                         parts.index("_GUARD_TYPE_VERSION_AND_LOCK"),
                     )
                 if instruction == "STORE_ATTR_WITH_HINT":
-                    self.assertEqual(parts[0], "_RECORD_TOS_TYPE")
+                    record = parts.index("_RECORD_TOS_TYPE")
+                    version = parts.index("_GUARD_TYPE_VERSION")
+                    self.assertEqual(record, 0)
+                    self.assertEqual(version, record + 1)
                     self.assertLess(
-                        parts.index(guard.name), parts.index("_GUARD_TYPE_VERSION"),
+                        version, parts.index(guard.name),
+                    )
+                    self.assertLess(
+                        parts.index(guard.name), parts.index("_GUARD_NO_SOAC_TYPE"),
+                    )
+                    self.assertLess(
+                        parts.index("_GUARD_NO_SOAC_TYPE"), parts.index(writer),
                     )
 
     def test_policy_query_is_pure_but_selected_validator_can_escape(self):
@@ -459,6 +468,105 @@ class TestOrdinaryInstancePolicyGuard(unittest.TestCase):
                         PyStackRef_AsPyObjectBorrow(owner), name, value));
                 }
             """))
+
+
+class TestSoacTypeReadPolicyGuard(unittest.TestCase):
+    """Native policy remains checked when the optimizer proves a type version."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.analysis = analyzer.analyze_files([
+            os.path.join(test_tools.basepath, "Python", "bytecodes.c")
+        ])
+        cls.abstract = analyzer.analyze_files([
+            os.path.join(test_tools.basepath, "Python", "optimizer_bytecodes.c")
+        ])
+
+    def test_actual_type_version_macros_keep_their_policy_guard(self):
+        read_guard = "_GUARD_SOAC_TYPE_READ"
+        deny_guard = "_GUARD_NO_SOAC_TYPE"
+        expected = {
+            "LOAD_ATTR_INSTANCE_VALUE": (read_guard, "_LOAD_ATTR_INSTANCE_VALUE"),
+            "LOAD_ATTR_WITH_HINT": (read_guard, "_LOAD_ATTR_WITH_HINT"),
+            "LOAD_ATTR_PROPERTY": (read_guard, "_LOAD_ATTR_PROPERTY_FRAME"),
+            "LOAD_ATTR_METHOD_WITH_VALUES": (read_guard, "_LOAD_ATTR_METHOD_WITH_VALUES"),
+            "LOAD_ATTR_METHOD_NO_DICT": (read_guard, "_LOAD_ATTR_METHOD_NO_DICT"),
+            "LOAD_ATTR_NONDESCRIPTOR_WITH_VALUES": (
+                read_guard, "_LOAD_ATTR_NONDESCRIPTOR_WITH_VALUES",
+            ),
+            "LOAD_ATTR_NONDESCRIPTOR_NO_DICT": (
+                read_guard, "_LOAD_ATTR_NONDESCRIPTOR_NO_DICT",
+            ),
+            "LOAD_ATTR_METHOD_LAZY_DICT": (read_guard, "_LOAD_ATTR_METHOD_LAZY_DICT"),
+            "TO_BOOL_ALWAYS_TRUE": (deny_guard, "_REPLACE_WITH_TRUE"),
+            "LOAD_ATTR_SLOT": (deny_guard, "_LOAD_ATTR_SLOT"),
+            "LOAD_ATTR_CLASS_WITH_METACLASS_CHECK": (deny_guard, "_CHECK_ATTR_CLASS"),
+            "STORE_ATTR_WITH_HINT": (deny_guard, "_STORE_ATTR_WITH_HINT"),
+            "STORE_ATTR_SLOT": (deny_guard, "_STORE_ATTR_SLOT"),
+        }
+        actual = set()
+        for instruction in self.analysis.instructions.values():
+            parts = [
+                part.replicates or part
+                for part in instruction.parts if isinstance(part, analyzer.Uop)
+            ]
+            names = [part.name for part in parts]
+            if not {read_guard, deny_guard, "_GUARD_TYPE_VERSION"}.intersection(names):
+                continue
+            with self.subTest(instruction=instruction.name):
+                self.assertIn(instruction.name, expected, "new cache needs a policy audit")
+                guard, consumer = expected[instruction.name]
+                other_guard = deny_guard if guard == read_guard else read_guard
+                self.assertEqual(names.count(guard), 1)
+                self.assertNotIn(other_guard, names)
+                self.assertEqual(names.count("_RECORD_TOS_TYPE"), 1)
+                self.assertEqual(names.count("_GUARD_TYPE_VERSION"), 1)
+                self.assertEqual(names.count(consumer), 1)
+                record = names.index("_RECORD_TOS_TYPE")
+                version = names.index("_GUARD_TYPE_VERSION")
+                # Recording must be the first macro uop, and the abstract
+                # type-version model reads its immediately preceding record.
+                self.assertEqual(record, 0)
+                self.assertEqual(version, record + 1)
+                self.assertLess(version, names.index(guard))
+                self.assertLess(names.index(guard), names.index(consumer))
+                # The foldable type fact precedes policy, but nothing may
+                # call Python or consume the owner before the actual check.
+                for part in parts[:names.index(consumer)]:
+                    self.assertFalse(part.properties.escapes, part.name)
+                actual.add(instruction.name)
+        self.assertEqual(actual, set(expected), "exercise every existing type-version barrier")
+
+    def test_native_policy_guards_preserve_owner_and_only_side_exit(self):
+        for name in ("_GUARD_SOAC_TYPE_READ", "_GUARD_NO_SOAC_TYPE"):
+            with self.subTest(guard=name):
+                guard = self.analysis.uops[name]
+                self.assertTrue(guard.properties.side_exit)
+                self.assertFalse(guard.properties.escapes)
+                self.assertFalse(guard.properties.error_with_pop)
+                self.assertFalse(guard.properties.error_without_pop)
+                self.assertFalse(guard.properties.pure)
+                self.assertEqual(guard.caches, [])
+                self.assertEqual([item.name for item in guard.stack.inputs], ["owner"])
+                self.assertEqual([item.name for item in guard.stack.outputs], ["owner"])
+                self.assertTrue(guard.stack.inputs[0].peek)
+                self.assertTrue(guard.stack.outputs[0].peek)
+
+    def test_optimizer_retains_native_policy_guards_without_replacing_owner(self):
+        for name in ("_GUARD_SOAC_TYPE_READ", "_GUARD_NO_SOAC_TYPE"):
+            with self.subTest(guard=name):
+                self.assertIn(name, self.abstract.uops)
+                model = self.abstract.uops[name]
+                optimizer_generator.validate_uop(model, self.analysis.uops[name])
+                self.assertFalse(model.properties.pure)
+                self.assertTrue(model.stack.inputs[0].peek)
+                self.assertTrue(model.stack.outputs[0].peek)
+                # An empty abstract operation retains the input instruction:
+                # optimize_uops copies it when the model emits no replacement.
+                # A known type must neither replace this guard with a NOP nor
+                # discard the owner's symbolic facts through a default model.
+                self.assertEqual(model.body.body, [])
 
 
 class TestGeneratedCases(unittest.TestCase):

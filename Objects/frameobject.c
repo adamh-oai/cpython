@@ -1952,7 +1952,7 @@ frame_dealloc(PyObject *op)
     if (f->f_frame == frame && frame->owner == FRAME_OWNED_BY_FRAME_OBJECT) {
         frame->soac_dataclass_role = 0;
         Py_CLEAR(frame->soac_dataclass_invocation);
-        _PySOAC_CheckedFrameClear(frame, Py_SOAC_INTERPRETER_FRAME_CLEARED);
+        _PyFrame_ClearSoacExecution(frame, Py_SOAC_INTERPRETER_FRAME_CLEARED);
         _PyFrame_ClearExecutable(frame);
         PyStackRef_CLEAR(frame->f_funcobj);
         Py_CLEAR(frame->f_locals);
@@ -1996,7 +1996,7 @@ frame_tp_clear(PyObject *op)
     PyFrameObject *f = PyFrameObject_CAST(op);
     f->f_frame->soac_dataclass_role = 0;
     Py_CLEAR(f->f_frame->soac_dataclass_invocation);
-    _PySOAC_CheckedFrameClear(f->f_frame, Py_SOAC_INTERPRETER_FRAME_CLEARED);
+    _PyFrame_ClearSoacExecution(f->f_frame, Py_SOAC_INTERPRETER_FRAME_CLEARED);
     Py_CLEAR(f->f_trace);
     Py_CLEAR(f->f_extra_locals);
     Py_CLEAR(f->f_locals_cache);

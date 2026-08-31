@@ -6,7 +6,10 @@
 #endif
 
 #include "pycore_code.h"          // _PyCode_CODE()
+#include "pycore_function.h"      // FUNC_SOAC_OWNER_NONE
 #include "pycore_interpframe_structs.h" // _PyInterpreterFrame
+#include "pycore_pyerrors.h"      // _PyErr_Occurred()
+#include "pycore_pystate.h"       // _PyThreadState_GET()
 #include "pycore_stackref.h"      // PyStackRef_AsPyObjectBorrow()
 #include "pycore_stats.h"         // CALL_STAT_INC()
 #include "pycore_soac_dataclass.h"
@@ -67,7 +70,58 @@ static inline PyCodeObject *_PyFrame_GetCode(_PyInterpreterFrame *f) {
 static inline int
 _PyFrame_CheckSoacExecution(_PyInterpreterFrame *frame)
 {
+    /* This is the full checker's no-work case, not cached authorization.
+     * Generated dataclass members can have an owner even with owner-state
+     * NONE, and an ordinary helper can inherit an active dataclass call. */
+    if (frame->soac_checked_activation == NULL &&
+        !frame->soac_source_authority &&
+        frame->soac_dataclass_invocation == NULL &&
+        (frame->previous == NULL ||
+         frame->previous->soac_dataclass_invocation == NULL) &&
+        !PyStackRef_IsNull(frame->f_funcobj)) {
+        PyObject *object = PyStackRef_AsPyObjectBorrow(frame->f_funcobj);
+        if (PyFunction_Check(object)) {
+            PyFunctionObject *function = (PyFunctionObject *)object;
+            if (function->func_soac_strict_owner_state == FUNC_SOAC_OWNER_NONE &&
+                function->func_soac_strict_owner == NULL &&
+                !(_PyFrame_GetCode(frame)->co_flags & CO_FUTURE_STRICT)) {
+                return 0;
+            }
+        }
+    }
     return _PySOAC_CheckedFrameExecution(frame);
+}
+
+/* Source/site facts only route construction work. Actual source, function,
+ * and storage authority is still checked by the existing native operations. */
+static inline int
+_PyFrame_HasSoacRelevantCall(_PyInterpreterFrame *frame,
+                             const _Py_CODEUNIT *instruction)
+{
+    return frame->soac_source_authority &&
+        _PySOAC_InterpreterCallRelevant(frame, instruction);
+}
+
+static inline void
+_PyFrame_TakeSoacDataclassRoot(_PyInterpreterFrame *frame,
+                              _PySoacInterpreterRootFinishV1 *finish)
+{
+    if (frame->soac_dataclass_invocation == NULL) {
+        memset(finish, 0, sizeof(*finish));
+        return;
+    }
+    _PySOAC_InterpreterTakeDataclassRoot(frame, finish);
+}
+
+static inline void
+_PyFrame_ClearSoacExecution(_PyInterpreterFrame *frame, uint32_t reason)
+{
+    /* Keep the original exception-preserving sequence on error, and every
+     * non-null metadata edge's retirement/decref, including unknown owners. */
+    if (frame->soac_checked_activation != NULL ||
+        _PyErr_Occurred(_PyThreadState_GET()) != NULL) {
+        _PySOAC_CheckedFrameClear(frame, reason);
+    }
 }
 
 // Similar to _PyFrame_GetCode(), but return NULL if the frame is invalid or
