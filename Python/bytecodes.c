@@ -1965,8 +1965,8 @@ dummy_func(
 
         tier1 op(_GUARD_INDEXED_GLOBALS_VERSION, (version/1 --)) {
             #ifdef Py_GIL_DISABLED
-            DEOPT_IF(true);
-            #else
+            DEOPT_IF(Py_GIL_DISABLED);
+            #endif
             PyDictObject *dict = (PyDictObject *)GLOBALS();
             DEOPT_IF(!PyDict_CheckExact(dict));
             PyDictKeysObject *keys = dict->ma_keys;
@@ -1976,14 +1976,15 @@ dummy_func(
             /* Only visible bindings occupy the lookup table. Insertion,
              * deletion and clear invalidate this version, including the
              * first assignment to an invisible reserved prefix name. */
-            #endif
         }
 
         tier1 op(_LOAD_GLOBAL_MODULE_INDEXED,
                  (version/1, unused/1, index/1 -- res)) {
             #ifdef Py_GIL_DISABLED
-            DEOPT_IF(true);
-            #else
+            /* A symbolic condition keeps the DSL's result stack live in the
+             * GIL build; the C compiler still folds this branch to deopt. */
+            DEOPT_IF(Py_GIL_DISABLED);
+            #endif
             PyDictObject *dict = (PyDictObject *)GLOBALS();
             DEOPT_IF(!PyDict_CheckExact(dict));
             PyDictKeysObject *keys = dict->ma_keys;
@@ -2001,7 +2002,6 @@ dummy_func(
                      res_o == (PyObject *)&_PyDict_IndexedValueTombstone);
             res = PyStackRef_FromPyObjectNew(res_o);
             STAT_INC(LOAD_GLOBAL, hit);
-            #endif
         }
 
         macro(LOAD_GLOBAL_MODULE) =
