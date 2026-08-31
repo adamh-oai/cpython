@@ -741,8 +741,7 @@
                     assert(_PyOpcode_Deopt[opcode] == (BINARY_OP));
                     JUMP_TO_PREDICTED(BINARY_OP);
                 }
-                if (((PyFunctionObject *)getitem_o)->func_soac_strict_owner_state ==
-                    FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
+                if (!_PySOAC_InterpreterFunctionFastReady((PyFunctionObject *)getitem_o)) {
                     UPDATE_MISS_STATS(BINARY_OP);
                     assert(_PyOpcode_Deopt[opcode] == (BINARY_OP));
                     JUMP_TO_PREDICTED(BINARY_OP);
@@ -1755,7 +1754,7 @@
                 (void)counter;
                 #if ENABLE_SPECIALIZATION
                 if (ADAPTIVE_COUNTER_TRIGGERS(counter) &&
-                    frame->soac_checked_activation == NULL) {
+                    !_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     next_instr = this_instr;
                     _PyFrame_SetStackPointer(frame, stack_pointer);
                     _Py_Specialize_Call(callable, self_or_null, next_instr, oparg + !PyStackRef_IsNull(self_or_null));
@@ -1793,16 +1792,20 @@
                     arguments--;
                     total_args++;
                 }
-                _PySoacInterpreterCallV1 soac_call;
-                stack_pointer[-2 - oparg] = callable;
-                stack_pointer[-1 - oparg] = self_or_null;
-                _PyFrame_SetStackPointer(frame, stack_pointer);
-                int soac_selected = _PySOAC_InterpreterSelectCall(
-                    frame, this_instr, Py_SOAC_INTERPRETER_CALL_VECTOR,
-                    oparg, &soac_call);
-                stack_pointer = _PyFrame_GetStackPointer(frame);
-                if (soac_selected < 0) {
-                    JUMP_TO_LABEL(error);
+                _PySoacInterpreterCallV1 soac_call_storage;
+                _PySoacInterpreterCallV1 *soac_call = NULL;
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                    soac_call = &soac_call_storage;
+                    stack_pointer[-2 - oparg] = callable;
+                    stack_pointer[-1 - oparg] = self_or_null;
+                    _PyFrame_SetStackPointer(frame, stack_pointer);
+                    int soac_selected = _PySOAC_InterpreterSelectCall(
+                        frame, this_instr, Py_SOAC_INTERPRETER_CALL_VECTOR,
+                        oparg, soac_call);
+                    stack_pointer = _PyFrame_GetStackPointer(frame);
+                    if (soac_selected < 0) {
+                        JUMP_TO_LABEL(error);
+                    }
                 }
                 {
                     _PyFrameEvalFunction eval_frame_before_binding;
@@ -1812,33 +1815,40 @@
                     {
                         int code_flags = ((PyCodeObject*)PyFunction_GET_CODE(callable_o))->co_flags;
                         PyObject *locals = code_flags & CO_OPTIMIZED ? NULL : Py_NewRef(PyFunction_GET_GLOBALS(callable_o));
+                        stack_pointer[-2 - oparg] = callable;
+                        stack_pointer[-1 - oparg] = self_or_null;
                         _PyFrame_SetStackPointer(frame, stack_pointer);
-                        _PyInterpreterFrame *new_frame = _PySOAC_InterpreterPushCall(
-                            &soac_call, tstate, callable, locals,
-                            arguments, total_args, NULL, frame
-                        );
+                        _PyInterpreterFrame *new_frame = soac_call != NULL
+                        ? _PySOAC_InterpreterPushCall(soac_call, tstate, callable, locals,
+                            arguments, total_args, NULL, frame)
+                    : _PyEvalFramePushAndInit(tstate, callable, locals,
+                            arguments, total_args, NULL, frame);
                         stack_pointer = _PyFrame_GetStackPointer(frame);
                         stack_pointer += -2 - oparg;
                         ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
                         if (new_frame == NULL) {
                             _PyFrame_SetStackPointer(frame, stack_pointer);
-                            _PySOAC_InterpreterCallFailed(&soac_call);
+                            _PySOAC_InterpreterCallFailed(soac_call);
                             stack_pointer = _PyFrame_GetStackPointer(frame);
                             JUMP_TO_LABEL(error);
                         }
-                        _PyFrame_SetStackPointer(frame, stack_pointer);
-                        int soac_committed = _PySOAC_InterpreterCallCommit(&soac_call, new_frame);
-                        stack_pointer = _PyFrame_GetStackPointer(frame);
-                        if (soac_committed < 0) {
+                        if (soac_call != NULL) {
                             _PyFrame_SetStackPointer(frame, stack_pointer);
-                            _PyEval_FrameClearAndPop(tstate, new_frame);
-                            _PySOAC_InterpreterCallFailed(&soac_call);
+                            int soac_committed = _PySOAC_InterpreterCallCommit(soac_call, new_frame);
                             stack_pointer = _PyFrame_GetStackPointer(frame);
-                            JUMP_TO_LABEL(error);
+                            if (soac_committed < 0) {
+                                _PyFrame_SetStackPointer(frame, stack_pointer);
+                                _PyEval_FrameClearAndPop(tstate, new_frame);
+                                _PySOAC_InterpreterCallFailed(soac_call);
+                                stack_pointer = _PyFrame_GetStackPointer(frame);
+                                JUMP_TO_LABEL(error);
+                            }
                         }
                         frame->return_offset = 4u ;
                         DISPATCH_INLINED(new_frame, eval_frame_before_binding);
                     }
+                    stack_pointer[-2 - oparg] = callable;
+                    stack_pointer[-1 - oparg] = self_or_null;
                     _PyFrame_SetStackPointer(frame, stack_pointer);
                     PyObject* res_o = _Py_VectorCallInstrumentation_StackRefSteal(
                         callable,
@@ -1848,13 +1858,15 @@
                         opcode == INSTRUMENTED_CALL,
                         frame,
                         this_instr,
-                        tstate, &soac_call);
+                        tstate, soac_call);
                     stack_pointer = _PyFrame_GetStackPointer(frame);
                     stack_pointer += -2 - oparg;
                     ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
-                    _PyFrame_SetStackPointer(frame, stack_pointer);
-                    _PySOAC_InterpreterCallFinished(&soac_call, &res_o);
-                    stack_pointer = _PyFrame_GetStackPointer(frame);
+                    if (soac_call != NULL) {
+                        _PyFrame_SetStackPointer(frame, stack_pointer);
+                        _PySOAC_InterpreterCallFinished(soac_call, &res_o);
+                        stack_pointer = _PyFrame_GetStackPointer(frame);
+                    }
                     if (res_o == NULL) {
                         JUMP_TO_LABEL(error);
                     }
@@ -1894,9 +1906,9 @@
             _PyStackRef *args;
             _PyStackRef init_frame;
             _PyStackRef new_frame;
-            // _CHECK_NO_SOAC_GENERATED_ACTIVATION
+            // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (frame->soac_checked_activation != NULL) {
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -1943,7 +1955,7 @@
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
                 }
-                if (init_func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
+                if (!_PySOAC_InterpreterFunctionFastReady(init_func)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -2036,9 +2048,9 @@
             _PyStackRef self_or_null;
             _PyStackRef *args;
             _PyStackRef new_frame;
-            // _CHECK_NO_SOAC_GENERATED_ACTIVATION
+            // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (frame->soac_checked_activation != NULL) {
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -2099,7 +2111,7 @@
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
                 }
-                if (func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
+                if (!_PySOAC_InterpreterFunctionFastReady(func)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -2197,9 +2209,9 @@
             _PyStackRef self_or_null;
             _PyStackRef *args;
             _PyStackRef new_frame;
-            // _CHECK_NO_SOAC_GENERATED_ACTIVATION
+            // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (frame->soac_checked_activation != NULL) {
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -2236,8 +2248,7 @@
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
                 }
-                if (((PyFunctionObject *)func)->func_soac_strict_owner_state ==
-                    FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
+                if (!_PySOAC_InterpreterFunctionFastReady((PyFunctionObject *)func)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -2343,9 +2354,9 @@
             _PyStackRef self_or_null;
             _PyStackRef *args;
             _PyStackRef res;
-            // _CHECK_NO_SOAC_GENERATED_ACTIVATION
+            // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (frame->soac_checked_activation != NULL) {
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -2420,9 +2431,9 @@
             _PyStackRef self_or_null;
             _PyStackRef *args;
             _PyStackRef res;
-            // _CHECK_NO_SOAC_GENERATED_ACTIVATION
+            // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (frame->soac_checked_activation != NULL) {
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -2502,9 +2513,9 @@
             _PyStackRef self_or_null;
             _PyStackRef *args;
             _PyStackRef res;
-            // _CHECK_NO_SOAC_GENERATED_ACTIVATION
+            // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (frame->soac_checked_activation != NULL) {
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -2583,9 +2594,9 @@
             _PyStackRef c;
             _PyStackRef s;
             _PyStackRef value;
-            // _CHECK_NO_SOAC_GENERATED_ACTIVATION
+            // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (frame->soac_checked_activation != NULL) {
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -2689,9 +2700,9 @@
             _PyStackRef callargs_st;
             _PyStackRef kwargs_st;
             _PyStackRef result;
-            // _CHECK_NO_SOAC_GENERATED_ACTIVATION
+            // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (frame->soac_checked_activation != NULL) {
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL_FUNCTION_EX);
                     assert(_PyOpcode_Deopt[opcode] == (CALL_FUNCTION_EX));
                     JUMP_TO_PREDICTED(CALL_FUNCTION_EX);
@@ -2748,8 +2759,8 @@
                 assert(kwargs == NULL || PyDict_CheckExact(kwargs));
                 stack_pointer[-2] = callargs_st;
                 _PyFrame_SetStackPointer(frame, stack_pointer);
-                PyObject *result_o = _PySOAC_InterpreterObjectCallFromFrame(
-                    frame, frame->instr_ptr, func, callargs, kwargs, NULL);
+                PyObject *result_o = _PySOAC_DataclassObjectCallFromFrame(
+                    frame, func, callargs, kwargs);
                 stack_pointer = _PyFrame_GetStackPointer(frame);
                 stack_pointer += -1;
                 ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
@@ -2804,9 +2815,9 @@
             _PyStackRef kwargs_st;
             _PyStackRef ex_frame;
             _PyStackRef new_frame;
-            // _CHECK_NO_SOAC_GENERATED_ACTIVATION
+            // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (frame->soac_checked_activation != NULL) {
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL_FUNCTION_EX);
                     assert(_PyOpcode_Deopt[opcode] == (CALL_FUNCTION_EX));
                     JUMP_TO_PREDICTED(CALL_FUNCTION_EX);
@@ -2947,7 +2958,7 @@
                 (void)counter;
                 #if ENABLE_SPECIALIZATION
                 if (ADAPTIVE_COUNTER_TRIGGERS(counter) &&
-                    frame->soac_checked_activation == NULL) {
+                    !_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     next_instr = this_instr;
                     _PyFrame_SetStackPointer(frame, stack_pointer);
                     _Py_Specialize_CallFunctionEx(func, next_instr);
@@ -2993,16 +3004,20 @@
                 PyObject *func = PyStackRef_AsPyObjectBorrow(func_st);
                 EVAL_CALL_STAT_INC_IF_FUNCTION(EVAL_CALL_FUNCTION_EX, func);
                 assert(!_PyErr_Occurred(tstate));
-                _PySoacInterpreterCallV1 soac_call = {0};
+                _PySoacInterpreterCallV1 soac_call_storage;
+                _PySoacInterpreterCallV1 *soac_call = NULL;
                 if (opcode != INSTRUMENTED_CALL_FUNCTION_EX) {
-                    stack_pointer[-2] = callargs_st;
-                    _PyFrame_SetStackPointer(frame, stack_pointer);
-                    int soac_selected = _PySOAC_InterpreterSelectCall(
-                        frame, this_instr, Py_SOAC_INTERPRETER_CALL_EXPANDED,
-                        0, &soac_call);
-                    stack_pointer = _PyFrame_GetStackPointer(frame);
-                    if (soac_selected < 0) {
-                        JUMP_TO_LABEL(error);
+                    if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                        soac_call = &soac_call_storage;
+                        stack_pointer[-2] = callargs_st;
+                        _PyFrame_SetStackPointer(frame, stack_pointer);
+                        int soac_selected = _PySOAC_InterpreterSelectCall(
+                            frame, this_instr, Py_SOAC_INTERPRETER_CALL_EXPANDED,
+                            0, soac_call);
+                        stack_pointer = _PyFrame_GetStackPointer(frame);
+                        if (soac_selected < 0) {
+                            JUMP_TO_LABEL(error);
+                        }
                     }
                 }
                 {
@@ -3023,17 +3038,21 @@
                         if (err) {
                             JUMP_TO_LABEL(error);
                         }
-                        _PyFrame_SetStackPointer(frame, stack_pointer);
-                        int soac_selected = _PySOAC_InterpreterSelectCall(
-                            frame, this_instr, Py_SOAC_INTERPRETER_CALL_EXPANDED,
-                            0, &soac_call);
-                        stack_pointer = _PyFrame_GetStackPointer(frame);
-                        if (soac_selected < 0) {
-                            JUMP_TO_LABEL(error);
+                        if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                            soac_call = &soac_call_storage;
+                            _PyFrame_SetStackPointer(frame, stack_pointer);
+                            int soac_selected = _PySOAC_InterpreterSelectCall(
+                                frame, this_instr, Py_SOAC_INTERPRETER_CALL_EXPANDED,
+                                0, soac_call);
+                            stack_pointer = _PyFrame_GetStackPointer(frame);
+                            if (soac_selected < 0) {
+                                JUMP_TO_LABEL(error);
+                            }
                         }
                         _PyFrame_SetStackPointer(frame, stack_pointer);
-                        result_o = _PySOAC_InterpreterObjectCallFromFrame(
-                            frame, this_instr, func, callargs, kwargs, &soac_call);
+                        result_o = soac_call != NULL
+                        ? _PySOAC_InterpreterObjectCallFromFrame(frame, this_instr, func, callargs, kwargs, soac_call)
+                    : _PySOAC_DataclassObjectCallFromFrame(frame, func, callargs, kwargs);
                         stack_pointer = _PyFrame_GetStackPointer(frame);
                         if (!PyFunction_Check(func) && !PyMethod_Check(func)) {
                             if (result_o == NULL) {
@@ -3072,27 +3091,31 @@
                             stack_pointer += -2;
                             ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
                             _PyFrame_SetStackPointer(frame, stack_pointer);
-                            _PyInterpreterFrame *new_frame = _PySOAC_InterpreterPushCallEx(
-                                &soac_call, tstate, func_st, locals,
+                            _PyInterpreterFrame *new_frame = soac_call != NULL
+                            ? _PySOAC_InterpreterPushCallEx(soac_call, tstate, func_st, locals,
+                                nargs, callargs, kwargs, frame)
+                        : _PyEvalFramePushAndInit_Ex(tstate, func_st, locals,
                                 nargs, callargs, kwargs, frame);
                             stack_pointer = _PyFrame_GetStackPointer(frame);
                             stack_pointer += -2;
                             ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
                             if (new_frame == NULL) {
                                 _PyFrame_SetStackPointer(frame, stack_pointer);
-                                _PySOAC_InterpreterCallFailed(&soac_call);
+                                _PySOAC_InterpreterCallFailed(soac_call);
                                 stack_pointer = _PyFrame_GetStackPointer(frame);
                                 JUMP_TO_LABEL(error);
                             }
-                            _PyFrame_SetStackPointer(frame, stack_pointer);
-                            int soac_committed = _PySOAC_InterpreterCallCommit(&soac_call, new_frame);
-                            stack_pointer = _PyFrame_GetStackPointer(frame);
-                            if (soac_committed < 0) {
+                            if (soac_call != NULL) {
                                 _PyFrame_SetStackPointer(frame, stack_pointer);
-                                _PyEval_FrameClearAndPop(tstate, new_frame);
-                                _PySOAC_InterpreterCallFailed(&soac_call);
+                                int soac_committed = _PySOAC_InterpreterCallCommit(soac_call, new_frame);
                                 stack_pointer = _PyFrame_GetStackPointer(frame);
-                                JUMP_TO_LABEL(error);
+                                if (soac_committed < 0) {
+                                    _PyFrame_SetStackPointer(frame, stack_pointer);
+                                    _PyEval_FrameClearAndPop(tstate, new_frame);
+                                    _PySOAC_InterpreterCallFailed(soac_call);
+                                    stack_pointer = _PyFrame_GetStackPointer(frame);
+                                    JUMP_TO_LABEL(error);
+                                }
                             }
                             assert( 2u == 1 + INLINE_CACHE_ENTRIES_CALL_FUNCTION_EX);
                             frame->return_offset = 2u ;
@@ -3104,8 +3127,9 @@
                         assert(kwargs == NULL || PyDict_CheckExact(kwargs));
                         stack_pointer[-2] = callargs_st;
                         _PyFrame_SetStackPointer(frame, stack_pointer);
-                        result_o = _PySOAC_InterpreterObjectCallFromFrame(
-                            frame, this_instr, func, callargs, kwargs, &soac_call);
+                        result_o = soac_call != NULL
+                        ? _PySOAC_InterpreterObjectCallFromFrame(frame, this_instr, func, callargs, kwargs, soac_call)
+                    : _PySOAC_DataclassObjectCallFromFrame(frame, func, callargs, kwargs);
                         stack_pointer = _PyFrame_GetStackPointer(frame);
                     }
                     stack_pointer += -1;
@@ -3122,8 +3146,12 @@
                     ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
                     _PyFrame_SetStackPointer(frame, stack_pointer);
                     PyStackRef_CLOSE(func_st);
-                    _PySOAC_InterpreterCallFinished(&soac_call, &result_o);
                     stack_pointer = _PyFrame_GetStackPointer(frame);
+                    if (soac_call != NULL) {
+                        _PyFrame_SetStackPointer(frame, stack_pointer);
+                        _PySOAC_InterpreterCallFinished(soac_call, &result_o);
+                        stack_pointer = _PyFrame_GetStackPointer(frame);
+                    }
                     if (result_o == NULL) {
                         JUMP_TO_LABEL(error);
                     }
@@ -3230,9 +3258,9 @@
             _PyStackRef instance;
             _PyStackRef cls;
             _PyStackRef res;
-            // _CHECK_NO_SOAC_GENERATED_ACTIVATION
+            // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (frame->soac_checked_activation != NULL) {
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -3323,7 +3351,7 @@
                 (void)counter;
                 #if ENABLE_SPECIALIZATION
                 if (ADAPTIVE_COUNTER_TRIGGERS(counter) &&
-                    frame->soac_checked_activation == NULL) {
+                    !_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     next_instr = this_instr;
                     _PyFrame_SetStackPointer(frame, stack_pointer);
                     _Py_Specialize_CallKw(callable, next_instr, oparg + !PyStackRef_IsNull(self_or_null));
@@ -3364,16 +3392,20 @@
                     total_args++;
                 }
                 int positional_args = total_args - (int)PyTuple_GET_SIZE(kwnames_o);
-                _PySoacInterpreterCallV1 soac_call;
-                stack_pointer[-3 - oparg] = callable;
-                stack_pointer[-2 - oparg] = self_or_null;
-                _PyFrame_SetStackPointer(frame, stack_pointer);
-                int soac_selected = _PySOAC_InterpreterSelectCall(
-                    frame, this_instr, Py_SOAC_INTERPRETER_CALL_VECTOR_KW,
-                    oparg, &soac_call);
-                stack_pointer = _PyFrame_GetStackPointer(frame);
-                if (soac_selected < 0) {
-                    JUMP_TO_LABEL(error);
+                _PySoacInterpreterCallV1 soac_call_storage;
+                _PySoacInterpreterCallV1 *soac_call = NULL;
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                    soac_call = &soac_call_storage;
+                    stack_pointer[-3 - oparg] = callable;
+                    stack_pointer[-2 - oparg] = self_or_null;
+                    _PyFrame_SetStackPointer(frame, stack_pointer);
+                    int soac_selected = _PySOAC_InterpreterSelectCall(
+                        frame, this_instr, Py_SOAC_INTERPRETER_CALL_VECTOR_KW,
+                        oparg, soac_call);
+                    stack_pointer = _PyFrame_GetStackPointer(frame);
+                    if (soac_selected < 0) {
+                        JUMP_TO_LABEL(error);
+                    }
                 }
                 {
                     _PyFrameEvalFunction eval_frame_before_binding;
@@ -3383,11 +3415,14 @@
                     {
                         int code_flags = ((PyCodeObject*)PyFunction_GET_CODE(callable_o))->co_flags;
                         PyObject *locals = code_flags & CO_OPTIMIZED ? NULL : Py_NewRef(PyFunction_GET_GLOBALS(callable_o));
+                        stack_pointer[-3 - oparg] = callable;
+                        stack_pointer[-2 - oparg] = self_or_null;
                         _PyFrame_SetStackPointer(frame, stack_pointer);
-                        _PyInterpreterFrame *new_frame = _PySOAC_InterpreterPushCall(
-                            &soac_call, tstate, callable, locals,
-                            arguments, positional_args, kwnames_o, frame
-                        );
+                        _PyInterpreterFrame *new_frame = soac_call != NULL
+                        ? _PySOAC_InterpreterPushCall(soac_call, tstate, callable, locals,
+                            arguments, positional_args, kwnames_o, frame)
+                    : _PyEvalFramePushAndInit(tstate, callable, locals,
+                            arguments, positional_args, kwnames_o, frame);
                         stack_pointer = _PyFrame_GetStackPointer(frame);
                         stack_pointer += -3 - oparg;
                         ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
@@ -3396,24 +3431,28 @@
                         stack_pointer = _PyFrame_GetStackPointer(frame);
                         if (new_frame == NULL) {
                             _PyFrame_SetStackPointer(frame, stack_pointer);
-                            _PySOAC_InterpreterCallFailed(&soac_call);
+                            _PySOAC_InterpreterCallFailed(soac_call);
                             stack_pointer = _PyFrame_GetStackPointer(frame);
                             JUMP_TO_LABEL(error);
                         }
-                        _PyFrame_SetStackPointer(frame, stack_pointer);
-                        int soac_committed = _PySOAC_InterpreterCallCommit(&soac_call, new_frame);
-                        stack_pointer = _PyFrame_GetStackPointer(frame);
-                        if (soac_committed < 0) {
+                        if (soac_call != NULL) {
                             _PyFrame_SetStackPointer(frame, stack_pointer);
-                            _PyEval_FrameClearAndPop(tstate, new_frame);
-                            _PySOAC_InterpreterCallFailed(&soac_call);
+                            int soac_committed = _PySOAC_InterpreterCallCommit(soac_call, new_frame);
                             stack_pointer = _PyFrame_GetStackPointer(frame);
-                            JUMP_TO_LABEL(error);
+                            if (soac_committed < 0) {
+                                _PyFrame_SetStackPointer(frame, stack_pointer);
+                                _PyEval_FrameClearAndPop(tstate, new_frame);
+                                _PySOAC_InterpreterCallFailed(soac_call);
+                                stack_pointer = _PyFrame_GetStackPointer(frame);
+                                JUMP_TO_LABEL(error);
+                            }
                         }
                         assert( 4u == 1 + INLINE_CACHE_ENTRIES_CALL_KW);
                         frame->return_offset = 4u ;
                         DISPATCH_INLINED(new_frame, eval_frame_before_binding);
                     }
+                    stack_pointer[-3 - oparg] = callable;
+                    stack_pointer[-2 - oparg] = self_or_null;
                     _PyFrame_SetStackPointer(frame, stack_pointer);
                     PyObject* res_o = _Py_VectorCallInstrumentation_StackRefSteal(
                         callable,
@@ -3423,13 +3462,15 @@
                         opcode == INSTRUMENTED_CALL_KW,
                         frame,
                         this_instr,
-                        tstate, &soac_call);
+                        tstate, soac_call);
                     stack_pointer = _PyFrame_GetStackPointer(frame);
                     stack_pointer += -3 - oparg;
                     ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
-                    _PyFrame_SetStackPointer(frame, stack_pointer);
-                    _PySOAC_InterpreterCallFinished(&soac_call, &res_o);
-                    stack_pointer = _PyFrame_GetStackPointer(frame);
+                    if (soac_call != NULL) {
+                        _PyFrame_SetStackPointer(frame, stack_pointer);
+                        _PySOAC_InterpreterCallFinished(soac_call, &res_o);
+                        stack_pointer = _PyFrame_GetStackPointer(frame);
+                    }
                     if (res_o == NULL) {
                         JUMP_TO_LABEL(error);
                     }
@@ -3459,9 +3500,9 @@
             _PyStackRef *args;
             _PyStackRef kwnames;
             _PyStackRef new_frame;
-            // _CHECK_NO_SOAC_GENERATED_ACTIVATION
+            // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (frame->soac_checked_activation != NULL) {
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL_KW);
                     assert(_PyOpcode_Deopt[opcode] == (CALL_KW));
                     JUMP_TO_PREDICTED(CALL_KW);
@@ -3498,8 +3539,7 @@
                     assert(_PyOpcode_Deopt[opcode] == (CALL_KW));
                     JUMP_TO_PREDICTED(CALL_KW);
                 }
-                if (((PyFunctionObject *)func)->func_soac_strict_owner_state ==
-                    FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
+                if (!_PySOAC_InterpreterFunctionFastReady((PyFunctionObject *)func)) {
                     UPDATE_MISS_STATS(CALL_KW);
                     assert(_PyOpcode_Deopt[opcode] == (CALL_KW));
                     JUMP_TO_PREDICTED(CALL_KW);
@@ -3608,9 +3648,9 @@
             _PyStackRef *args;
             _PyStackRef kwnames;
             _PyStackRef res;
-            // _CHECK_NO_SOAC_GENERATED_ACTIVATION
+            // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (frame->soac_checked_activation != NULL) {
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL_KW);
                     assert(_PyOpcode_Deopt[opcode] == (CALL_KW));
                     JUMP_TO_PREDICTED(CALL_KW);
@@ -3693,9 +3733,9 @@
             _PyStackRef *args;
             _PyStackRef kwnames;
             _PyStackRef new_frame;
-            // _CHECK_NO_SOAC_GENERATED_ACTIVATION
+            // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (frame->soac_checked_activation != NULL) {
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL_KW);
                     assert(_PyOpcode_Deopt[opcode] == (CALL_KW));
                     JUMP_TO_PREDICTED(CALL_KW);
@@ -3726,7 +3766,7 @@
                     assert(_PyOpcode_Deopt[opcode] == (CALL_KW));
                     JUMP_TO_PREDICTED(CALL_KW);
                 }
-                if (func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
+                if (!_PySOAC_InterpreterFunctionFastReady(func)) {
                     UPDATE_MISS_STATS(CALL_KW);
                     assert(_PyOpcode_Deopt[opcode] == (CALL_KW));
                     JUMP_TO_PREDICTED(CALL_KW);
@@ -3823,9 +3863,9 @@
             _PyStackRef a;
             _PyStackRef c;
             _PyStackRef value;
-            // _CHECK_NO_SOAC_GENERATED_ACTIVATION
+            // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (frame->soac_checked_activation != NULL) {
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -3915,9 +3955,9 @@
             _PyStackRef c;
             _PyStackRef s;
             _PyStackRef value;
-            // _CHECK_NO_SOAC_GENERATED_ACTIVATION
+            // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (frame->soac_checked_activation != NULL) {
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -4014,9 +4054,9 @@
             _PyStackRef self_or_null;
             _PyStackRef *args;
             _PyStackRef res;
-            // _CHECK_NO_SOAC_GENERATED_ACTIVATION
+            // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (frame->soac_checked_activation != NULL) {
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -4107,9 +4147,9 @@
             _PyStackRef self_or_null;
             _PyStackRef *args;
             _PyStackRef res;
-            // _CHECK_NO_SOAC_GENERATED_ACTIVATION
+            // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (frame->soac_checked_activation != NULL) {
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -4201,9 +4241,9 @@
             _PyStackRef self_or_null;
             _PyStackRef *args;
             _PyStackRef res;
-            // _CHECK_NO_SOAC_GENERATED_ACTIVATION
+            // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (frame->soac_checked_activation != NULL) {
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -4306,9 +4346,9 @@
             _PyStackRef s;
             _PyStackRef a;
             _PyStackRef value;
-            // _CHECK_NO_SOAC_GENERATED_ACTIVATION
+            // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (frame->soac_checked_activation != NULL) {
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -4433,9 +4473,9 @@
             _PyStackRef self_or_null;
             _PyStackRef *args;
             _PyStackRef res;
-            // _CHECK_NO_SOAC_GENERATED_ACTIVATION
+            // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (frame->soac_checked_activation != NULL) {
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -4516,9 +4556,9 @@
             _PyStackRef self_or_null;
             _PyStackRef *args;
             _PyStackRef new_frame;
-            // _CHECK_NO_SOAC_GENERATED_ACTIVATION
+            // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (frame->soac_checked_activation != NULL) {
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -4549,7 +4589,7 @@
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
                 }
-                if (func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
+                if (!_PySOAC_InterpreterFunctionFastReady(func)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -4647,9 +4687,9 @@
             _PyStackRef self_or_null;
             _PyStackRef *args;
             _PyStackRef new_frame;
-            // _CHECK_NO_SOAC_GENERATED_ACTIVATION
+            // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (frame->soac_checked_activation != NULL) {
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -4680,7 +4720,7 @@
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
                 }
-                if (func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
+                if (!_PySOAC_InterpreterFunctionFastReady(func)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -4767,9 +4807,9 @@
             _PyStackRef res;
             _PyStackRef a;
             _PyStackRef value;
-            // _CHECK_NO_SOAC_GENERATED_ACTIVATION
+            // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (frame->soac_checked_activation != NULL) {
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -4850,9 +4890,9 @@
             _PyStackRef res;
             _PyStackRef a;
             _PyStackRef value;
-            // _CHECK_NO_SOAC_GENERATED_ACTIVATION
+            // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (frame->soac_checked_activation != NULL) {
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -4933,9 +4973,9 @@
             _PyStackRef res;
             _PyStackRef a;
             _PyStackRef value;
-            // _CHECK_NO_SOAC_GENERATED_ACTIVATION
+            // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (frame->soac_checked_activation != NULL) {
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -6067,7 +6107,7 @@
             assert(executor->vm_data.code == code);
             assert(executor->vm_data.valid);
             assert(tstate->current_executor == NULL);
-            if (frame->soac_checked_activation != NULL ||
+            if (frame->soac_source_authority ||
                 (_Py_atomic_load_uintptr_relaxed(&tstate->eval_breaker) & _PY_EVAL_EVENTS_MASK)) {
                 opcode = executor->vm_data.opcode;
                 oparg = (oparg & ~255) | executor->vm_data.oparg;
@@ -6287,7 +6327,7 @@
                     assert(_PyOpcode_Deopt[opcode] == (FOR_ITER));
                     JUMP_TO_PREDICTED(FOR_ITER);
                 }
-                if (gen->gi_iframe.soac_checked_activation != NULL) {
+                if (gen->gi_iframe.soac_source_authority) {
                     UPDATE_MISS_STATS(FOR_ITER);
                     assert(_PyOpcode_Deopt[opcode] == (FOR_ITER));
                     JUMP_TO_PREDICTED(FOR_ITER);
@@ -6908,14 +6948,18 @@
                     arguments--;
                     total_args++;
                 }
-                _PySoacInterpreterCallV1 soac_call;
-                _PyFrame_SetStackPointer(frame, stack_pointer);
-                int soac_selected = _PySOAC_InterpreterSelectCall(
-                    frame, this_instr, Py_SOAC_INTERPRETER_CALL_VECTOR,
-                    oparg, &soac_call);
-                stack_pointer = _PyFrame_GetStackPointer(frame);
-                if (soac_selected < 0) {
-                    JUMP_TO_LABEL(error);
+                _PySoacInterpreterCallV1 soac_call_storage;
+                _PySoacInterpreterCallV1 *soac_call = NULL;
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                    soac_call = &soac_call_storage;
+                    _PyFrame_SetStackPointer(frame, stack_pointer);
+                    int soac_selected = _PySOAC_InterpreterSelectCall(
+                        frame, this_instr, Py_SOAC_INTERPRETER_CALL_VECTOR,
+                        oparg, soac_call);
+                    stack_pointer = _PyFrame_GetStackPointer(frame);
+                    if (soac_selected < 0) {
+                        JUMP_TO_LABEL(error);
+                    }
                 }
                 {
                     _PyFrameEvalFunction eval_frame_before_binding;
@@ -6926,28 +6970,31 @@
                         int code_flags = ((PyCodeObject*)PyFunction_GET_CODE(callable_o))->co_flags;
                         PyObject *locals = code_flags & CO_OPTIMIZED ? NULL : Py_NewRef(PyFunction_GET_GLOBALS(callable_o));
                         _PyFrame_SetStackPointer(frame, stack_pointer);
-                        _PyInterpreterFrame *new_frame = _PySOAC_InterpreterPushCall(
-                            &soac_call, tstate, callable, locals,
-                            arguments, total_args, NULL, frame
-                        );
+                        _PyInterpreterFrame *new_frame = soac_call != NULL
+                        ? _PySOAC_InterpreterPushCall(soac_call, tstate, callable, locals,
+                            arguments, total_args, NULL, frame)
+                    : _PyEvalFramePushAndInit(tstate, callable, locals,
+                            arguments, total_args, NULL, frame);
                         stack_pointer = _PyFrame_GetStackPointer(frame);
                         stack_pointer += -2 - oparg;
                         ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
                         if (new_frame == NULL) {
                             _PyFrame_SetStackPointer(frame, stack_pointer);
-                            _PySOAC_InterpreterCallFailed(&soac_call);
+                            _PySOAC_InterpreterCallFailed(soac_call);
                             stack_pointer = _PyFrame_GetStackPointer(frame);
                             JUMP_TO_LABEL(error);
                         }
-                        _PyFrame_SetStackPointer(frame, stack_pointer);
-                        int soac_committed = _PySOAC_InterpreterCallCommit(&soac_call, new_frame);
-                        stack_pointer = _PyFrame_GetStackPointer(frame);
-                        if (soac_committed < 0) {
+                        if (soac_call != NULL) {
                             _PyFrame_SetStackPointer(frame, stack_pointer);
-                            _PyEval_FrameClearAndPop(tstate, new_frame);
-                            _PySOAC_InterpreterCallFailed(&soac_call);
+                            int soac_committed = _PySOAC_InterpreterCallCommit(soac_call, new_frame);
                             stack_pointer = _PyFrame_GetStackPointer(frame);
-                            JUMP_TO_LABEL(error);
+                            if (soac_committed < 0) {
+                                _PyFrame_SetStackPointer(frame, stack_pointer);
+                                _PyEval_FrameClearAndPop(tstate, new_frame);
+                                _PySOAC_InterpreterCallFailed(soac_call);
+                                stack_pointer = _PyFrame_GetStackPointer(frame);
+                                JUMP_TO_LABEL(error);
+                            }
                         }
                         frame->return_offset = 4u ;
                         DISPATCH_INLINED(new_frame, eval_frame_before_binding);
@@ -6961,13 +7008,15 @@
                         opcode == INSTRUMENTED_CALL,
                         frame,
                         this_instr,
-                        tstate, &soac_call);
+                        tstate, soac_call);
                     stack_pointer = _PyFrame_GetStackPointer(frame);
                     stack_pointer += -2 - oparg;
                     ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
-                    _PyFrame_SetStackPointer(frame, stack_pointer);
-                    _PySOAC_InterpreterCallFinished(&soac_call, &res_o);
-                    stack_pointer = _PyFrame_GetStackPointer(frame);
+                    if (soac_call != NULL) {
+                        _PyFrame_SetStackPointer(frame, stack_pointer);
+                        _PySOAC_InterpreterCallFinished(soac_call, &res_o);
+                        stack_pointer = _PyFrame_GetStackPointer(frame);
+                    }
                     if (res_o == NULL) {
                         JUMP_TO_LABEL(error);
                     }
@@ -7044,16 +7093,20 @@
                 PyObject *func = PyStackRef_AsPyObjectBorrow(func_st);
                 EVAL_CALL_STAT_INC_IF_FUNCTION(EVAL_CALL_FUNCTION_EX, func);
                 assert(!_PyErr_Occurred(tstate));
-                _PySoacInterpreterCallV1 soac_call = {0};
+                _PySoacInterpreterCallV1 soac_call_storage;
+                _PySoacInterpreterCallV1 *soac_call = NULL;
                 if (opcode != INSTRUMENTED_CALL_FUNCTION_EX) {
-                    stack_pointer[-2] = callargs_st;
-                    _PyFrame_SetStackPointer(frame, stack_pointer);
-                    int soac_selected = _PySOAC_InterpreterSelectCall(
-                        frame, this_instr, Py_SOAC_INTERPRETER_CALL_EXPANDED,
-                        0, &soac_call);
-                    stack_pointer = _PyFrame_GetStackPointer(frame);
-                    if (soac_selected < 0) {
-                        JUMP_TO_LABEL(error);
+                    if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                        soac_call = &soac_call_storage;
+                        stack_pointer[-2] = callargs_st;
+                        _PyFrame_SetStackPointer(frame, stack_pointer);
+                        int soac_selected = _PySOAC_InterpreterSelectCall(
+                            frame, this_instr, Py_SOAC_INTERPRETER_CALL_EXPANDED,
+                            0, soac_call);
+                        stack_pointer = _PyFrame_GetStackPointer(frame);
+                        if (soac_selected < 0) {
+                            JUMP_TO_LABEL(error);
+                        }
                     }
                 }
                 {
@@ -7074,17 +7127,21 @@
                         if (err) {
                             JUMP_TO_LABEL(error);
                         }
-                        _PyFrame_SetStackPointer(frame, stack_pointer);
-                        int soac_selected = _PySOAC_InterpreterSelectCall(
-                            frame, this_instr, Py_SOAC_INTERPRETER_CALL_EXPANDED,
-                            0, &soac_call);
-                        stack_pointer = _PyFrame_GetStackPointer(frame);
-                        if (soac_selected < 0) {
-                            JUMP_TO_LABEL(error);
+                        if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                            soac_call = &soac_call_storage;
+                            _PyFrame_SetStackPointer(frame, stack_pointer);
+                            int soac_selected = _PySOAC_InterpreterSelectCall(
+                                frame, this_instr, Py_SOAC_INTERPRETER_CALL_EXPANDED,
+                                0, soac_call);
+                            stack_pointer = _PyFrame_GetStackPointer(frame);
+                            if (soac_selected < 0) {
+                                JUMP_TO_LABEL(error);
+                            }
                         }
                         _PyFrame_SetStackPointer(frame, stack_pointer);
-                        result_o = _PySOAC_InterpreterObjectCallFromFrame(
-                            frame, this_instr, func, callargs, kwargs, &soac_call);
+                        result_o = soac_call != NULL
+                        ? _PySOAC_InterpreterObjectCallFromFrame(frame, this_instr, func, callargs, kwargs, soac_call)
+                    : _PySOAC_DataclassObjectCallFromFrame(frame, func, callargs, kwargs);
                         stack_pointer = _PyFrame_GetStackPointer(frame);
                         if (!PyFunction_Check(func) && !PyMethod_Check(func)) {
                             if (result_o == NULL) {
@@ -7123,27 +7180,31 @@
                             stack_pointer += -2;
                             ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
                             _PyFrame_SetStackPointer(frame, stack_pointer);
-                            _PyInterpreterFrame *new_frame = _PySOAC_InterpreterPushCallEx(
-                                &soac_call, tstate, func_st, locals,
+                            _PyInterpreterFrame *new_frame = soac_call != NULL
+                            ? _PySOAC_InterpreterPushCallEx(soac_call, tstate, func_st, locals,
+                                nargs, callargs, kwargs, frame)
+                        : _PyEvalFramePushAndInit_Ex(tstate, func_st, locals,
                                 nargs, callargs, kwargs, frame);
                             stack_pointer = _PyFrame_GetStackPointer(frame);
                             stack_pointer += -2;
                             ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
                             if (new_frame == NULL) {
                                 _PyFrame_SetStackPointer(frame, stack_pointer);
-                                _PySOAC_InterpreterCallFailed(&soac_call);
+                                _PySOAC_InterpreterCallFailed(soac_call);
                                 stack_pointer = _PyFrame_GetStackPointer(frame);
                                 JUMP_TO_LABEL(error);
                             }
-                            _PyFrame_SetStackPointer(frame, stack_pointer);
-                            int soac_committed = _PySOAC_InterpreterCallCommit(&soac_call, new_frame);
-                            stack_pointer = _PyFrame_GetStackPointer(frame);
-                            if (soac_committed < 0) {
+                            if (soac_call != NULL) {
                                 _PyFrame_SetStackPointer(frame, stack_pointer);
-                                _PyEval_FrameClearAndPop(tstate, new_frame);
-                                _PySOAC_InterpreterCallFailed(&soac_call);
+                                int soac_committed = _PySOAC_InterpreterCallCommit(soac_call, new_frame);
                                 stack_pointer = _PyFrame_GetStackPointer(frame);
-                                JUMP_TO_LABEL(error);
+                                if (soac_committed < 0) {
+                                    _PyFrame_SetStackPointer(frame, stack_pointer);
+                                    _PyEval_FrameClearAndPop(tstate, new_frame);
+                                    _PySOAC_InterpreterCallFailed(soac_call);
+                                    stack_pointer = _PyFrame_GetStackPointer(frame);
+                                    JUMP_TO_LABEL(error);
+                                }
                             }
                             assert( 2u == 1 + INLINE_CACHE_ENTRIES_CALL_FUNCTION_EX);
                             frame->return_offset = 2u ;
@@ -7155,8 +7216,9 @@
                         assert(kwargs == NULL || PyDict_CheckExact(kwargs));
                         stack_pointer[-2] = callargs_st;
                         _PyFrame_SetStackPointer(frame, stack_pointer);
-                        result_o = _PySOAC_InterpreterObjectCallFromFrame(
-                            frame, this_instr, func, callargs, kwargs, &soac_call);
+                        result_o = soac_call != NULL
+                        ? _PySOAC_InterpreterObjectCallFromFrame(frame, this_instr, func, callargs, kwargs, soac_call)
+                    : _PySOAC_DataclassObjectCallFromFrame(frame, func, callargs, kwargs);
                         stack_pointer = _PyFrame_GetStackPointer(frame);
                     }
                     stack_pointer += -1;
@@ -7173,8 +7235,12 @@
                     ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
                     _PyFrame_SetStackPointer(frame, stack_pointer);
                     PyStackRef_CLOSE(func_st);
-                    _PySOAC_InterpreterCallFinished(&soac_call, &result_o);
                     stack_pointer = _PyFrame_GetStackPointer(frame);
+                    if (soac_call != NULL) {
+                        _PyFrame_SetStackPointer(frame, stack_pointer);
+                        _PySOAC_InterpreterCallFinished(soac_call, &result_o);
+                        stack_pointer = _PyFrame_GetStackPointer(frame);
+                    }
                     if (result_o == NULL) {
                         JUMP_TO_LABEL(error);
                     }
@@ -7271,14 +7337,18 @@
                     total_args++;
                 }
                 int positional_args = total_args - (int)PyTuple_GET_SIZE(kwnames_o);
-                _PySoacInterpreterCallV1 soac_call;
-                _PyFrame_SetStackPointer(frame, stack_pointer);
-                int soac_selected = _PySOAC_InterpreterSelectCall(
-                    frame, this_instr, Py_SOAC_INTERPRETER_CALL_VECTOR_KW,
-                    oparg, &soac_call);
-                stack_pointer = _PyFrame_GetStackPointer(frame);
-                if (soac_selected < 0) {
-                    JUMP_TO_LABEL(error);
+                _PySoacInterpreterCallV1 soac_call_storage;
+                _PySoacInterpreterCallV1 *soac_call = NULL;
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                    soac_call = &soac_call_storage;
+                    _PyFrame_SetStackPointer(frame, stack_pointer);
+                    int soac_selected = _PySOAC_InterpreterSelectCall(
+                        frame, this_instr, Py_SOAC_INTERPRETER_CALL_VECTOR_KW,
+                        oparg, soac_call);
+                    stack_pointer = _PyFrame_GetStackPointer(frame);
+                    if (soac_selected < 0) {
+                        JUMP_TO_LABEL(error);
+                    }
                 }
                 {
                     _PyFrameEvalFunction eval_frame_before_binding;
@@ -7289,10 +7359,11 @@
                         int code_flags = ((PyCodeObject*)PyFunction_GET_CODE(callable_o))->co_flags;
                         PyObject *locals = code_flags & CO_OPTIMIZED ? NULL : Py_NewRef(PyFunction_GET_GLOBALS(callable_o));
                         _PyFrame_SetStackPointer(frame, stack_pointer);
-                        _PyInterpreterFrame *new_frame = _PySOAC_InterpreterPushCall(
-                            &soac_call, tstate, callable, locals,
-                            arguments, positional_args, kwnames_o, frame
-                        );
+                        _PyInterpreterFrame *new_frame = soac_call != NULL
+                        ? _PySOAC_InterpreterPushCall(soac_call, tstate, callable, locals,
+                            arguments, positional_args, kwnames_o, frame)
+                    : _PyEvalFramePushAndInit(tstate, callable, locals,
+                            arguments, positional_args, kwnames_o, frame);
                         stack_pointer = _PyFrame_GetStackPointer(frame);
                         stack_pointer += -3 - oparg;
                         ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
@@ -7301,19 +7372,21 @@
                         stack_pointer = _PyFrame_GetStackPointer(frame);
                         if (new_frame == NULL) {
                             _PyFrame_SetStackPointer(frame, stack_pointer);
-                            _PySOAC_InterpreterCallFailed(&soac_call);
+                            _PySOAC_InterpreterCallFailed(soac_call);
                             stack_pointer = _PyFrame_GetStackPointer(frame);
                             JUMP_TO_LABEL(error);
                         }
-                        _PyFrame_SetStackPointer(frame, stack_pointer);
-                        int soac_committed = _PySOAC_InterpreterCallCommit(&soac_call, new_frame);
-                        stack_pointer = _PyFrame_GetStackPointer(frame);
-                        if (soac_committed < 0) {
+                        if (soac_call != NULL) {
                             _PyFrame_SetStackPointer(frame, stack_pointer);
-                            _PyEval_FrameClearAndPop(tstate, new_frame);
-                            _PySOAC_InterpreterCallFailed(&soac_call);
+                            int soac_committed = _PySOAC_InterpreterCallCommit(soac_call, new_frame);
                             stack_pointer = _PyFrame_GetStackPointer(frame);
-                            JUMP_TO_LABEL(error);
+                            if (soac_committed < 0) {
+                                _PyFrame_SetStackPointer(frame, stack_pointer);
+                                _PyEval_FrameClearAndPop(tstate, new_frame);
+                                _PySOAC_InterpreterCallFailed(soac_call);
+                                stack_pointer = _PyFrame_GetStackPointer(frame);
+                                JUMP_TO_LABEL(error);
+                            }
                         }
                         assert( 4u == 1 + INLINE_CACHE_ENTRIES_CALL_KW);
                         frame->return_offset = 4u ;
@@ -7328,13 +7401,15 @@
                         opcode == INSTRUMENTED_CALL_KW,
                         frame,
                         this_instr,
-                        tstate, &soac_call);
+                        tstate, soac_call);
                     stack_pointer = _PyFrame_GetStackPointer(frame);
                     stack_pointer += -3 - oparg;
                     ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
-                    _PyFrame_SetStackPointer(frame, stack_pointer);
-                    _PySOAC_InterpreterCallFinished(&soac_call, &res_o);
-                    stack_pointer = _PyFrame_GetStackPointer(frame);
+                    if (soac_call != NULL) {
+                        _PyFrame_SetStackPointer(frame, stack_pointer);
+                        _PySOAC_InterpreterCallFinished(soac_call, &res_o);
+                        stack_pointer = _PyFrame_GetStackPointer(frame);
+                    }
                     if (res_o == NULL) {
                         JUMP_TO_LABEL(error);
                     }
@@ -8272,7 +8347,7 @@
             {
                 #ifdef _Py_TIER2
                 _Py_BackoffCounter counter = this_instr[1].counter;
-                if (frame->soac_checked_activation == NULL &&
+                if (!frame->soac_source_authority &&
                     !IS_JIT_TRACING() && backoff_counter_triggers(counter) &&
                     this_instr->op.code == JUMP_BACKWARD_JIT &&
                     next_instr->op.code != ENTER_EXECUTOR) {
@@ -8655,7 +8730,7 @@
                 assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                 JUMP_TO_PREDICTED(LOAD_ATTR);
             }
-            if (f->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
+            if (!_PySOAC_InterpreterFunctionFastReady(f)) {
                 UPDATE_MISS_STATS(LOAD_ATTR);
                 assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                 JUMP_TO_PREDICTED(LOAD_ATTR);
@@ -9207,7 +9282,7 @@
                 assert((oparg & 1) == 0);
                 assert(Py_IS_TYPE(fget, &PyFunction_Type));
                 PyFunctionObject *f = (PyFunctionObject *)fget;
-                if (f->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
+                if (!_PySOAC_InterpreterFunctionFastReady(f)) {
                     UPDATE_MISS_STATS(LOAD_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                     JUMP_TO_PREDICTED(LOAD_ATTR);
@@ -11315,7 +11390,7 @@
                     assert(_PyOpcode_Deopt[opcode] == (SEND));
                     JUMP_TO_PREDICTED(SEND);
                 }
-                if (gen->gi_iframe.soac_checked_activation != NULL) {
+                if (gen->gi_iframe.soac_source_authority) {
                     UPDATE_MISS_STATS(SEND);
                     assert(_PyOpcode_Deopt[opcode] == (SEND));
                     JUMP_TO_PREDICTED(SEND);
@@ -11522,6 +11597,23 @@
             DISPATCH();
         }
 
+        TARGET(SOAC_BEGIN_DEFINITION) {
+            #if _Py_TAIL_CALL_INTERP
+            int opcode = SOAC_BEGIN_DEFINITION;
+            (void)(opcode);
+            #endif
+            frame->instr_ptr = next_instr;
+            next_instr += 1;
+            INSTRUCTION_STATS(SOAC_BEGIN_DEFINITION);
+            _PyFrame_SetStackPointer(frame, stack_pointer);
+            int err = _PySOAC_InterpreterBeginDefinition(frame, frame->instr_ptr);
+            stack_pointer = _PyFrame_GetStackPointer(frame);
+            if (err < 0) {
+                JUMP_TO_LABEL(error);
+            }
+            DISPATCH();
+        }
+
         TARGET(SOAC_COMPLETE_DEFINITION) {
             #if _Py_TAIL_CALL_INTERP
             int opcode = SOAC_COMPLETE_DEFINITION;
@@ -11540,6 +11632,24 @@
             if (err < 0) {
                 JUMP_TO_LABEL(error);
             }
+            DISPATCH();
+        }
+
+        TARGET(SOAC_END_FUNCTION_BIRTH) {
+            #if _Py_TAIL_CALL_INTERP
+            int opcode = SOAC_END_FUNCTION_BIRTH;
+            (void)(opcode);
+            #endif
+            frame->instr_ptr = next_instr;
+            next_instr += 1;
+            INSTRUCTION_STATS(SOAC_END_FUNCTION_BIRTH);
+            _PyStackRef value;
+            value = stack_pointer[-1];
+            _PyFrame_SetStackPointer(frame, stack_pointer);
+            int err = _PySOAC_InterpreterEndFunctionBirth(
+                frame, frame->instr_ptr, PyStackRef_AsPyObjectBorrow(value));
+            stack_pointer = _PyFrame_GetStackPointer(frame);
+            if (err < 0) { JUMP_TO_LABEL(error);    }
             DISPATCH();
         }
 
@@ -12670,7 +12780,7 @@
             frame->instr_ptr = prev_instr;
             opcode = next_instr->op.code;
             bool stop_tracing = (
-                                 frame->soac_checked_activation != NULL ||
+                                 frame->soac_source_authority ||
                                  opcode == WITH_EXCEPT_START ||
                                  opcode == RERAISE ||
                                  opcode == CLEANUP_THROW ||
@@ -13218,6 +13328,7 @@ JUMP_TO_LABEL(error);
         {
             assert(_PyErr_Occurred(tstate));
             STOP_TRACING();
+            _PySOAC_InterpreterAbortDefinition(frame, frame->instr_ptr, -1);
             assert(frame->owner != FRAME_OWNED_BY_INTERPRETER);
             if (!_PyFrame_IsIncomplete(frame)) {
                 PyFrameObject *f = _PyFrame_GetFrameObject(frame);
@@ -13241,6 +13352,7 @@ JUMP_TO_LABEL(error);
             int offset = INSTR_OFFSET()-1;
             int level, handler, lasti;
             int handled = get_exception_handler(_PyFrame_GetCode(frame), offset, &level, &handler, &lasti);
+            _PySOAC_InterpreterAbortDefinition(frame, frame->instr_ptr, handled ? handler : -1);
             if (handled == 0) {
                 assert(_PyErr_Occurred(tstate));
                 _PySOAC_CheckedFrameFailed(frame, frame->instr_ptr);

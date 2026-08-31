@@ -2863,9 +2863,7 @@
             break;
         }
 
-        case _CHECK_NO_SOAC_GENERATED_ACTIVATION: {
-            break;
-        }
+        /* _CHECK_NO_SOAC_CONSTRUCTION_CALL is not a viable micro-op for tier 2 */
 
         case _MAYBE_EXPAND_METHOD: {
             JitOptRef *args;
@@ -3571,6 +3569,14 @@
         }
 
         /* _SET_FUNCTION_ATTRIBUTE is not a viable micro-op for tier 2 */
+
+        case _SOAC_BEGIN_DEFINITION: {
+            break;
+        }
+
+        case _SOAC_END_FUNCTION_BIRTH: {
+            break;
+        }
 
         case _SOAC_COMPLETE_DEFINITION: {
             break;

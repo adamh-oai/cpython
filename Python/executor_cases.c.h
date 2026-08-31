@@ -6174,8 +6174,7 @@
                 SET_CURRENT_CACHED_VALUES(2);
                 JUMP_TO_JUMP_TARGET();
             }
-            if (((PyFunctionObject *)getitem_o)->func_soac_strict_owner_state ==
-                     FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
+            if (!_PySOAC_InterpreterFunctionFastReady((PyFunctionObject *)getitem_o)) {
                 UOP_STAT_INC(uopcode, miss);
                 _tos_cache1 = _stack_item_1;
                 _tos_cache0 = container;
@@ -6878,7 +6877,7 @@
                 SET_CURRENT_CACHED_VALUES(2);
                 JUMP_TO_JUMP_TARGET();
             }
-            if (gen->gi_iframe.soac_checked_activation != NULL) {
+            if (gen->gi_iframe.soac_source_authority) {
                 UOP_STAT_INC(uopcode, miss);
                 _tos_cache1 = v;
                 _tos_cache0 = receiver;
@@ -9720,7 +9719,7 @@
             assert((oparg & 1) == 0);
             assert(Py_IS_TYPE(fget, &PyFunction_Type));
             PyFunctionObject *f = (PyFunctionObject *)fget;
-            if (f->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
+            if (!_PySOAC_InterpreterFunctionFastReady(f)) {
                 UOP_STAT_INC(uopcode, miss);
                 _tos_cache0 = owner;
                 SET_CURRENT_CACHED_VALUES(1);
@@ -12172,7 +12171,7 @@
                 SET_CURRENT_CACHED_VALUES(2);
                 JUMP_TO_JUMP_TARGET();
             }
-            if (gen->gi_iframe.soac_checked_activation != NULL) {
+            if (gen->gi_iframe.soac_source_authority) {
                 UOP_STAT_INC(uopcode, miss);
                 _tos_cache1 = _stack_item_1;
                 _tos_cache0 = iter;
@@ -12941,75 +12940,7 @@
             break;
         }
 
-        case _CHECK_NO_SOAC_GENERATED_ACTIVATION_r00: {
-            CHECK_CURRENT_CACHED_VALUES(0);
-            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
-            if (frame->soac_checked_activation != NULL) {
-                UOP_STAT_INC(uopcode, miss);
-                SET_CURRENT_CACHED_VALUES(0);
-                JUMP_TO_JUMP_TARGET();
-            }
-            SET_CURRENT_CACHED_VALUES(0);
-            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
-            break;
-        }
-
-        case _CHECK_NO_SOAC_GENERATED_ACTIVATION_r11: {
-            CHECK_CURRENT_CACHED_VALUES(1);
-            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
-            _PyStackRef _stack_item_0 = _tos_cache0;
-            if (frame->soac_checked_activation != NULL) {
-                UOP_STAT_INC(uopcode, miss);
-                _tos_cache0 = _stack_item_0;
-                SET_CURRENT_CACHED_VALUES(1);
-                JUMP_TO_JUMP_TARGET();
-            }
-            _tos_cache0 = _stack_item_0;
-            SET_CURRENT_CACHED_VALUES(1);
-            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
-            break;
-        }
-
-        case _CHECK_NO_SOAC_GENERATED_ACTIVATION_r22: {
-            CHECK_CURRENT_CACHED_VALUES(2);
-            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
-            _PyStackRef _stack_item_0 = _tos_cache0;
-            _PyStackRef _stack_item_1 = _tos_cache1;
-            if (frame->soac_checked_activation != NULL) {
-                UOP_STAT_INC(uopcode, miss);
-                _tos_cache1 = _stack_item_1;
-                _tos_cache0 = _stack_item_0;
-                SET_CURRENT_CACHED_VALUES(2);
-                JUMP_TO_JUMP_TARGET();
-            }
-            _tos_cache1 = _stack_item_1;
-            _tos_cache0 = _stack_item_0;
-            SET_CURRENT_CACHED_VALUES(2);
-            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
-            break;
-        }
-
-        case _CHECK_NO_SOAC_GENERATED_ACTIVATION_r33: {
-            CHECK_CURRENT_CACHED_VALUES(3);
-            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
-            _PyStackRef _stack_item_0 = _tos_cache0;
-            _PyStackRef _stack_item_1 = _tos_cache1;
-            _PyStackRef _stack_item_2 = _tos_cache2;
-            if (frame->soac_checked_activation != NULL) {
-                UOP_STAT_INC(uopcode, miss);
-                _tos_cache2 = _stack_item_2;
-                _tos_cache1 = _stack_item_1;
-                _tos_cache0 = _stack_item_0;
-                SET_CURRENT_CACHED_VALUES(3);
-                JUMP_TO_JUMP_TARGET();
-            }
-            _tos_cache2 = _stack_item_2;
-            _tos_cache1 = _stack_item_1;
-            _tos_cache0 = _stack_item_0;
-            SET_CURRENT_CACHED_VALUES(3);
-            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
-            break;
-        }
+        /* _CHECK_NO_SOAC_CONSTRUCTION_CALL is not a viable micro-op for tier 2 because it uses the 'this_instr' variable */
 
         case _MAYBE_EXPAND_METHOD_r00: {
             CHECK_CURRENT_CACHED_VALUES(0);
@@ -13106,7 +13037,7 @@
                 SET_CURRENT_CACHED_VALUES(0);
                 JUMP_TO_JUMP_TARGET();
             }
-            if (func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
+            if (!_PySOAC_InterpreterFunctionFastReady(func)) {
                 UOP_STAT_INC(uopcode, miss);
                 SET_CURRENT_CACHED_VALUES(0);
                 JUMP_TO_JUMP_TARGET();
@@ -13128,7 +13059,7 @@
                 SET_CURRENT_CACHED_VALUES(0);
                 JUMP_TO_JUMP_TARGET();
             }
-            if (func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
+            if (!_PySOAC_InterpreterFunctionFastReady(func)) {
                 UOP_STAT_INC(uopcode, miss);
                 SET_CURRENT_CACHED_VALUES(0);
                 JUMP_TO_JUMP_TARGET();
@@ -13152,7 +13083,7 @@
                 SET_CURRENT_CACHED_VALUES(1);
                 JUMP_TO_JUMP_TARGET();
             }
-            if (func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
+            if (!_PySOAC_InterpreterFunctionFastReady(func)) {
                 UOP_STAT_INC(uopcode, miss);
                 _tos_cache0 = _stack_item_0;
                 SET_CURRENT_CACHED_VALUES(1);
@@ -13180,7 +13111,7 @@
                 SET_CURRENT_CACHED_VALUES(2);
                 JUMP_TO_JUMP_TARGET();
             }
-            if (func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
+            if (!_PySOAC_InterpreterFunctionFastReady(func)) {
                 UOP_STAT_INC(uopcode, miss);
                 _tos_cache1 = _stack_item_1;
                 _tos_cache0 = _stack_item_0;
@@ -13212,7 +13143,7 @@
                 SET_CURRENT_CACHED_VALUES(3);
                 JUMP_TO_JUMP_TARGET();
             }
-            if (func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
+            if (!_PySOAC_InterpreterFunctionFastReady(func)) {
                 UOP_STAT_INC(uopcode, miss);
                 _tos_cache2 = _stack_item_2;
                 _tos_cache1 = _stack_item_1;
@@ -13254,8 +13185,7 @@
                 SET_CURRENT_CACHED_VALUES(0);
                 JUMP_TO_JUMP_TARGET();
             }
-            if (((PyFunctionObject *)func)->func_soac_strict_owner_state ==
-                    FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
+            if (!_PySOAC_InterpreterFunctionFastReady((PyFunctionObject *)func)) {
                 UOP_STAT_INC(uopcode, miss);
                 SET_CURRENT_CACHED_VALUES(0);
                 JUMP_TO_JUMP_TARGET();
@@ -14549,7 +14479,7 @@
                 SET_CURRENT_CACHED_VALUES(0);
                 JUMP_TO_JUMP_TARGET();
             }
-            if (init_func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
+            if (!_PySOAC_InterpreterFunctionFastReady(init_func)) {
                 UOP_STAT_INC(uopcode, miss);
                 SET_CURRENT_CACHED_VALUES(0);
                 JUMP_TO_JUMP_TARGET();
@@ -15866,7 +15796,7 @@
                 SET_CURRENT_CACHED_VALUES(1);
                 JUMP_TO_JUMP_TARGET();
             }
-            if (func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
+            if (!_PySOAC_InterpreterFunctionFastReady(func)) {
                 UOP_STAT_INC(uopcode, miss);
                 _tos_cache0 = _stack_item_0;
                 SET_CURRENT_CACHED_VALUES(1);
@@ -15908,8 +15838,7 @@
                 SET_CURRENT_CACHED_VALUES(1);
                 JUMP_TO_JUMP_TARGET();
             }
-            if (((PyFunctionObject *)func)->func_soac_strict_owner_state ==
-                    FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
+            if (!_PySOAC_InterpreterFunctionFastReady((PyFunctionObject *)func)) {
                 UOP_STAT_INC(uopcode, miss);
                 _tos_cache0 = _stack_item_0;
                 SET_CURRENT_CACHED_VALUES(1);
@@ -16374,8 +16303,8 @@
             stack_pointer += 3;
             ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
             _PyFrame_SetStackPointer(frame, stack_pointer);
-            PyObject *result_o = _PySOAC_InterpreterObjectCallFromFrame(
-                frame, frame->instr_ptr, func, callargs, kwargs, NULL);
+            PyObject *result_o = _PySOAC_DataclassObjectCallFromFrame(
+                frame, func, callargs, kwargs);
             stack_pointer = _PyFrame_GetStackPointer(frame);
             stack_pointer += -1;
             ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
@@ -16444,6 +16373,50 @@
         }
 
         /* _SET_FUNCTION_ATTRIBUTE is not a viable micro-op for tier 2 because it has both popping and not-popping errors */
+
+        case _SOAC_BEGIN_DEFINITION_r00: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
+            _PyFrame_SetStackPointer(frame, stack_pointer);
+            int err = _PySOAC_InterpreterBeginDefinition(frame, frame->instr_ptr);
+            stack_pointer = _PyFrame_GetStackPointer(frame);
+            if (err < 0) {
+                SET_CURRENT_CACHED_VALUES(0);
+                JUMP_TO_ERROR();
+            }
+            _tos_cache0 = PyStackRef_ZERO_BITS;
+            _tos_cache1 = PyStackRef_ZERO_BITS;
+            _tos_cache2 = PyStackRef_ZERO_BITS;
+            SET_CURRENT_CACHED_VALUES(0);
+            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
+            break;
+        }
+
+        case _SOAC_END_FUNCTION_BIRTH_r11: {
+            CHECK_CURRENT_CACHED_VALUES(1);
+            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
+            _PyStackRef value;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            value = _stack_item_0;
+            stack_pointer[0] = value;
+            stack_pointer += 1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            _PyFrame_SetStackPointer(frame, stack_pointer);
+            int err = _PySOAC_InterpreterEndFunctionBirth(
+                frame, frame->instr_ptr, PyStackRef_AsPyObjectBorrow(value));
+            stack_pointer = _PyFrame_GetStackPointer(frame);
+            if (err < 0) {
+                SET_CURRENT_CACHED_VALUES(0);
+                JUMP_TO_ERROR();    }
+            _tos_cache0 = value;
+            _tos_cache1 = PyStackRef_ZERO_BITS;
+            _tos_cache2 = PyStackRef_ZERO_BITS;
+            SET_CURRENT_CACHED_VALUES(1);
+            stack_pointer += -1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
+            break;
+        }
 
         case _SOAC_COMPLETE_DEFINITION_r11: {
             CHECK_CURRENT_CACHED_VALUES(1);
