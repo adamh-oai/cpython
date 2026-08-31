@@ -4148,6 +4148,10 @@
             break;
         }
 
+        case _ERROR_AT_SAVED_IP: {
+            break;
+        }
+
         case _SPILL_OR_RELOAD: {
             break;
         }
