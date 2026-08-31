@@ -60,6 +60,7 @@ typedef struct {
     uint64_t func_soac_strict_id;
     /* GC-visible strict runtime state; never stored in the opaque JIT pointer. */
     PyObject *func_soac_strict_owner;
+    PyObject *func_soac_interpreter_guard; /* Shared liveness scalars, no value edges. */
     uint8_t func_soac_strict_owner_state;
 
     /* Invariant:
@@ -115,6 +116,9 @@ PyAPI_FUNC(int) PyFunction_CheckSoacStrictDefaults(PyObject *);
  * NULL/StrictRuntimeUnavailableError after irreversible GC clearing. */
 PyAPI_FUNC(int) PyFunction_SetSoacStrictOwner(PyObject *, PyObject *);
 PyAPI_FUNC(PyObject *) PyFunction_GetSoacStrictOwner(PyObject *);
+/* Borrowed actual interpreter owner for metadata-only abandonment. No error,
+ * allocation or reference changes; NULL for unrelated/terminal/foreign owners. */
+PyAPI_FUNC(PyObject *) PyFunction_GetSoacStrictOwnerForTeardownV1(PyObject *);
 /* Exact native generated-function provenance, not source/JIT/check authority.
  * Has is a role query: 0 for unrelated functions, 1 for this exact attached
  * record, -1 for a cleared or replayed record. Expired adoption provenance

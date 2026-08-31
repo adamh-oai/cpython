@@ -109,6 +109,8 @@ typedef struct {
     void *co_extra;                                                            \
     /* C-owned source identity; never copied from public flags or CodeType. */ \
     uint64_t _co_soac_strict_source_id;                                         \
+    uint8_t _co_soac_scope_kind; /* Trusted compiler role; UINT8_MAX otherwise. */ \
+    struct _PySoacInterpreterSiteV1 *_co_soac_sites;                            \
     _PyCode_DEF_THREAD_LOCAL_BYTECODE()                                        \
     char co_code_adaptive[(SIZE)];                                             \
 }

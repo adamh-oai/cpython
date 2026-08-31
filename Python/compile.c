@@ -4507,6 +4507,7 @@ optimize_and_assemble_code_unit(struct compiler_unit *u, PyObject *const_cache,
         }
         else {
             bindings->code = (PyCodeObject *)Py_NewRef(co);
+            co->_co_soac_scope_kind = (uint8_t)bindings->scope_kind;
         }
     }
 

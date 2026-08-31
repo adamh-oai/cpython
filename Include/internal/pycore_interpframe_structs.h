@@ -56,6 +56,8 @@ struct _PyInterpreterFrame {
     /* One mutually exclusive generated-dataclass or interpreter activation.
      * This metadata edge retires before ordinary escaped-frame promotion. */
     PyObject *soac_checked_activation;
+    uint8_t soac_source_authority; /* Authenticated actual captured source code. */
+    uint8_t soac_owner_checked; /* Binding/closure checks completed for this frame. */
 #if !defined(Py_GIL_DISABLED) && defined(Py_STACKREF_DEBUG)
     /* Diagnostic-only borrowed view of f_executable. Signal/watchdog dumps
      * cannot consult the mutable debug handle table or an attached tstate.

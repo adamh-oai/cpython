@@ -13,10 +13,10 @@ struct _PySoacInterpreterCallV1;
 extern int _PySOAC_DataclassBeginRoot(PyObject *, unsigned int, PyObject *);
 extern int _PySOAC_DataclassAttachRoot(
     PyObject **, unsigned int, _PyInterpreterFrame *,
-    _PyInterpreterFrame *, const _Py_CODEUNIT *, struct _PySoacInterpreterCallV1 *);
+    _PyInterpreterFrame *, const _Py_CODEUNIT *, struct _PySoacInterpreterCallV1 *, uint64_t);
 extern void _PySOAC_DataclassTakeRoot(
     _PyInterpreterFrame *, PyObject **, unsigned int *,
-    _PyInterpreterFrame **, const _Py_CODEUNIT **, struct _PySoacInterpreterCallV1 **);
+    _PyInterpreterFrame **, const _Py_CODEUNIT **, struct _PySoacInterpreterCallV1 **, uint64_t *);
 extern int _PySOAC_DataclassFinishRoot(PyObject *, unsigned int, PyObject *);
 extern PyObject *_PySOAC_DataclassRootOwner(PyObject *);
 extern void _PySOAC_DataclassReleaseRoot(PyObject *);

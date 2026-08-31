@@ -1130,6 +1130,9 @@ codegen_make_closure(compiler *c, location loc,
     if (flags & MAKE_FUNCTION_DEFAULTS) {
         ADDOP_I(c, loc, SET_FUNCTION_ATTRIBUTE, MAKE_FUNCTION_DEFAULTS);
     }
+    if (FUTURE_FEATURES(c) & CO_FUTURE_STRICT) {
+        ADDOP(c, loc, SOAC_END_FUNCTION_BIRTH);
+    }
     return SUCCESS;
 }
 
@@ -1615,6 +1618,7 @@ codegen_function(compiler *c, stmt_ty s, int is_async)
         type_params = s->v.FunctionDef.type_params;
     }
 
+    if (FUTURE_FEATURES(c) & CO_FUTURE_STRICT) ADDOP(c, LOC(s), SOAC_BEGIN_DEFINITION);
     RETURN_IF_ERROR(codegen_decorators(c, decos));
 
     firstlineno = s->lineno;
@@ -1863,6 +1867,7 @@ codegen_class(compiler *c, stmt_ty s)
 {
     asdl_expr_seq *decos = s->v.ClassDef.decorator_list;
 
+    if (FUTURE_FEATURES(c) & CO_FUTURE_STRICT) ADDOP(c, LOC(s), SOAC_BEGIN_DEFINITION);
     RETURN_IF_ERROR(codegen_decorators(c, decos));
 
     int firstlineno = s->lineno;

@@ -527,6 +527,8 @@ init_code(PyCodeObject *co, struct _PyCodeConstructor *con)
     _PyUnicode_InternMortal(interp, &co->co_qualname);
     co->co_flags = con->flags;
     co->_co_soac_strict_source_id = 0;
+    co->_co_soac_scope_kind = UINT8_MAX;
+    co->_co_soac_sites = NULL;
 
     co->co_firstlineno = con->firstlineno;
     co->co_linetable = Py_NewRef(con->linetable);
@@ -2419,6 +2421,7 @@ code_dealloc(PyObject *self)
 #endif
 
     _PyFunction_ClearCodeByVersion(co->co_version);
+    PyMem_Free(co->_co_soac_sites);
     if (co->co_extra != NULL) {
         PyInterpreterState *interp = _PyInterpreterState_GET();
         _PyCodeObjectExtra *co_extra = co->co_extra;

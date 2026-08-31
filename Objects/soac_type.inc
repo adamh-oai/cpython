@@ -201,6 +201,19 @@ soac_constructor_live(PyTypeObject *type)
     return 0;
 }
 
+void
+PyType_AbandonSoacPendingV1(PyObject *object, PyObject *expected_owner)
+{
+    if (object == NULL || expected_owner == NULL || !PyType_Check(object)) return;
+    SoacTypeContract *state = soac_type_state((PyTypeObject *)object);
+    if (state != NULL && state->owner == expected_owner &&
+        state->interpreter == _PyInterpreterState_GET() &&
+        !state->terminal && soac_has_pending_construction(state) &&
+        (state->phase == Py_SOAC_TYPE_STATE_PENDING || state->phase == Py_SOAC_TYPE_STATE_ADMITTING)) {
+        soac_fail_construction(state->construction);
+    }
+}
+
 /* A pending/failed type is denied before any allocation or header write.
  * Actual MRO and solid-base links also cover inherited C allocation paths.
  * Neither a public function pointer nor source metadata grants admission. */

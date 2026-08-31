@@ -1571,6 +1571,8 @@ init_threadstate(_PyThreadStateImpl *_tstate,
     _tstate->base_frame.soac_dataclass_role = 0;
     _tstate->base_frame.soac_dataclass_invocation = NULL;
     _tstate->base_frame.soac_checked_activation = NULL;
+    _tstate->base_frame.soac_source_authority = 0;
+    _tstate->base_frame.soac_owner_checked = 0;
 #ifdef Py_DEBUG
     _tstate->base_frame.lltrace = 0;
 #endif

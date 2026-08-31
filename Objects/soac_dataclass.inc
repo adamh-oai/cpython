@@ -43,6 +43,7 @@ typedef struct {
     _PyInterpreterFrame *root_frame, *root_caller;
     const _Py_CODEUNIT *root_instruction;
     struct _PySoacInterpreterCallV1 *root_deferred;
+    uint64_t root_context_activation_id;
     unsigned int root_stage;
     SoacDataclassRootTransport root_transport;
 } SoacDataclassInvocation;
@@ -369,6 +370,7 @@ PySoac_NewDataclassInvocation(PyObject *owner)
     invocation->root_frame = invocation->root_caller = NULL;
     invocation->root_instruction = NULL;
     invocation->root_deferred = NULL;
+    invocation->root_context_activation_id = 0;
     invocation->root_stage = 0;
     invocation->root_transport = SOAC_DC_ROOT_INACTIVE;
     PyObject_GC_Track(invocation);
@@ -725,7 +727,7 @@ int
 _PySOAC_DataclassAttachRoot(
     PyObject **owned, unsigned int stage, _PyInterpreterFrame *frame,
     _PyInterpreterFrame *caller, const _Py_CODEUNIT *instruction,
-    struct _PySoacInterpreterCallV1 *deferred)
+    struct _PySoacInterpreterCallV1 *deferred, uint64_t context_activation_id)
 {
     if (owned == NULL || *owned == NULL || caller == NULL || instruction == NULL ||
         frame == NULL || frame->soac_dataclass_invocation != NULL)
@@ -744,6 +746,7 @@ _PySOAC_DataclassAttachRoot(
     invocation->root_caller = caller;
     invocation->root_instruction = instruction;
     invocation->root_deferred = deferred;
+    invocation->root_context_activation_id = context_activation_id;
     return 0;
 }
 
@@ -751,7 +754,7 @@ void
 _PySOAC_DataclassTakeRoot(
     _PyInterpreterFrame *frame, PyObject **owned, unsigned int *stage,
     _PyInterpreterFrame **caller, const _Py_CODEUNIT **instruction,
-    struct _PySoacInterpreterCallV1 **deferred)
+    struct _PySoacInterpreterCallV1 **deferred, uint64_t *context_activation_id)
 {
     *owned = NULL;
     PyObject *object = frame->soac_dataclass_invocation;
@@ -764,11 +767,13 @@ _PySOAC_DataclassTakeRoot(
     *caller = invocation->root_caller;
     *instruction = invocation->root_instruction;
     *deferred = invocation->root_deferred;
+    *context_activation_id = invocation->root_context_activation_id;
     /* All borrowed frame/C coordinates disappear BEFORE native frame unlink,
      * clear, ownership transfer to a frame object, or any local decref. */
     invocation->root_frame = invocation->root_caller = NULL;
     invocation->root_instruction = NULL;
     invocation->root_deferred = NULL;
+    invocation->root_context_activation_id = 0;
     frame->soac_dataclass_invocation = NULL;
     frame->soac_dataclass_role = 0;
 }
@@ -819,6 +824,7 @@ _PySOAC_DataclassReleaseRoot(PyObject *object)
     invocation->root_caller = NULL;
     invocation->root_instruction = NULL;
     invocation->root_deferred = NULL;
+    invocation->root_context_activation_id = 0;
     if (invocation->phase >= SOAC_DC_COMPLETE)
         soac_dataclass_expire(invocation, invocation->phase);
 }

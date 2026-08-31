@@ -62,8 +62,8 @@ static inline PyCodeObject *_PyFrame_GetCode(_PyInterpreterFrame *f) {
 }
 
 /* All native entries, including specialized frame pushes and generator
-   throw, require the actual ordinary frame's checked activation.
-   Code identity alone is no grant. */
+   throw, validate the actual function and module liveness guards. A metadata
+   activation exists only during a real construction event or namespace. */
 static inline int
 _PyFrame_CheckSoacExecution(_PyInterpreterFrame *frame)
 {
@@ -200,9 +200,13 @@ static inline void _PyFrame_Copy(_PyInterpreterFrame *src, _PyInterpreterFrame *
     dest->soac_dataclass_role = src->soac_dataclass_role;
     dest->soac_dataclass_invocation = src->soac_dataclass_invocation;
     dest->soac_checked_activation = src->soac_checked_activation;
+    dest->soac_source_authority = src->soac_source_authority;
+    dest->soac_owner_checked = src->soac_owner_checked;
     src->soac_dataclass_role = 0;
     src->soac_dataclass_invocation = NULL;
     src->soac_checked_activation = NULL;
+    src->soac_source_authority = 0;
+    src->soac_owner_checked = 0;
 #ifdef Py_GIL_DISABLED
     dest->tlbc_index = src->tlbc_index;
 #endif
@@ -266,6 +270,8 @@ _PyFrame_Initialize(
     frame->soac_dataclass_role = 0;
     frame->soac_dataclass_invocation = NULL;
     frame->soac_checked_activation = NULL;
+    frame->soac_source_authority = 0;
+    frame->soac_owner_checked = 0;
 #ifdef Py_DEBUG
     frame->lltrace = 0;
 #endif
@@ -451,6 +457,8 @@ _PyFrame_PushTrampolineUnchecked(PyThreadState *tstate, PyCodeObject *code, int 
     frame->soac_dataclass_role = 0;
     frame->soac_dataclass_invocation = NULL;
     frame->soac_checked_activation = NULL;
+    frame->soac_source_authority = 0;
+    frame->soac_owner_checked = 0;
 #ifdef Py_DEBUG
     frame->lltrace = 0;
 #endif

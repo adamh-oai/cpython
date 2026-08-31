@@ -460,6 +460,10 @@ PyAPI_FUNC(int) PyType_AdmitSoacPendingV1(
  * unresolved barrier, never grants admission or revokes an enforced type.
  * Preserve incoming PyErr exactly; already FAILED is idempotent. */
 PyAPI_FUNC(int) PyType_FailSoacPendingV1(PyObject *root_construction);
+/* GC-safe abandoned-definition cleanup. Borrowed actual type/owner only;
+ * no allocation, reference changes, callbacks or PyErr changes. Invalid or
+ * already resolved arguments do nothing; an unfinished matching lineage fails. */
+PyAPI_FUNC(void) PyType_AbandonSoacPendingV1(PyObject *actual_type, PyObject *expected_owner);
 
 /* Only after native final admission succeeded in this exact lineage; never
  * the selected final type; no prior own permanent type contract. Keep ordinary

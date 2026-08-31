@@ -771,9 +771,11 @@ _Py_VectorCallInstrumentation_StackRefSteal(
     if (kwnames_o != NULL) {
         positional_args -= (int)PyTuple_GET_SIZE(kwnames_o);
     }
-    res = _PySOAC_InterpreterCallVector(
-        soac_call, frame, this_instr, callable_o, args_o,
-        positional_args | PY_VECTORCALL_ARGUMENTS_OFFSET, kwnames_o);
+    res = soac_call != NULL
+        ? _PySOAC_InterpreterCallVector(soac_call, frame, this_instr, callable_o,
+            args_o, positional_args | PY_VECTORCALL_ARGUMENTS_OFFSET, kwnames_o)
+        : _PySOAC_DataclassVectorcallFromFrame(frame, callable_o, args_o,
+            positional_args | PY_VECTORCALL_ARGUMENTS_OFFSET, kwnames_o);
     STACKREFS_TO_PYOBJECTS_CLEANUP(args_o);
     if (call_instrumentation) {
         PyObject* arg = total_args == 0 ?
@@ -1246,6 +1248,8 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int 
     entry.frame.soac_dataclass_role = 0;
     entry.frame.soac_dataclass_invocation = NULL;
     entry.frame.soac_checked_activation = NULL;
+    entry.frame.soac_source_authority = 0;
+    entry.frame.soac_owner_checked = 0;
     entry.frame.return_offset = 0;
 #ifdef Py_DEBUG
     entry.frame.lltrace = 0;
@@ -2274,7 +2278,7 @@ eval_vector_with_dataclass(PyThreadState *tstate, PyFunctionObject *func,
     if (soac_call != NULL &&
         _PySOAC_DataclassAttachRoot(&soac_call->decision.metadata,
             soac_call->decision.dataclass_stage, frame,
-            soac_call->caller, soac_call->instruction, soac_call) < 0) {
+            soac_call->caller, soac_call->instruction, soac_call, 0) < 0) {
         _PySOAC_InterpreterCallBindingFailed(soac_call);
         _PyEval_FrameClearAndPop(tstate, frame);
         return NULL;

@@ -30,10 +30,11 @@ enum {
 
 enum {
     SOAC_IP_ROOT_BEGIN = 1, SOAC_IP_ROOT_END, SOAC_IP_BIRTH,
-    SOAC_IP_ENTER, SOAC_IP_RETURN = 6, SOAC_IP_LEAVE,
+    SOAC_IP_ENTER, SOAC_IP_LEAVE = 7,
     SOAC_IP_PREPARE_TYPE, SOAC_IP_BIND_TYPE, SOAC_IP_COMPLETE,
-    SOAC_IP_ATTRIBUTE, SOAC_IP_STARTED, SOAC_IP_FAILED,
-    SOAC_IP_CALL, SOAC_IP_SELECTED_FINISHED
+    SOAC_IP_ATTRIBUTE, SOAC_IP_STARTED,
+    SOAC_IP_CALL = 14, SOAC_IP_SELECTED_FINISHED,
+    SOAC_IP_DEFINITION_END, SOAC_IP_DEFINITION_ABORT, SOAC_IP_CHECK_ENTRY
 };
 
 typedef struct {
@@ -77,6 +78,7 @@ typedef struct {
     PyObject *probe;              /* Explicit test observer; no hidden value log. */
     PyObject *empty;
     PyObject *protected_names;
+    PyObject *execution_guard;    /* Module lifetime, no function/code edge. */
     /* Callback-free weak witnesses only, never function or owner primaries. */
     Py_ssize_t pending_count;
     PyObject *pending[SOAC_IP_MAX_PENDING];
@@ -87,6 +89,7 @@ typedef struct {
     int overflow;
     unsigned int call_fault; /* Trusted test decision corruption, never source policy. */
     int class_decision;       /* Closed test-only Enforced / Dynamic decision. */
+    int select_all_calls;     /* Explicit raw operand-view test coverage only. */
     Py_ssize_t serial, node_count, site_count, event_count;
     SoacInterpreterTestNode nodes[SOAC_IP_MAX_NODES];
     SoacInterpreterTestSite sites[SOAC_IP_MAX_SITES];
@@ -110,8 +113,8 @@ typedef struct {
     SoacInterpreterFixture *fixture;
     Py_ssize_t node;
     uintptr_t function;          /* Comparison only, NEVER dereference later. */
-    PyObject *self_weak, *provider_weak;
-    Py_ssize_t birth_serial;
+    PyObject *self_weak, *provider_weak, *guard;
+    Py_ssize_t birth_serial, completion_serial;
     int pending, terminal;
 } SoacInterpreterTestFunction;
 
@@ -219,8 +222,9 @@ soac_ip_info(const PySoacInterpreterFrameViewV1 *view,
     return 0;
 }
 
-/* Record only the native invocation's scalar identity, never its frame,
- * function, code or operands. ENTER deliberately has no authority yet. */
+/* Record only the native event's scalar identity, never its frame, function,
+ * code or operands. Lazy FUNCTION enter already has source authority;
+ * ROOT/CLASS_NAMESPACE enter still precedes its grant. */
 static void
 soac_ip_event_frame(SoacInterpreterTestEvent *event,
                     const PySoacInterpreterFrameInfoV2 *info)
@@ -296,6 +300,7 @@ soac_ip_fixture_traverse(SoacInterpreterFixture *fixture, visitproc visit, void 
     Py_VISIT(fixture->probe);
     Py_VISIT(fixture->empty);
     Py_VISIT(fixture->protected_names);
+    Py_VISIT(fixture->execution_guard);
     for (Py_ssize_t i = 0; i < fixture->pending_count; i++) {
         Py_VISIT(fixture->pending[i]);
     }
@@ -308,6 +313,10 @@ soac_ip_fixture_clear(SoacInterpreterFixture *fixture)
     fixture->root_phase = 3;
     fixture->source_id = 0;
     fixture->module = fixture->globals = fixture->root_code = 0;
+    if (fixture->execution_guard != NULL) {
+        (void)PySoac_InvalidateInterpreterExecutionGuardV1(fixture->execution_guard);
+    }
+    Py_CLEAR(fixture->execution_guard);
     Py_CLEAR(fixture->probe);
     Py_CLEAR(fixture->empty);
     Py_CLEAR(fixture->protected_names);
@@ -357,6 +366,7 @@ soac_ip_function_traverse(SoacInterpreterTestFunction *record, visitproc visit, 
     Py_VISIT(record->fixture);
     Py_VISIT(record->self_weak);
     Py_VISIT(record->provider_weak);
+    Py_VISIT(record->guard);
     return 0;
 }
 
@@ -367,6 +377,10 @@ soac_ip_function_clear(SoacInterpreterTestFunction *record)
     record->function = 0;
     record->terminal = 1;
     record->pending = 0;
+    if (record->guard != NULL) {
+        (void)PySoac_InterpreterFunctionInvalidateV1(record->guard);
+    }
+    Py_CLEAR(record->guard);
     Py_CLEAR(record->self_weak);
     Py_CLEAR(record->provider_weak);
     Py_CLEAR(record->fixture);
@@ -434,6 +448,9 @@ soac_ip_root_end(PyObject *owner, int succeeded)
 {
     SoacInterpreterFixture *fixture = (SoacInterpreterFixture *)owner;
     fixture->root_phase = succeeded ? 2 : 3;
+    if (!succeeded) {
+        (void)PySoac_InvalidateInterpreterExecutionGuardV1(fixture->execution_guard);
+    }
     SoacInterpreterTestEvent *event = soac_ip_event(fixture, SOAC_IP_ROOT_END, 0, 0);
     if (event != NULL) event->aux = succeeded != 0;
 }
@@ -469,14 +486,18 @@ soac_ip_birth(const PySoacInterpreterFrameViewV1 *parent, PyObject *function,
     record->node = node;
     record->function = (uintptr_t)function;
     record->birth_serial = state->serial;
+    record->completion_serial = state->serial;
     record->pending = 1;
     record->terminal = 0;
     record->self_weak = NULL;
     record->provider_weak = Py_NewRef(Py_None);
+    record->guard = PySoac_GetInterpreterFunctionGuardV1(function);
     /* Native already initialized func_weakreflist and owns the fresh function.
      * Allocation is at Birth, never at the actual attribute publication seam. */
     record->self_weak = PyWeakref_NewRef(function, NULL);
-    if (record->self_weak == NULL || fixture->pending_count == SOAC_IP_MAX_PENDING) {
+    if (record->self_weak == NULL || record->guard == NULL ||
+        PySoac_BindInterpreterFunctionExecutionV1(record->guard, fixture->execution_guard) < 0 ||
+        fixture->pending_count == SOAC_IP_MAX_PENDING) {
         if (!PyErr_Occurred()) {
             PyErr_SetString(PyExc_OverflowError, "interpreter fixture pending buffer overflow");
         }
@@ -558,7 +579,7 @@ soac_ip_function_attribute(const PySoacInterpreterFrameViewV1 *parent,
  * seals exact published functions; failure never terminalizes those owners.
  * The installed callback table is GIL-only. No strong weak-target acquisition
  * and no Python callback may occur between this supported weak read and use. */
-static void
+static int
 soac_ip_complete_pending(SoacInterpreterTestCall *state, int failed)
 {
     SoacInterpreterFixture *fixture = state->fixture;
@@ -570,13 +591,17 @@ soac_ip_complete_pending(SoacInterpreterTestCall *state, int failed)
         PyObject *owner = PyFunction_GetSoacStrictOwner(function);
         if (owner == NULL || !Py_IS_TYPE(owner, &SoacInterpreterTestFunction_Type)) continue;
         SoacInterpreterTestFunction *record = (SoacInterpreterTestFunction *)owner;
-        if (record->fixture != fixture || record->birth_serial != state->serial ||
+        if (record->fixture != fixture || record->completion_serial != state->serial ||
             !record->pending || record->terminal ||
             record->function != (uintptr_t)function ||
             PyFunction_GetSoacStrictId(function) != 0) continue;
         record->pending = 0;
         record->terminal = failed != 0;
+        int status = failed ? PySoac_InterpreterFunctionInvalidateV1(record->guard)
+                            : PySoac_InterpreterFunctionReadyV1(record->guard);
+        if (status < 0) return -1;
     }
+    return 0;
 }
 
 static int
@@ -623,24 +648,16 @@ soac_ip_enter(uint32_t kind, PyObject *owner,
     if (fixture->root_phase == 3) {
         return soac_ip_error("interpreter fixture module initialization failed");
     }
-    /* STRICT_MODULES permits an unchecked/unsealed function's ordinary-code
-     * replacement during initialization. Its permanent birth owner still
-     * authenticates this call; it does NOT make ordinary code a source node.
-     * Native keeps a non-source activation and suppresses Birth/Store/class
-     * source propagation for it. Sealing later freezes that chosen ordinary
-     * code; it does not retroactively make calls to it forbidden. */
-    int ordinary_replacement =
-        record != NULL && kind == Py_SOAC_INTERPRETER_FUNCTION &&
-        fixture->nodes[record->node].kind == Py_SOAC_INTERPRETER_FUNCTION &&
-        (uintptr_t)info.code != fixture->nodes[record->node].code &&
-        !(((PyCodeObject *)info.code)->co_flags & CO_FUTURE_STRICT) &&
-        PyCode_GetSoacStrictSourceId(info.code) == 0;
-    Py_ssize_t node = ordinary_replacement ? record->node : soac_ip_node(fixture, info.code);
+    /* A FUNCTION context starts at a real construction event after ordinary
+     * VM entry. Ordinary code replacements never acquire a source context. */
+    int lazy_function = kind == Py_SOAC_INTERPRETER_FUNCTION;
+    Py_ssize_t node = soac_ip_node(fixture, info.code);
     if (node < 0 || (record != NULL && record->node != node) ||
         kind != fixture->nodes[node].kind ||
         (uintptr_t)info.globals != fixture->globals ||
-        info.phase != Py_SOAC_INTERPRETER_BINDING || info.call_state != NULL ||
-        info.kind != kind || info.source_authority != 0) {
+        info.phase != (lazy_function ? Py_SOAC_INTERPRETER_RUNNING : Py_SOAC_INTERPRETER_BINDING) ||
+        info.call_state != NULL || info.kind != kind ||
+        info.source_authority != (uint32_t)lazy_function) {
         return soac_ip_error("interpreter fixture entry has wrong frame/kind/phase");
     }
     if (kind != Py_SOAC_INTERPRETER_ROOT &&
@@ -668,13 +685,12 @@ soac_ip_enter(uint32_t kind, PyObject *owner,
     state->interpreter_id = info.interpreter_id;
     state->activation_id = info.activation_id;
     state->kind = kind;
-    state->source_authority = ordinary_replacement == 0;
-    state->phase = Py_SOAC_INTERPRETER_BINDING;
+    state->source_authority = 1;
+    state->phase = info.phase;
     PyObject_GC_Track(state);
     SoacInterpreterTestEvent *event = soac_ip_event(fixture, SOAC_IP_ENTER, node, state->serial);
     soac_ip_event_frame(event, &info);
     if (event != NULL) {
-        event->aux = ordinary_replacement != 0;
         event->value = (uintptr_t)info.code; /* Captured frame code; scalar only. */
     }
     if (soac_ip_probe(fixture, SOAC_IP_ENTER, node, state->serial) < 0) {
@@ -688,70 +704,128 @@ soac_ip_enter(uint32_t kind, PyObject *owner,
 }
 
 static int
-soac_ip_returned(PyObject *object, const PySoacInterpreterFrameViewV1 *view,
-                 PyObject *result)
+soac_ip_check_entry(PyObject *owner, const PySoacInterpreterFrameViewV1 *view)
 {
-    SoacInterpreterTestCall *state = soac_ip_call(object);
     PySoacInterpreterFrameInfoV2 info;
-    if (state == NULL || soac_ip_info(view, &info) < 0) return -1;
-    if (state->phase != Py_SOAC_INTERPRETER_RUNNING ||
-        info.phase != Py_SOAC_INTERPRETER_RETURNING || info.call_state != object ||
-        result == NULL || PyErr_Occurred()) {
-        return soac_ip_error("interpreter fixture return was repeated or has a body error");
+    /* A cold entry has no construction activation, so zero activation_id is
+     * required here instead of using the live-event info helper. */
+    if (PySoac_GetInterpreterFrameInfoV2(view, &info, sizeof(info)) < 0) return -1;
+    SoacInterpreterTestFunction *record = soac_ip_function(info.function);
+    if (record == NULL) return -1;
+    SoacInterpreterFixture *fixture = record->fixture;
+    int original = (uintptr_t)info.code == fixture->nodes[record->node].code;
+    if (owner != (PyObject *)record || fixture->root_phase == 3 ||
+        info.phase != Py_SOAC_INTERPRETER_BINDING || info.call_state != NULL ||
+        info.activation_id != 0 || info.kind != Py_SOAC_INTERPRETER_FUNCTION ||
+        (uintptr_t)info.globals != fixture->globals ||
+        (!original && ((((PyCodeObject *)info.code)->co_flags & CO_FUTURE_STRICT) ||
+                       PyCode_GetSoacStrictSourceId(info.code) != 0))) {
+        return soac_ip_error("interpreter fixture cold entry has foreign actual ownership");
     }
-    state->phase = Py_SOAC_INTERPRETER_RETURNING; /* Before probe/reentry. */
-    SoacInterpreterFixture *fixture = state->fixture;
-    SoacInterpreterTestEvent *event = soac_ip_event(fixture, SOAC_IP_RETURN, state->node, state->serial);
+    SoacInterpreterTestEvent *event = soac_ip_event(
+        fixture, SOAC_IP_CHECK_ENTRY, record->node, 0);
     if (event == NULL) return soac_ip_error("interpreter fixture overflow");
     soac_ip_event_frame(event, &info);
-    event->value = (uintptr_t)result;
-    event->refcount = Py_REFCNT(result);
-    event->units = info.instruction_units;
-    event->ordinal = info.instruction_ordinal;
-    if (soac_ip_probe(fixture, SOAC_IP_RETURN, state->node, state->serial) < 0) {
-        PyObject *error = PyErr_GetRaisedException();
-        soac_ip_complete_pending(state, 1);
-        PyErr_SetRaisedException(error);
-        return -1;
+    event->aux = !original;
+    event->value = (uintptr_t)info.code;
+    return soac_ip_probe(fixture, SOAC_IP_CHECK_ENTRY, record->node, 0);
+}
+
+static int
+soac_ip_definition_end(const PySoacInterpreterFrameViewV1 *view,
+                       PyObject *function, uint32_t complete_context,
+                       const PySoacInterpreterFrameViewV1 *completion_parent)
+{
+    PySoacInterpreterFrameInfoV2 info;
+    if (soac_ip_info(view, &info) < 0) return -1;
+    SoacInterpreterTestCall *state = soac_ip_call(info.call_state);
+    if (state == NULL) return -1;
+    SoacInterpreterFixture *fixture = state->fixture;
+    SoacInterpreterTestEvent *event = soac_ip_event(
+        fixture, SOAC_IP_DEFINITION_END, state->node, state->serial);
+    soac_ip_event_frame(event, &info);
+    if (event != NULL) {
+        event->value = (uintptr_t)function;
+        event->aux = complete_context;
     }
-    soac_ip_complete_pending(state, 0);
+    if (soac_ip_probe(fixture, SOAC_IP_DEFINITION_END, state->node, state->serial) < 0)
+        return -1;
+    if (complete_context > 2 || (complete_context == 2) != (completion_parent != NULL))
+        return soac_ip_error("fixture birth completion has an invalid parent role");
+    if (complete_context == 2) {
+        PySoacInterpreterFrameInfoV2 parent_info;
+        if (soac_ip_info(completion_parent, &parent_info) < 0) return -1;
+        SoacInterpreterTestCall *parent = soac_ip_call(parent_info.call_state);
+        if (parent == NULL || parent->fixture != fixture)
+            return soac_ip_error("fixture generic completion parent changed");
+        const SoacInterpreterTestCallSite *site = NULL;
+        for (Py_ssize_t i = 0; i < fixture->call_count; i++) {
+            if (fixture->calls[i].node == parent->node &&
+                fixture->calls[i].ordinal == parent_info.instruction_ordinal)
+                site = &fixture->calls[i];
+        }
+        if (site == NULL || site->role != Py_SOAC_CALL_GENERIC_SCOPE ||
+            site->definition_node != state->node)
+            return soac_ip_error("fixture generic completion lacks its exact CALL edge");
+        if (function != NULL && PyFunction_Check(function)) {
+            SoacInterpreterTestFunction *record = soac_ip_function(function);
+            if (record == NULL || record->fixture != fixture ||
+                record->completion_serial != state->serial)
+                return soac_ip_error("fixture generic result has foreign birth ownership");
+            record->completion_serial = parent->serial;
+        }
+        return soac_ip_complete_pending(state, 0);
+    }
+    if (function != NULL) {
+        SoacInterpreterTestFunction *record = soac_ip_function(function);
+        if (record == NULL || record->fixture != fixture ||
+            record->birth_serial != state->serial) return -1;
+        /* Named definitions wait for COMPLETE. Lambdas and compiler-created
+         * providers finish at the actual post-attribute birth event. */
+        int named = 0;
+        for (Py_ssize_t i = 0; i < fixture->site_count; i++) {
+            if (fixture->sites[i].definition_node == record->node) named = 1;
+        }
+        if (!named) {
+            record->pending = 0;
+            return PySoac_InterpreterFunctionReadyV1(record->guard);
+        }
+    }
     return 0;
 }
 
 static int
-soac_ip_failed(PyObject *object, const PySoacInterpreterFrameViewV1 *view)
+soac_ip_definition_abort(const PySoacInterpreterFrameViewV1 *view)
 {
-    SoacInterpreterTestCall *state = soac_ip_call(object);
     PySoacInterpreterFrameInfoV2 info;
-    if (state == NULL || soac_ip_info(view, &info) < 0) return -1;
-    if (info.call_state != object || info.phase != Py_SOAC_INTERPRETER_FAILING ||
-        state->phase == Py_SOAC_INTERPRETER_FAILING ||
-        state->phase == Py_SOAC_INTERPRETER_RETIRED || PyErr_Occurred()) {
-        return soac_ip_error("interpreter failure completion has a repeated or attached primary error");
-    }
-    state->phase = Py_SOAC_INTERPRETER_FAILING; /* Before any probe/reentry. */
+    if (soac_ip_info(view, &info) < 0) return -1;
+    SoacInterpreterTestCall *state = soac_ip_call(info.call_state);
+    if (state == NULL) return -1;
     SoacInterpreterTestEvent *event = soac_ip_event(
-        state->fixture, SOAC_IP_FAILED, state->node, state->serial);
+        state->fixture, SOAC_IP_DEFINITION_ABORT, state->node, state->serial);
     soac_ip_event_frame(event, &info);
-    if (event != NULL) {
-        event->units = info.instruction_units;
-        event->ordinal = info.instruction_ordinal;
-        }
-    int status = soac_ip_probe(state->fixture, SOAC_IP_FAILED, state->node, state->serial);
-    if (status < 0) {
-        PyObject *secondary = PyErr_GetRaisedException();
-        soac_ip_complete_pending(state, 1);  /* Before the native unraisable hook. */
-        PyErr_SetRaisedException(secondary);
-        return -1;
-    }
-    soac_ip_complete_pending(state, 0);
-    return 0;
+    if (soac_ip_complete_pending(state, 1) < 0) return -1;
+    return soac_ip_probe(state->fixture, SOAC_IP_DEFINITION_ABORT, state->node, state->serial);
 }
 
 static void
-soac_ip_leave(PyObject *object, uint32_t reason)
+soac_ip_leave(PyObject *object, uint32_t reason,
+              int64_t interpreter_id, uint64_t activation_id)
 {
     SoacInterpreterTestCall *state = (SoacInterpreterTestCall *)object;
+    if (state->interpreter_id != interpreter_id || state->activation_id != activation_id)
+        state->fixture->overflow = 1;
+    if (reason != Py_SOAC_INTERPRETER_RETURNED &&
+        reason != Py_SOAC_INTERPRETER_NAMESPACE_TRANSFERRED) {
+        /* Supported live weak witnesses and guard transitions invoke no Python.
+         * Preserve any existing exception even on an invalid fixture invariant. */
+        PyObject *primary = PyErr_GetRaisedException();
+        if (soac_ip_complete_pending(state, 1) < 0) {
+            state->fixture->overflow = 1;
+            PyErr_Clear();
+        }
+        PyErr_SetRaisedException(primary);
+    }
     state->phase = Py_SOAC_INTERPRETER_RETIRED;
     SoacInterpreterTestEvent *event = soac_ip_event(
         state->fixture, SOAC_IP_LEAVE, state->node, state->serial);
@@ -963,14 +1037,17 @@ soac_ip_complete(const PySoacInterpreterFrameViewV1 *view, PyObject *value)
                     /* Exact original code OR the documented permitted unchecked
                      * ordinary replacement; never transplant donor authority. */
                     int status = PyFunction_SealSoacStrict(value, (uint64_t)record->node + 1);
-                    if (status == 0) record->pending = 0;
-                    return status;
+                    if (status == 0) {
+                        record->pending = 0;
+                        status = PySoac_InterpreterFunctionReadyV1(record->guard);
+                    }
+                    return status < 0 ? status : soac_ip_complete_pending(state, 0);
                 }
             }
         }
         /* Decorator replacement does not revoke original installed policy.
          * The real Rust pending registry must finalize abandoned originals. */
-        return PyErr_Occurred() ? -1 : 0;
+        return PyErr_Occurred() ? -1 : soac_ip_complete_pending(state, 0);
     }
     if (site->origin == Py_SOAC_BINDING_CLASS && PyType_Check(value)) {
         PyObject *owner = PyType_GetSoacContractOwner(value);
@@ -979,12 +1056,13 @@ soac_ip_complete(const PySoacInterpreterFrameViewV1 *view, PyObject *value)
             if (class_state == NULL) return -1;
             if (class_state->fixture == fixture &&
                 class_state->node == site->definition_node) {
-                return PyType_SealSoacContract(value, owner);
+                int status = PyType_SealSoacContract(value, owner);
+                return status < 0 ? status : soac_ip_complete_pending(state, 0);
             }
         }
-        return PyErr_Occurred() ? -1 : 0;
+        return PyErr_Occurred() ? -1 : soac_ip_complete_pending(state, 0);
     }
-    return 0;
+    return soac_ip_complete_pending(state, 0);
 }
 
 
@@ -1163,16 +1241,18 @@ soac_ip_selected_finished(PyObject *object, const PySoacInterpreterFrameViewV1 *
 }
 #endif
 
-static const PySoacInterpreterCallbacksV3 soac_ip_callbacks = {
-    .abi_version = Py_SOAC_INTERPRETER_CALLBACKS_ABI_V3,
+static const PySoacInterpreterCallbacksV4 soac_ip_callbacks = {
+    .abi_version = Py_SOAC_INTERPRETER_CALLBACKS_ABI_V4,
     .root_begin = soac_ip_root_begin, .root_end = soac_ip_root_end,
     .birth = soac_ip_birth, .function_attribute = soac_ip_function_attribute,
     .enter = soac_ip_enter, .started = soac_ip_started,
 #ifdef Py_SOAC_INTERPRETER_CALL_ABI_V1
     .call = soac_ip_select_call, .selected_call_finished = soac_ip_selected_finished,
 #endif
-    .returned = soac_ip_returned, .failed = soac_ip_failed, .leave = soac_ip_leave,
+    .leave = soac_ip_leave,
     .prepare_type = soac_ip_prepare_type, .definition_complete = soac_ip_complete,
+    .check_entry = soac_ip_check_entry, .definition_end = soac_ip_definition_end,
+    .definition_abort = soac_ip_definition_abort,
 };
 
 /* Cold fixture setup only. Actual native Details supplies one code-node tree
@@ -1477,15 +1557,58 @@ soac_ip_read_calls(SoacInterpreterFixture *fixture, PyObject *nodes, PyObject *t
     return 0;
 }
 
+static int
+soac_ip_event_compare(const void *left, const void *right)
+{
+    uint32_t a = ((const PySoacInterpreterCodeEventV1 *)left)->instruction_ordinal;
+    uint32_t b = ((const PySoacInterpreterCodeEventV1 *)right)->instruction_ordinal;
+    return (a > b) - (a < b);
+}
+
+static int
+soac_ip_install_events(SoacInterpreterFixture *fixture, PyObject *nodes, PyObject *tables)
+{
+    for (Py_ssize_t n = 0; n < fixture->node_count; n++) {
+        PySoacInterpreterCodeEventV1 events[SOAC_IP_MAX_SITES];
+        size_t count = 0;
+        PyObject *calls = PyTuple_GET_ITEM(PyTuple_GET_ITEM(tables, n), 5);
+        for (Py_ssize_t r = 0; r < PyTuple_GET_SIZE(calls); r++) {
+            PyObject *row = PyTuple_GET_ITEM(calls, r);
+            PyObject *emissions = PyTuple_GET_ITEM(row, 1);
+            for (Py_ssize_t e = 0; e < PyTuple_GET_SIZE(emissions); e++) {
+                PyObject *emission = PyTuple_GET_ITEM(emissions, e);
+                if (!soac_ip_tuple(emission, 6))
+                    return soac_ip_error("fixture CALL event emission malformed");
+                Py_ssize_t ordinal = PyLong_AsSsize_t(PyTuple_GET_ITEM(emission, 0));
+                if (PyErr_Occurred() || ordinal < 0 || ordinal > UINT32_MAX) return -1;
+                if (!fixture->select_all_calls && soac_ip_call_site(fixture, n, ordinal) == NULL)
+                    continue;
+                if (count == SOAC_IP_MAX_SITES)
+                    return soac_ip_error("fixture CALL event capacity exceeded");
+                events[count++] = (PySoacInterpreterCodeEventV1){
+                    .instruction_ordinal = (uint32_t)ordinal,
+                    .flags = Py_SOAC_INTERPRETER_EVENT_CALL,
+                };
+            }
+        }
+        qsort(events, count, sizeof(*events), soac_ip_event_compare);
+        PyObject *code = PyTuple_GET_ITEM(PyTuple_GET_ITEM(nodes, n), 2);
+        if (PySoac_SetInterpreterCodeEventsV1(code, events, count, sizeof(*events)) < 0)
+            return -1;
+    }
+    return 0;
+}
+
 static PyObject *
 soac_interpreter_fixture(PyObject *self, PyObject *args)
 {
     PyObject *module, *details, *probe;
     unsigned int call_fault = 0;
     int class_decision = SOAC_IP_CLASS_ENFORCED;
-    if (!PyArg_ParseTuple(args, "OOO|Ii:soac_interpreter_fixture",
+    int select_all_calls = 0;
+    if (!PyArg_ParseTuple(args, "OOO|Iip:soac_interpreter_fixture",
                           &module, &details, &probe, &call_fault,
-                          &class_decision)) return NULL;
+                          &class_decision, &select_all_calls)) return NULL;
     if (class_decision != SOAC_IP_CLASS_ENFORCED &&
         class_decision != SOAC_IP_CLASS_DYNAMIC) {
         PyErr_SetString(PyExc_ValueError, "invalid interpreter fixture class decision");
@@ -1516,7 +1639,7 @@ soac_interpreter_fixture(PyObject *self, PyObject *args)
     if (PyType_Ready(&SoacInterpreterFixture_Type) < 0 ||
         PyType_Ready(&SoacInterpreterTestCall_Type) < 0 ||
         PyType_Ready(&SoacInterpreterTestFunction_Type) < 0 ||
-        PySoac_SetInterpreterCallbacksV3(&soac_ip_callbacks, sizeof(soac_ip_callbacks)) < 0) return NULL;
+        PySoac_SetInterpreterCallbacksV4(&soac_ip_callbacks, sizeof(soac_ip_callbacks)) < 0) return NULL;
     SoacInterpreterFixture *fixture = PyObject_GC_New(
         SoacInterpreterFixture, &SoacInterpreterFixture_Type);
     if (fixture == NULL) return NULL;
@@ -1529,12 +1652,16 @@ soac_interpreter_fixture(PyObject *self, PyObject *args)
     fixture->probe = Py_NewRef(probe);
     fixture->call_fault = call_fault;
     fixture->class_decision = class_decision;
+    fixture->select_all_calls = select_all_calls;
+    fixture->execution_guard = PySoac_NewInterpreterExecutionGuardV1();
     fixture->empty = PyTuple_New(0);
     fixture->protected_names = Py_BuildValue("(s)", "locked");
     if (fixture->empty == NULL || fixture->protected_names == NULL ||
+        fixture->execution_guard == NULL ||
         soac_ip_read_nodes(fixture, PyTuple_GET_ITEM(catalog, 1)) < 0 ||
         soac_ip_read_sites(fixture, PyTuple_GET_ITEM(catalog, 1), PyTuple_GET_ITEM(catalog, 3)) < 0 ||
-        soac_ip_read_calls(fixture, PyTuple_GET_ITEM(catalog, 1), PyTuple_GET_ITEM(catalog, 3)) < 0) {
+        soac_ip_read_calls(fixture, PyTuple_GET_ITEM(catalog, 1), PyTuple_GET_ITEM(catalog, 3)) < 0 ||
+        soac_ip_install_events(fixture, PyTuple_GET_ITEM(catalog, 1), PyTuple_GET_ITEM(catalog, 3)) < 0) {
         PyObject *error = PyErr_GetRaisedException();
         Py_DECREF(fixture);
         PyErr_SetRaisedException(error);

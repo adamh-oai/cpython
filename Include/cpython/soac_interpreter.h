@@ -9,7 +9,7 @@ extern "C" {
  * The trusted loader, not these hooks, authenticates the ty/source artifact.
  * Ordinary native frames/binding/closures/recursion/observers remain in use. */
 #define Py_SOAC_INTERPRETER_ABI_V2 2u
-#define Py_SOAC_INTERPRETER_CALLBACKS_ABI_V3 3u
+#define Py_SOAC_INTERPRETER_CALLBACKS_ABI_V4 4u
 
 #define Py_SOAC_INTERPRETER_ROOT 1u
 #define Py_SOAC_INTERPRETER_FUNCTION 2u
@@ -32,17 +32,18 @@ extern "C" {
 typedef struct _PySoacInterpreterFrameViewV1
     PySoacInterpreterFrameViewV1;
 
-/* Callback-local native execution facts. The interpreter/activation pair is
- * reserved before entry callbacks, survives suspension and native frame moves,
- * and is never reused during that interpreter's lifetime. It is an identity,
- * not independent execution authority or ownership of a Python value. */
+/* Callback-local native execution facts. A construction activation pair is
+ * reserved before enter, survives suspension/native frame moves while its
+ * event is active, and is never reused. Ordinary function calls have no such
+ * activation; check_entry reports activation_id=0 and call_state=NULL. The
+ * pair is correspondence, not execution authority or a Python value owner. */
 typedef struct {
     uint32_t abi_version;             /* Set by GetInfo, exactly V2. */
     uint32_t phase;
     uint32_t kind;
-    uint32_t source_authority;        /* Granted only after enter authenticates. */
+    uint32_t source_authority;        /* Actual original-source execution grant. */
     int64_t interpreter_id;
-    uint64_t activation_id;           /* Nonzero, never reused by this interpreter. */
+    uint64_t activation_id;           /* Nonzero only for actual construction state. */
     PyObject *function;               /* Borrowed actual frame f_funcobj. */
     PyObject *code;                   /* Borrowed actual frame f_executable. */
     PyObject *globals;                /* Borrowed actual native frame view. */
@@ -149,7 +150,7 @@ typedef struct {
 
 typedef struct {
     uint32_t abi_version;
-    uint32_t flags;                   /* Callback ABI V3 requires zero. */
+    uint32_t flags;                   /* Callback ABI V4 requires zero. */
 
     /* Authenticate the actual module/dict/root/owner and consume this root
      * initialization attempt before its wrapper's CREATE notification.
@@ -186,11 +187,14 @@ typedef struct {
                               PyObject *function, uint32_t attribute_flag,
                               PyObject *borrowed_installed_value);
 
-    /* An ordinary native frame already owns its function and captured code,
-     * and all unbound localsplus slots are initialized to native Empty.
-     * The actual source owner is captured before binder/allocation callbacks.
-     * For ROOT the explicit API caller supports subject_owner; otherwise the
-     * actual function's permanent owner edge supports it. No extra value pin.
+    /* ROOT/CLASS_NAMESPACE enter in BINDING with source_authority=0, before
+     * native binding/VM entry. FUNCTION enter is lazy: the actual frame already
+     * runs authenticated original code, and a definition/birth/selected CALL
+     * event needs state. Its phase is RUNNING and source_authority=1. Untaken
+     * definitions and ordinary calls never invoke enter.
+     * The frame owns its captured function/code. For ROOT the explicit API
+     * caller supports subject_owner; otherwise the actual function's permanent
+     * owner edge supports it. No extra execution-value pin is added.
      * Success supplies ONE owned metadata state, transferred into the existing
      * checked-activation frame slot. New-state may be the owner's NewRef; its
      * contents must not duplicate function/code/maps/argument ownership. A
@@ -201,18 +205,19 @@ typedef struct {
                  const PySoacInterpreterFrameViewV1 *parent,
                  PyObject **new_call_state);
 
-    /* Committed default-VM entry, after ordinary binding,
-     * evaluator selection and recursion success, BEFORE the first original
-     * opcode. RUNNING view; source authority only. Success performs only
-     * callback/allocation-free scalar validation and entry-witness recording.
-     * Native generator resumes may repeat this idempotent notification; no new
-     * activation, extra ownership edge or suspension ABI is introduced.
-     * Binder/source-authority/PEP523 refusals cannot produce this witness. */
+    /* ROOT/CLASS_NAMESPACE committed default-VM entry after native binding,
+     * evaluator selection and recursion success, before their first opcode.
+     * RUNNING view; successful validation is callback/allocation-free. Ordinary
+     * function entry/resume does not invoke this callback; its actual VM-entry
+     * witness is the scalar InterpreterFunctionEnteredV1 guard bit. Binder,
+     * ownership and external-evaluator refusals do not fabricate that bit. */
     int (*started)(PyObject *state, const PySoacInterpreterFrameViewV1 *frame);
 
-    /* Actual source-authorized CALL, after native CALL monitoring/normalization
-     * and before input consumption. Native publishes the operand stack first.
-     * Unrelated sites return ORDINARY without allocation/callbacks. Selection
+    /* An indexed, potentially relevant source-authorized CALL, after native
+     * CALL monitoring/normalization and before input consumption. Native
+     * publishes the operand stack first. Unselected ordinary sites never
+     * construct a call view or invoke this callback. Selected sites may still
+     * return ORDINARY after checking their actual operands. Selection
      * joins the immutable original receipt to actual native operands; names,
      * result identity, public vectorcall equality or table presence grant none.
      * Out starts zeroed except abi_version; on failure metadata stays NULL.
@@ -241,42 +246,18 @@ typedef struct {
         uint32_t kind, PyObject *metadata, PyObject *dataclass_owner,
         uint32_t stage, PyObject *borrowed_result);
 
-    /* A borrowed result only: native retains the original result token.
-     * Called for every successful synchronous original FUNCTION so pending
-     * child definitions can complete. This does not check the result's type.
-     * Called once after semantic finally/handler retirement with the caller's
-     * handled-exception state restored, before source locals/frame teardown.
-     * Native publishes attempted before this callback. Rejection bypasses
-     * the callee's handlers, closes the exact result once, preserves this
-     * error, and follows the ordinary traceback/monitor-unwind exit.
-     * Successful return instrumentation follows acceptance. Body errors never
-     * invoke this callback; generator/coroutine/asyncgen completions are not
-     * selected here. Ordinary replacement activations have no
-     * source completion authority. */
-    int (*returned)(PyObject *state,
-                    const PySoacInterpreterFrameViewV1 *frame,
-                    PyObject *borrowed_result);
-
-    /* Exceptional completion of an original FUNCTION only, after the native
-     * no-handler decision (handled==0), semantic handlers/finally retired,
-     * before native operand/local cleanup. The view phase is FAILING.
-     * Native publishes failure-attempted first and saves/detaches the exact
-     * primary PyErr: this callback enters with no pending error.
-     * Finalize only still-pending/unsealed child definitions. If completion
-     * fails, first terminalize those still-pending children (never revoke an
-     * existing published module, class or function contract), then return -1
-     * with the secondary error. Native reports that secondary through standard
-     * unraisable handling with the actual source function as borrowed context,
-     * and restores the unchanged original primary exception/context.
-     * Success is 0 with no pending error. Leave remains metadata-only. */
-    int (*failed)(PyObject *state, const PySoacInterpreterFrameViewV1 *frame);
-
     /* Scalar/metadata retirement, no Python, allocation or error replacement.
      * Once per successful enter. Namespace success reports TRANSFERRED before
      * its ONE state edge moves from frame to __build_class__'s C stack; no
-     * views may be retained. Every other reason retires per-call state; a
-     * reused permanent function owner remains live and unchanged. */
-    void (*leave)(PyObject *state, uint32_t reason);
+     * views may be retained. Every other reason retires construction state; a
+     * reused permanent function owner remains live and unchanged. The frozen
+     * native token also identifies unfinished children during direct GC/frame
+     * clearing when no executable frame view remains for definition_abort.
+     * Successful RETURNED/NAMESPACE_TRANSFERRED preserve completed or explicitly
+     * transferred metadata. Other reasons invalidate only unfinished metadata
+     * for this token using callback-free weak witnesses. */
+    void (*leave)(PyObject *state, uint32_t reason,
+                  int64_t interpreter_id, uint64_t activation_id);
 
     /* Only the actual opcode-dispatched builtin __build_class__ with exact
      * parent/site and successfully evaluated namespace function can reach
@@ -304,9 +285,57 @@ typedef struct {
      * SET_FUNCTION_ATTRIBUTE nor an arbitrary code pointer is authority. */
     int (*definition_complete)(const PySoacInterpreterFrameViewV1 *frame,
                                PyObject *borrowed_value);
-} PySoacInterpreterCallbacksV3;
+    /* Cold unsealed/uncached ownership validation, before native argument
+     * binding. BINDING view with no activation/state. It can permit an actual
+     * ordinary code replacement, never a transplanted strict code object.
+     * Ready guards avoid this callback; native checks retain actual identity,
+     * supported mutation rules and shared execution-guard liveness. */
+    int (*check_entry)(PyObject *owner, const PySoacInterpreterFrameViewV1 *frame);
+    /* Actual post-attribute function birth, or one exact generic-scope result
+     * handoff. complete_context=0: keep enclosing definition context active;
+     * =1: finish a standalone birth context; =2: the result belongs to an exact
+     * committed generic CALL and completion_parent is its active caller view.
+     * Only =2 supplies completion_parent; validate that edge before transferring
+     * the named result's pending-completion token, retaining its lexical birth
+     * token. Parent COMPLETE performs final metadata/decorator sealing. This is
+     * not a general return notification or an argument/result-type check. */
+    int (*definition_end)(const PySoacInterpreterFrameViewV1 *frame,
+                          PyObject *function, uint32_t complete_context,
+                          const PySoacInterpreterFrameViewV1 *completion_parent);
+    /* An exception is leaving the currently active definition region, including
+     * a caught exception whose handler lies outside that region. Native detaches
+     * the primary error first; fail unfinished objects before any secondary
+     * error escapes. Completed children stay valid. Native reports secondary
+     * errors as unraisable, retires this event, and restores the primary error. */
+    int (*definition_abort)(const PySoacInterpreterFrameViewV1 *frame);
+} PySoacInterpreterCallbacksV4;
 
-/* GIL-build-only callback ABI V3; unchanged frame and call views remain V1.
+typedef struct {
+    uint32_t instruction_ordinal;
+    uint32_t flags;
+} PySoacInterpreterCodeEventV1;
+#define Py_SOAC_INTERPRETER_EVENT_CALL 1u
+/* Cold exact source-code registration. Rows are sorted, unique final ordinals
+ * of potentially relevant CALLs; unknown flags/coordinates reject. The native
+ * index also validates BEGIN/COMPLETE pairing. Identical reinstall is harmless,
+ * changed tables reject. Routing metadata does not grant runtime authority. */
+PyAPI_FUNC(int) PySoac_SetInterpreterCodeEventsV1(
+    PyObject *, const PySoacInterpreterCodeEventV1 *, size_t, size_t);
+/* Shared native metadata guards, with no owned function/code/argument values.
+ * GetFunctionGuard and NewExecutionGuard return new references. Ready caches
+ * validated native entry ownership; it is not metadata sealing or a value-type
+ * guarantee. Invalidate is terminal. Entered records actual committed VM entry.
+ * BindExecution ties every function to its module's admission lifetime; failed
+ * initialization/terminal teardown must invalidate that shared guard. */
+PyAPI_FUNC(PyObject *) PySoac_GetInterpreterFunctionGuardV1(PyObject *);
+PyAPI_FUNC(int) PySoac_InterpreterFunctionReadyV1(PyObject *);
+PyAPI_FUNC(int) PySoac_InterpreterFunctionInvalidateV1(PyObject *);
+PyAPI_FUNC(int) PySoac_InterpreterFunctionEnteredV1(PyObject *);
+PyAPI_FUNC(PyObject *) PySoac_NewInterpreterExecutionGuardV1(void);
+PyAPI_FUNC(int) PySoac_InvalidateInterpreterExecutionGuardV1(PyObject *);
+PyAPI_FUNC(int) PySoac_BindInterpreterFunctionExecutionV1(PyObject *, PyObject *);
+
+/* GIL-build-only callback ABI V4; unchanged frame and call views remain V1.
  * Free-threaded registration/evaluation fail explicitly. Per-interpreter immutable callback
  * table, exact sizeof required, every function non-NULL, unknown flags reject.
  * Semantics-preserving C forwarding/restoration of _PyFunction_Vectorcall
@@ -324,8 +353,8 @@ typedef struct {
  * NULL/out-of-range use fails; no promise validates arbitrary stale C memory.
  * Returned Python references may not outlive their actual native support.
  */
-PyAPI_FUNC(int) PySoac_SetInterpreterCallbacksV3(
-    const PySoacInterpreterCallbacksV3 *callbacks, size_t callbacks_size);
+PyAPI_FUNC(int) PySoac_SetInterpreterCallbacksV4(
+    const PySoacInterpreterCallbacksV4 *callbacks, size_t callbacks_size);
 
 PyAPI_FUNC(PyObject *) PySoac_EvalInterpreterModuleV1(
     PyObject *module, PyObject *root_code, PyObject *module_owner);
@@ -339,7 +368,7 @@ PyAPI_FUNC(int) PySoac_GetInterpreterFrameInfoV2(
 PyAPI_FUNC(PyObject *) PySoac_InterpreterFrameLocalV1(
     const PySoacInterpreterFrameViewV1 *view, Py_ssize_t index);
 
-/* The ONLY new export. Fills borrowed POD without allocation, Python callbacks,
+/* Fills borrowed POD without allocation, Python callbacks,
  * attribute lookup, hash/equality, stackref casts or frame/locals materializing.
  * Kind+index selects current actual call inputs, or the already selected finite
  * decorator window during PREPARE_TYPE. There is no arbitrary stack index,

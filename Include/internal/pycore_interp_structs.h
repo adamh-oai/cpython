@@ -890,7 +890,7 @@ struct _is {
         PyObject *runtime_unavailable_error;
         PySoacAnnotationReplayResolver annotation_replay_resolver;
         int annotation_replay_closed;
-        PySoacInterpreterCallbacksV3 interpreter_callbacks;
+        PySoacInterpreterCallbacksV4 interpreter_callbacks;
         uint64_t interpreter_activation_counter;  /* Reserved once; never reused. */
         int interpreter_closed;
         PySoacDataclassCallbacks dataclass_callbacks;

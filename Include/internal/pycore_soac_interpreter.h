@@ -37,7 +37,7 @@ typedef struct {
     uint32_t phase;
     uint32_t source_authority;        /* Only after authenticated original entry. */
     uint32_t return_attempted;
-    uint32_t failure_attempted;
+    Py_ssize_t definition_begin, definition_end;
     PyObject **namespace_state_out;   /* Borrowed actual __build_class__ C slot. */
     _PySoacInterpreterConsumedCallV1 incoming_call;
 } _PySoacInterpreterActivationV1;
@@ -63,6 +63,7 @@ struct _PySoacInterpreterFrameViewV1 {
  */
 typedef struct {
     uint32_t kind;
+    uint32_t construction;
     PyObject *subject_owner;          /* Borrowed, caller/frame supports it. */
     const PySoacInterpreterFrameViewV1 *parent;
     PyObject **namespace_state_out;   /* NULL except namespace; *out starts NULL. */
@@ -97,6 +98,7 @@ struct _PySoacInterpreterCallV1 {
     PySoacInterpreterCallDecisionV1 decision;
     _PySoacInterpreterConsumedCallV1 incoming;
     Py_ssize_t prefix_depth, input_depth;
+    uint64_t context_activation_id;  /* Sole retirement obligation for a CALL-only context. */
     uint32_t selected, began, root_detached;
 };
 
@@ -107,12 +109,18 @@ typedef struct {
     _PyInterpreterFrame *caller;
     const _Py_CODEUNIT *instruction;
     _PySoacInterpreterCallV1 *deferred; /* Exact C dispatch, never a frame walk. */
+    uint64_t context_activation_id;  /* MOVE from an inlined selected CALL. */
     uint32_t stage;
 } _PySoacInterpreterRootFinishV1;
 
 PyAPI_FUNC(int) _PySOAC_InterpreterSelectCall(
     _PyInterpreterFrame *, const _Py_CODEUNIT *, uint32_t, uint32_t,
     _PySoacInterpreterCallV1 *);
+PyAPI_FUNC(int) _PySOAC_InterpreterCallRelevant(
+    _PyInterpreterFrame *, const _Py_CODEUNIT *);
+PyAPI_FUNC(int) _PySOAC_InterpreterFunctionFastReady(PyFunctionObject *);
+extern int _PySOAC_InterpreterGuardCreate(PyFunctionObject *);
+extern void _PySOAC_InterpreterGuardInvalidate(PyObject *);
 PyAPI_FUNC(int) _PySOAC_InterpreterCallCommit(
     _PySoacInterpreterCallV1 *, _PyInterpreterFrame *);
 PyAPI_FUNC(void) _PySOAC_InterpreterCallClear(_PySoacInterpreterCallV1 *);
@@ -201,6 +209,12 @@ extern PyObject *_PySOAC_InterpreterBuildClassFromFrame(
 PyAPI_FUNC(int) _PySOAC_InterpreterCompleteDefinition(
     _PyInterpreterFrame *frame, const _Py_CODEUNIT *this_instr,
     PyObject *borrowed_value);
+PyAPI_FUNC(int) _PySOAC_InterpreterBeginDefinition(
+    _PyInterpreterFrame *, const _Py_CODEUNIT *);
+PyAPI_FUNC(int) _PySOAC_InterpreterEndFunctionBirth(
+    _PyInterpreterFrame *, const _Py_CODEUNIT *, PyObject *);
+PyAPI_FUNC(void) _PySOAC_InterpreterAbortDefinition(
+    _PyInterpreterFrame *, const _Py_CODEUNIT *, int);
 
 /* Required implementation invariants:
  * - Exact owner/source/native code+parent checks precede callback grants.

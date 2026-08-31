@@ -1095,8 +1095,7 @@ dummy_func(
             assert(PyFunction_Check(getitem_o));
             uint32_t cached_version = FT_ATOMIC_LOAD_UINT32_RELAXED(ht->_spec_cache.getitem_version);
             DEOPT_IF(((PyFunctionObject *)getitem_o)->func_version != cached_version);
-            DEOPT_IF(((PyFunctionObject *)getitem_o)->func_soac_strict_owner_state ==
-                     FUNC_SOAC_OWNER_INTERPRETER_ATTACHED);
+            DEOPT_IF(!_PySOAC_InterpreterFunctionFastReady((PyFunctionObject *)getitem_o));
             PyCodeObject *code = (PyCodeObject *)PyFunction_GET_CODE(getitem_o);
             assert(code->co_argcount == 2);
             DEOPT_IF(!_PyThreadState_HasStackSpace(tstate, code->co_framesize));
@@ -1466,7 +1465,7 @@ dummy_func(
             PyGenObject *gen = (PyGenObject *)PyStackRef_AsPyObjectBorrow(receiver);
             DEOPT_IF(Py_TYPE(gen) != &PyGen_Type && Py_TYPE(gen) != &PyCoro_Type);
             DEOPT_IF(_PyGen_IsSoacManaged(gen));
-            DEOPT_IF(gen->gi_iframe.soac_checked_activation != NULL);
+            DEOPT_IF(gen->gi_iframe.soac_source_authority);
             DEOPT_IF(!gen_try_set_executing((PyGenObject *)gen));
             STAT_INC(SEND, hit);
             _PyInterpreterFrame *pushed_frame = &gen->gi_iframe;
@@ -2629,7 +2628,7 @@ dummy_func(
             assert((oparg & 1) == 0);
             assert(Py_IS_TYPE(fget, &PyFunction_Type));
             PyFunctionObject *f = (PyFunctionObject *)fget;
-            DEOPT_IF(f->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED);
+            DEOPT_IF(!_PySOAC_InterpreterFunctionFastReady(f));
             PyCodeObject *code = (PyCodeObject *)f->func_code;
             DEOPT_IF((code->co_flags & (CO_VARKEYWORDS | CO_VARARGS | CO_OPTIMIZED)) != CO_OPTIMIZED);
             DEOPT_IF(code->co_kwonlyargcount);
@@ -2664,7 +2663,7 @@ dummy_func(
             PyFunctionObject *f = (PyFunctionObject *)getattribute;
             assert(func_version != 0);
             DEOPT_IF(f->func_version != func_version);
-            DEOPT_IF(f->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED);
+            DEOPT_IF(!_PySOAC_InterpreterFunctionFastReady(f));
             PyCodeObject *code = (PyCodeObject *)f->func_code;
             assert(code->co_argcount == 2);
             DEOPT_IF(!_PyThreadState_HasStackSpace(tstate, code->co_framesize));
@@ -3072,7 +3071,7 @@ dummy_func(
         tier1 op(_JIT, (--)) {
         #ifdef _Py_TIER2
             _Py_BackoffCounter counter = this_instr[1].counter;
-            if (frame->soac_checked_activation == NULL &&
+            if (!frame->soac_source_authority &&
                 !IS_JIT_TRACING() && backoff_counter_triggers(counter) &&
                 this_instr->op.code == JUMP_BACKWARD_JIT &&
                 next_instr->op.code != ENTER_EXECUTOR) {
@@ -3146,7 +3145,7 @@ dummy_func(
             /* If the eval breaker is set then stay in tier 1.
              * This avoids any potentially infinite loops
              * involving _RESUME_CHECK */
-            if (frame->soac_checked_activation != NULL ||
+            if (frame->soac_source_authority ||
                 (_Py_atomic_load_uintptr_relaxed(&tstate->eval_breaker) & _PY_EVAL_EVENTS_MASK)) {
                 opcode = executor->vm_data.opcode;
                 oparg = (oparg & ~255) | executor->vm_data.oparg;
@@ -3556,7 +3555,7 @@ dummy_func(
             PyGenObject *gen = (PyGenObject *)PyStackRef_AsPyObjectBorrow(iter);
             DEOPT_IF(Py_TYPE(gen) != &PyGen_Type);
             DEOPT_IF(_PyGen_IsSoacManaged(gen));
-            DEOPT_IF(gen->gi_iframe.soac_checked_activation != NULL);
+            DEOPT_IF(gen->gi_iframe.soac_source_authority);
             DEOPT_IF(!gen_try_set_executing((PyGenObject *)gen));
             STAT_INC(FOR_ITER, hit);
             _PyInterpreterFrame *pushed_frame = &gen->gi_iframe;
@@ -3814,7 +3813,7 @@ dummy_func(
         specializing op(_SPECIALIZE_CALL, (counter/1, callable, self_or_null, unused[oparg] -- callable, self_or_null, unused[oparg])) {
             #if ENABLE_SPECIALIZATION
             if (ADAPTIVE_COUNTER_TRIGGERS(counter) &&
-                frame->soac_checked_activation == NULL) {
+                !_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                 next_instr = this_instr;
                 _Py_Specialize_Call(callable, self_or_null, next_instr, oparg + !PyStackRef_IsNull(self_or_null));
                 DISPATCH_SAME_OPARG();
@@ -3824,11 +3823,11 @@ dummy_func(
             #endif  /* ENABLE_SPECIALIZATION */
         }
 
-        op(_CHECK_NO_SOAC_GENERATED_ACTIVATION, (--)) {
-            /* An ordinary FunctionType copy can warm this shared code first.
-             * Checked frames must still reach their explicit call-site
-             * dispatch; never inherit a copy's specialized builtin call. */
-            DEOPT_IF(frame->soac_checked_activation != NULL);
+        op(_CHECK_NO_SOAC_CONSTRUCTION_CALL, (--)) {
+            /* Only preselected construction sites require source CALL dispatch.
+             * Ordinary sites retain native CALL specialization even while a
+             * surrounding declaration has an active metadata context. */
+            DEOPT_IF(_PySOAC_InterpreterCallRelevant(frame, this_instr));
         }
 
         op(_MAYBE_EXPAND_METHOD, (callable, self_or_null, unused[oparg] -- callable, self_or_null, unused[oparg])) {
@@ -3854,14 +3853,18 @@ dummy_func(
                 arguments--;
                 total_args++;
             }
-            _PySoacInterpreterCallV1 soac_call;
-            SAVE_STACK();
-            int soac_selected = _PySOAC_InterpreterSelectCall(
-                frame, this_instr, Py_SOAC_INTERPRETER_CALL_VECTOR,
-                oparg, &soac_call);
-            RELOAD_STACK();
-            if (soac_selected < 0) {
-                ERROR_NO_POP();
+            _PySoacInterpreterCallV1 soac_call_storage;
+            _PySoacInterpreterCallV1 *soac_call = NULL;
+            if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                soac_call = &soac_call_storage;
+                SAVE_STACK();
+                int soac_selected = _PySOAC_InterpreterSelectCall(
+                    frame, this_instr, Py_SOAC_INTERPRETER_CALL_VECTOR,
+                    oparg, soac_call);
+                RELOAD_STACK();
+                if (soac_selected < 0) {
+                    ERROR_NO_POP();
+                }
             }
 
             {
@@ -3874,10 +3877,11 @@ dummy_func(
                 {
                     int code_flags = ((PyCodeObject*)PyFunction_GET_CODE(callable_o))->co_flags;
                     PyObject *locals = code_flags & CO_OPTIMIZED ? NULL : Py_NewRef(PyFunction_GET_GLOBALS(callable_o));
-                    _PyInterpreterFrame *new_frame = _PySOAC_InterpreterPushCall(
-                        &soac_call, tstate, callable, locals,
-                        arguments, total_args, NULL, frame
-                    );
+                    _PyInterpreterFrame *new_frame = soac_call != NULL
+                        ? _PySOAC_InterpreterPushCall(soac_call, tstate, callable, locals,
+                        arguments, total_args, NULL, frame)
+                        : _PyEvalFramePushAndInit(tstate, callable, locals,
+                        arguments, total_args, NULL, frame);
                     DEAD(args);
                     DEAD(self_or_null);
                     DEAD(callable);
@@ -3886,16 +3890,18 @@ dummy_func(
                     // The frame has stolen all the arguments from the stack,
                     // so there is no need to clean them up.
                     if (new_frame == NULL) {
-                        _PySOAC_InterpreterCallFailed(&soac_call);
+                        _PySOAC_InterpreterCallFailed(soac_call);
                         ERROR_NO_POP();
                     }
-                    SAVE_STACK();
-                    int soac_committed = _PySOAC_InterpreterCallCommit(&soac_call, new_frame);
-                    RELOAD_STACK();
-                    if (soac_committed < 0) {
-                        _PyEval_FrameClearAndPop(tstate, new_frame);
-                        _PySOAC_InterpreterCallFailed(&soac_call);
-                        ERROR_NO_POP();
+                    if (soac_call != NULL) {
+                        SAVE_STACK();
+                        int soac_committed = _PySOAC_InterpreterCallCommit(soac_call, new_frame);
+                        RELOAD_STACK();
+                        if (soac_committed < 0) {
+                            _PyEval_FrameClearAndPop(tstate, new_frame);
+                            _PySOAC_InterpreterCallFailed(soac_call);
+                            ERROR_NO_POP();
+                        }
                     }
                     frame->return_offset = INSTRUCTION_SIZE;
                     DISPATCH_INLINED(new_frame, eval_frame_before_binding);
@@ -3908,12 +3914,14 @@ dummy_func(
                     opcode == INSTRUMENTED_CALL,
                     frame,
                     this_instr,
-                    tstate, &soac_call);
+                    tstate, soac_call);
                 DEAD(args);
                 DEAD(self_or_null);
                 DEAD(callable);
                 SYNC_SP();
-                _PySOAC_InterpreterCallFinished(&soac_call, &res_o);
+                if (soac_call != NULL) {
+                    _PySOAC_InterpreterCallFinished(soac_call, &res_o);
+                }
                 ERROR_IF(res_o == NULL);
                 res = PyStackRef_FromPyObjectSteal(res_o);
             }
@@ -3973,19 +3981,19 @@ dummy_func(
             EXIT_IF(!PyFunction_Check(callable_o));
             PyFunctionObject *func = (PyFunctionObject *)callable_o;
             EXIT_IF(func->func_version != func_version);
-            EXIT_IF(func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED);
+            EXIT_IF(!_PySOAC_InterpreterFunctionFastReady(func));
         }
 
         tier2 op(_CHECK_FUNCTION_VERSION_INLINE, (func_version/2, callable_o/4 --)) {
             assert(PyFunction_Check(callable_o));
             PyFunctionObject *func = (PyFunctionObject *)callable_o;
             EXIT_IF(func->func_version != func_version);
-            EXIT_IF(func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED);
+            EXIT_IF(!_PySOAC_InterpreterFunctionFastReady(func));
         }
 
         macro(CALL_PY_GENERAL) =
             _RECORD_CALLABLE +
-            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
+            _CHECK_NO_SOAC_CONSTRUCTION_CALL +
             unused/1 + // Skip over the counter
             _CHECK_PEP_523 +
             _CHECK_FUNCTION_VERSION +
@@ -4001,8 +4009,7 @@ dummy_func(
             PyObject *func = ((PyMethodObject *)callable_o)->im_func;
             EXIT_IF(!PyFunction_Check(func));
             EXIT_IF(((PyFunctionObject *)func)->func_version != func_version);
-            EXIT_IF(((PyFunctionObject *)func)->func_soac_strict_owner_state ==
-                    FUNC_SOAC_OWNER_INTERPRETER_ATTACHED);
+            EXIT_IF(!_PySOAC_InterpreterFunctionFastReady((PyFunctionObject *)func));
             EXIT_IF(!PyStackRef_IsNull(null));
         }
 
@@ -4019,7 +4026,7 @@ dummy_func(
 
         macro(CALL_BOUND_METHOD_GENERAL) =
             _RECORD_BOUND_METHOD +
-            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
+            _CHECK_NO_SOAC_CONSTRUCTION_CALL +
             unused/1 + // Skip over the counter
             _CHECK_PEP_523 +
             _CHECK_METHOD_VERSION +
@@ -4061,7 +4068,7 @@ dummy_func(
 
         macro(CALL_NON_PY_GENERAL) =
             _RECORD_CALLABLE +
-            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
+            _CHECK_NO_SOAC_CONSTRUCTION_CALL +
             unused/1 + // Skip over the counter
             unused/2 +
             _CHECK_IS_NOT_PY_CALLABLE +
@@ -4143,7 +4150,7 @@ dummy_func(
 
         macro(CALL_BOUND_METHOD_EXACT_ARGS) =
             _RECORD_BOUND_METHOD +
-            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
+            _CHECK_NO_SOAC_CONSTRUCTION_CALL +
             unused/1 + // Skip over the counter
             _CHECK_PEP_523 +
             _CHECK_CALL_BOUND_METHOD_EXACT_ARGS +
@@ -4159,7 +4166,7 @@ dummy_func(
 
         macro(CALL_PY_EXACT_ARGS) =
             _RECORD_CALLABLE +
-            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
+            _CHECK_NO_SOAC_CONSTRUCTION_CALL +
             unused/1 + // Skip over the counter
             _CHECK_PEP_523 +
             _CHECK_FUNCTION_VERSION +
@@ -4199,7 +4206,7 @@ dummy_func(
         }
 
         macro(CALL_TYPE_1) =
-            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
+            _CHECK_NO_SOAC_CONSTRUCTION_CALL +
             unused/1 +
             unused/2 +
             _GUARD_NOS_NULL +
@@ -4227,7 +4234,7 @@ dummy_func(
         }
 
         macro(CALL_STR_1) =
-            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
+            _CHECK_NO_SOAC_CONSTRUCTION_CALL +
             unused/1 +
             unused/2 +
             _GUARD_NOS_NULL +
@@ -4256,7 +4263,7 @@ dummy_func(
         }
 
         macro(CALL_TUPLE_1) =
-            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
+            _CHECK_NO_SOAC_CONSTRUCTION_CALL +
             unused/1 +
             unused/2 +
             _GUARD_NOS_NULL +
@@ -4279,7 +4286,7 @@ dummy_func(
             // Public vectorcall replacement invalidates the function version,
             // not this type-version cache. Check before allocating an instance.
             DEOPT_IF(init_func == NULL || init_func->vectorcall != _PyFunction_Vectorcall);
-            DEOPT_IF(init_func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED);
+            DEOPT_IF(!_PySOAC_InterpreterFunctionFastReady(init_func));
             PyCodeObject *code = (PyCodeObject *)init_func->func_code;
             DEOPT_IF(!_PyThreadState_HasStackSpace(tstate, code->co_framesize + _Py_InitCleanup.co_framesize));
             STAT_INC(CALL, hit);
@@ -4320,7 +4327,7 @@ dummy_func(
 
         macro(CALL_ALLOC_AND_ENTER_INIT) =
             _RECORD_CALLABLE +
-            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
+            _CHECK_NO_SOAC_CONSTRUCTION_CALL +
             unused/1 +
             _CHECK_PEP_523 +
             _CHECK_AND_ALLOCATE_OBJECT +
@@ -4362,7 +4369,7 @@ dummy_func(
 
         macro(CALL_BUILTIN_CLASS) =
             _RECORD_CALLABLE +
-            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
+            _CHECK_NO_SOAC_CONSTRUCTION_CALL +
             unused/1 +
             unused/2 +
             _CALL_BUILTIN_CLASS +
@@ -4399,7 +4406,7 @@ dummy_func(
 
         macro(CALL_BUILTIN_O) =
             _RECORD_CALLABLE +
-            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
+            _CHECK_NO_SOAC_CONSTRUCTION_CALL +
             unused/1 +
             unused/2 +
             _CALL_BUILTIN_O +
@@ -4436,7 +4443,7 @@ dummy_func(
 
         macro(CALL_BUILTIN_FAST) =
             _RECORD_CALLABLE +
-            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
+            _CHECK_NO_SOAC_CONSTRUCTION_CALL +
             unused/1 +
             unused/2 +
             _CALL_BUILTIN_FAST +
@@ -4465,14 +4472,14 @@ dummy_func(
 
         macro(CALL_BUILTIN_FAST_WITH_KEYWORDS) =
             _RECORD_CALLABLE +
-            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
+            _CHECK_NO_SOAC_CONSTRUCTION_CALL +
             unused/1 +
             unused/2 +
             _CALL_BUILTIN_FAST_WITH_KEYWORDS +
             _CHECK_PERIODIC_AT_END;
 
         macro(CALL_LEN) =
-            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
+            _CHECK_NO_SOAC_CONSTRUCTION_CALL +
             unused/1 +
             unused/2 +
             _GUARD_NOS_NULL +
@@ -4531,7 +4538,7 @@ dummy_func(
         }
 
         macro(CALL_ISINSTANCE) =
-            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
+            _CHECK_NO_SOAC_CONSTRUCTION_CALL +
             unused/1 +
             unused/2 +
             _GUARD_THIRD_NULL +
@@ -4539,7 +4546,7 @@ dummy_func(
             _CALL_ISINSTANCE;
 
         macro(CALL_LIST_APPEND) =
-            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
+            _CHECK_NO_SOAC_CONSTRUCTION_CALL +
             unused/1 +
             unused/2 +
             _GUARD_CALLABLE_LIST_APPEND +
@@ -4613,7 +4620,7 @@ dummy_func(
 
         macro(CALL_METHOD_DESCRIPTOR_O) =
             _RECORD_CALLABLE +
-            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
+            _CHECK_NO_SOAC_CONSTRUCTION_CALL +
             unused/1 +
             unused/2 +
             _CALL_METHOD_DESCRIPTOR_O +
@@ -4657,7 +4664,7 @@ dummy_func(
 
         macro(CALL_METHOD_DESCRIPTOR_FAST_WITH_KEYWORDS) =
             _RECORD_CALLABLE +
-            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
+            _CHECK_NO_SOAC_CONSTRUCTION_CALL +
             unused/1 +
             unused/2 +
             _CALL_METHOD_DESCRIPTOR_FAST_WITH_KEYWORDS +
@@ -4697,7 +4704,7 @@ dummy_func(
 
         macro(CALL_METHOD_DESCRIPTOR_NOARGS) =
             _RECORD_CALLABLE +
-            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
+            _CHECK_NO_SOAC_CONSTRUCTION_CALL +
             unused/1 +
             unused/2 +
             _CALL_METHOD_DESCRIPTOR_NOARGS +
@@ -4737,7 +4744,7 @@ dummy_func(
         }
 
         macro(CALL_METHOD_DESCRIPTOR_FAST) =
-            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
+            _CHECK_NO_SOAC_CONSTRUCTION_CALL +
             unused/1 +
             unused/2 +
             _CALL_METHOD_DESCRIPTOR_FAST +
@@ -4793,14 +4800,18 @@ dummy_func(
                 total_args++;
             }
             int positional_args = total_args - (int)PyTuple_GET_SIZE(kwnames_o);
-            _PySoacInterpreterCallV1 soac_call;
-            SAVE_STACK();
-            int soac_selected = _PySOAC_InterpreterSelectCall(
-                frame, this_instr, Py_SOAC_INTERPRETER_CALL_VECTOR_KW,
-                oparg, &soac_call);
-            RELOAD_STACK();
-            if (soac_selected < 0) {
-                ERROR_NO_POP();
+            _PySoacInterpreterCallV1 soac_call_storage;
+            _PySoacInterpreterCallV1 *soac_call = NULL;
+            if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                soac_call = &soac_call_storage;
+                SAVE_STACK();
+                int soac_selected = _PySOAC_InterpreterSelectCall(
+                    frame, this_instr, Py_SOAC_INTERPRETER_CALL_VECTOR_KW,
+                    oparg, soac_call);
+                RELOAD_STACK();
+                if (soac_selected < 0) {
+                    ERROR_NO_POP();
+                }
             }
 
             {
@@ -4813,10 +4824,11 @@ dummy_func(
                 {
                     int code_flags = ((PyCodeObject*)PyFunction_GET_CODE(callable_o))->co_flags;
                     PyObject *locals = code_flags & CO_OPTIMIZED ? NULL : Py_NewRef(PyFunction_GET_GLOBALS(callable_o));
-                    _PyInterpreterFrame *new_frame = _PySOAC_InterpreterPushCall(
-                        &soac_call, tstate, callable, locals,
-                        arguments, positional_args, kwnames_o, frame
-                    );
+                    _PyInterpreterFrame *new_frame = soac_call != NULL
+                        ? _PySOAC_InterpreterPushCall(soac_call, tstate, callable, locals,
+                        arguments, positional_args, kwnames_o, frame)
+                        : _PyEvalFramePushAndInit(tstate, callable, locals,
+                        arguments, positional_args, kwnames_o, frame);
                     DEAD(args);
                     DEAD(self_or_null);
                     DEAD(callable);
@@ -4826,16 +4838,18 @@ dummy_func(
                     // The frame has stolen all the arguments from the stack,
                     // so there is no need to clean them up.
                     if (new_frame == NULL) {
-                        _PySOAC_InterpreterCallFailed(&soac_call);
+                        _PySOAC_InterpreterCallFailed(soac_call);
                         ERROR_NO_POP();
                     }
-                    SAVE_STACK();
-                    int soac_committed = _PySOAC_InterpreterCallCommit(&soac_call, new_frame);
-                    RELOAD_STACK();
-                    if (soac_committed < 0) {
-                        _PyEval_FrameClearAndPop(tstate, new_frame);
-                        _PySOAC_InterpreterCallFailed(&soac_call);
-                        ERROR_NO_POP();
+                    if (soac_call != NULL) {
+                        SAVE_STACK();
+                        int soac_committed = _PySOAC_InterpreterCallCommit(soac_call, new_frame);
+                        RELOAD_STACK();
+                        if (soac_committed < 0) {
+                            _PyEval_FrameClearAndPop(tstate, new_frame);
+                            _PySOAC_InterpreterCallFailed(soac_call);
+                            ERROR_NO_POP();
+                        }
                     }
                     assert(INSTRUCTION_SIZE == 1 + INLINE_CACHE_ENTRIES_CALL_KW);
                     frame->return_offset = INSTRUCTION_SIZE;
@@ -4849,13 +4863,15 @@ dummy_func(
                     opcode == INSTRUMENTED_CALL_KW,
                     frame,
                     this_instr,
-                    tstate, &soac_call);
+                    tstate, soac_call);
                 DEAD(kwnames);
                 DEAD(args);
                 DEAD(self_or_null);
                 DEAD(callable);
                 SYNC_SP();
-                _PySOAC_InterpreterCallFinished(&soac_call, &res_o);
+                if (soac_call != NULL) {
+                    _PySOAC_InterpreterCallFinished(soac_call, &res_o);
+                }
                 ERROR_IF(res_o == NULL);
                 res = PyStackRef_FromPyObjectSteal(res_o);
             }
@@ -4896,11 +4912,11 @@ dummy_func(
             EXIT_IF(!PyFunction_Check(callable_o));
             PyFunctionObject *func = (PyFunctionObject *)callable_o;
             EXIT_IF(func->func_version != func_version);
-            EXIT_IF(func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED);
+            EXIT_IF(!_PySOAC_InterpreterFunctionFastReady(func));
         }
 
         macro(CALL_KW_PY) =
-            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
+            _CHECK_NO_SOAC_CONSTRUCTION_CALL +
             unused/1 + // Skip over the counter
             _CHECK_PEP_523 +
             _CHECK_FUNCTION_VERSION_KW +
@@ -4916,8 +4932,7 @@ dummy_func(
             PyObject *func = ((PyMethodObject *)callable_o)->im_func;
             EXIT_IF(!PyFunction_Check(func));
             EXIT_IF(((PyFunctionObject *)func)->func_version != func_version);
-            EXIT_IF(((PyFunctionObject *)func)->func_soac_strict_owner_state ==
-                    FUNC_SOAC_OWNER_INTERPRETER_ATTACHED);
+            EXIT_IF(!_PySOAC_InterpreterFunctionFastReady((PyFunctionObject *)func));
             EXIT_IF(!PyStackRef_IsNull(null));
         }
 
@@ -4933,7 +4948,7 @@ dummy_func(
         }
 
         macro(CALL_KW_BOUND_METHOD) =
-            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
+            _CHECK_NO_SOAC_CONSTRUCTION_CALL +
             unused/1 + // Skip over the counter
             _CHECK_PEP_523 +
             _CHECK_METHOD_VERSION_KW +
@@ -4946,7 +4961,7 @@ dummy_func(
         specializing op(_SPECIALIZE_CALL_KW, (counter/1, callable, self_or_null, unused[oparg], unused -- callable, self_or_null, unused[oparg], unused)) {
             #if ENABLE_SPECIALIZATION
             if (ADAPTIVE_COUNTER_TRIGGERS(counter) &&
-                frame->soac_checked_activation == NULL) {
+                !_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                 next_instr = this_instr;
                 _Py_Specialize_CallKw(callable, next_instr, oparg + !PyStackRef_IsNull(self_or_null));
                 DISPATCH_SAME_OPARG();
@@ -5001,7 +5016,7 @@ dummy_func(
         }
 
         macro(CALL_KW_NON_PY) =
-            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
+            _CHECK_NO_SOAC_CONSTRUCTION_CALL +
             unused/1 + // Skip over the counter
             unused/2 +
             _CHECK_IS_NOT_PY_CALLABLE_KW +
@@ -5036,15 +5051,19 @@ dummy_func(
 
             EVAL_CALL_STAT_INC_IF_FUNCTION(EVAL_CALL_FUNCTION_EX, func);
             assert(!_PyErr_Occurred(tstate));
-            _PySoacInterpreterCallV1 soac_call = {0};
+            _PySoacInterpreterCallV1 soac_call_storage;
+            _PySoacInterpreterCallV1 *soac_call = NULL;
             if (opcode != INSTRUMENTED_CALL_FUNCTION_EX) {
-                SAVE_STACK();
-                int soac_selected = _PySOAC_InterpreterSelectCall(
-                    frame, this_instr, Py_SOAC_INTERPRETER_CALL_EXPANDED,
-                    0, &soac_call);
-                RELOAD_STACK();
-                if (soac_selected < 0) {
-                    ERROR_NO_POP();
+                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                    soac_call = &soac_call_storage;
+                    SAVE_STACK();
+                    int soac_selected = _PySOAC_InterpreterSelectCall(
+                        frame, this_instr, Py_SOAC_INTERPRETER_CALL_EXPANDED,
+                        0, soac_call);
+                    RELOAD_STACK();
+                    if (soac_selected < 0) {
+                        ERROR_NO_POP();
+                    }
                 }
             }
             {
@@ -5064,16 +5083,20 @@ dummy_func(
                     if (err) {
                         ERROR_NO_POP();
                     }
-                    SAVE_STACK();
-                    int soac_selected = _PySOAC_InterpreterSelectCall(
-                        frame, this_instr, Py_SOAC_INTERPRETER_CALL_EXPANDED,
-                        0, &soac_call);
-                    RELOAD_STACK();
-                    if (soac_selected < 0) {
-                        ERROR_NO_POP();
+                    if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                        soac_call = &soac_call_storage;
+                        SAVE_STACK();
+                        int soac_selected = _PySOAC_InterpreterSelectCall(
+                            frame, this_instr, Py_SOAC_INTERPRETER_CALL_EXPANDED,
+                            0, soac_call);
+                        RELOAD_STACK();
+                        if (soac_selected < 0) {
+                            ERROR_NO_POP();
+                        }
                     }
-                    result_o = _PySOAC_InterpreterObjectCallFromFrame(
-                        frame, this_instr, func, callargs, kwargs, &soac_call);
+                    result_o = soac_call != NULL
+                        ? _PySOAC_InterpreterObjectCallFromFrame(frame, this_instr, func, callargs, kwargs, soac_call)
+                        : _PySOAC_DataclassObjectCallFromFrame(frame, func, callargs, kwargs);
 
                     if (!PyFunction_Check(func) && !PyMethod_Check(func)) {
                         if (result_o == NULL) {
@@ -5104,23 +5127,27 @@ dummy_func(
                         int code_flags = ((PyCodeObject *)PyFunction_GET_CODE(func))->co_flags;
                         PyObject *locals = code_flags & CO_OPTIMIZED ? NULL : Py_NewRef(PyFunction_GET_GLOBALS(func));
 
-                        _PyInterpreterFrame *new_frame = _PySOAC_InterpreterPushCallEx(
-                            &soac_call, tstate, func_st, locals,
+                        _PyInterpreterFrame *new_frame = soac_call != NULL
+                            ? _PySOAC_InterpreterPushCallEx(soac_call, tstate, func_st, locals,
+                            nargs, callargs, kwargs, frame)
+                            : _PyEvalFramePushAndInit_Ex(tstate, func_st, locals,
                             nargs, callargs, kwargs, frame);
                         // Need to sync the stack since we exit with DISPATCH_INLINED.
                         INPUTS_DEAD();
                         SYNC_SP();
                         if (new_frame == NULL) {
-                            _PySOAC_InterpreterCallFailed(&soac_call);
+                            _PySOAC_InterpreterCallFailed(soac_call);
                             ERROR_NO_POP();
                         }
-                        SAVE_STACK();
-                        int soac_committed = _PySOAC_InterpreterCallCommit(&soac_call, new_frame);
-                        RELOAD_STACK();
-                        if (soac_committed < 0) {
-                            _PyEval_FrameClearAndPop(tstate, new_frame);
-                            _PySOAC_InterpreterCallFailed(&soac_call);
-                            ERROR_NO_POP();
+                        if (soac_call != NULL) {
+                            SAVE_STACK();
+                            int soac_committed = _PySOAC_InterpreterCallCommit(soac_call, new_frame);
+                            RELOAD_STACK();
+                            if (soac_committed < 0) {
+                                _PyEval_FrameClearAndPop(tstate, new_frame);
+                                _PySOAC_InterpreterCallFailed(soac_call);
+                                ERROR_NO_POP();
+                            }
                         }
                         assert(INSTRUCTION_SIZE == 1 + INLINE_CACHE_ENTRIES_CALL_FUNCTION_EX);
                         frame->return_offset = INSTRUCTION_SIZE;
@@ -5130,8 +5157,9 @@ dummy_func(
                     assert(PyTuple_CheckExact(callargs));
                     PyObject *kwargs = PyStackRef_AsPyObjectBorrow(kwargs_st);
                     assert(kwargs == NULL || PyDict_CheckExact(kwargs));
-                    result_o = _PySOAC_InterpreterObjectCallFromFrame(
-                        frame, this_instr, func, callargs, kwargs, &soac_call);
+                    result_o = soac_call != NULL
+                        ? _PySOAC_InterpreterObjectCallFromFrame(frame, this_instr, func, callargs, kwargs, soac_call)
+                        : _PySOAC_DataclassObjectCallFromFrame(frame, func, callargs, kwargs);
                 }
                 PyStackRef_XCLOSE(kwargs_st);
                 PyStackRef_CLOSE(callargs_st);
@@ -5139,7 +5167,9 @@ dummy_func(
                 PyStackRef_CLOSE(func_st);
                 INPUTS_DEAD();
                 SYNC_SP();
-                _PySOAC_InterpreterCallFinished(&soac_call, &result_o);
+                if (soac_call != NULL) {
+                    _PySOAC_InterpreterCallFinished(soac_call, &result_o);
+                }
                 ERROR_IF(result_o == NULL);
                 result = PyStackRef_FromPyObjectSteal(result_o);
             }
@@ -5148,7 +5178,7 @@ dummy_func(
         specializing op(_SPECIALIZE_CALL_FUNCTION_EX, (counter/1, func, unused, unused, unused -- func, unused, unused, unused)) {
         #if ENABLE_SPECIALIZATION
             if (ADAPTIVE_COUNTER_TRIGGERS(counter) &&
-                frame->soac_checked_activation == NULL) {
+                !_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
                 next_instr = this_instr;
                 _Py_Specialize_CallFunctionEx(func, next_instr);
                 DISPATCH_SAME_OPARG();
@@ -5195,7 +5225,7 @@ dummy_func(
 
         macro(CALL_EX_PY) =
             _RECORD_4OS +
-            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
+            _CHECK_NO_SOAC_CONSTRUCTION_CALL +
             unused/1 +
             _CHECK_PEP_523 +
             _MAKE_CALLARGS_A_TUPLE +
@@ -5218,8 +5248,8 @@ dummy_func(
             assert(kwargs == NULL || PyDict_CheckExact(kwargs));
             /* The specialization's mandatory activation guard leaves actual
              * checked CALL observation to the generic consuming path. */
-            PyObject *result_o = _PySOAC_InterpreterObjectCallFromFrame(
-                frame, frame->instr_ptr, func, callargs, kwargs, NULL);
+            PyObject *result_o = _PySOAC_DataclassObjectCallFromFrame(
+                frame, func, callargs, kwargs);
             PyStackRef_XCLOSE(kwargs_st);
             PyStackRef_CLOSE(callargs_st);
             DEAD(null);
@@ -5229,7 +5259,7 @@ dummy_func(
         }
 
         macro(CALL_EX_NON_PY_GENERAL) =
-            _CHECK_NO_SOAC_GENERATED_ACTIVATION +
+            _CHECK_NO_SOAC_CONSTRUCTION_CALL +
             unused/1 +
             _CHECK_IS_NOT_PY_CALLABLE_EX +
             _MAKE_CALLARGS_A_TUPLE +
@@ -5297,6 +5327,17 @@ dummy_func(
             }
             /* The callback may replace attr: do not read that borrowed
              * installed value again after the publication event. */
+        }
+
+        inst(SOAC_BEGIN_DEFINITION, (--)) {
+            int err = _PySOAC_InterpreterBeginDefinition(frame, frame->instr_ptr);
+            ERROR_IF(err < 0);
+        }
+
+        inst(SOAC_END_FUNCTION_BIRTH, (value -- value)) {
+            int err = _PySOAC_InterpreterEndFunctionBirth(
+                frame, frame->instr_ptr, PyStackRef_AsPyObjectBorrow(value));
+            if (err < 0) { ERROR_NO_POP(); }
         }
 
         inst(SOAC_COMPLETE_DEFINITION, (value -- value)) {
@@ -6005,6 +6046,7 @@ dummy_func(
             SAVE_STACK();
             STOP_TRACING();
             RELOAD_STACK();
+            _PySOAC_InterpreterAbortDefinition(frame, frame->instr_ptr, -1);
             assert(frame->owner != FRAME_OWNED_BY_INTERPRETER);
             if (!_PyFrame_IsIncomplete(frame)) {
                 PyFrameObject *f = _PyFrame_GetFrameObject(frame);
@@ -6033,6 +6075,7 @@ dummy_func(
             int offset = INSTR_OFFSET()-1;
             int level, handler, lasti;
             int handled = get_exception_handler(_PyFrame_GetCode(frame), offset, &level, &handler, &lasti);
+            _PySOAC_InterpreterAbortDefinition(frame, frame->instr_ptr, handled ? handler : -1);
             if (handled == 0) {
                 // No handlers, so exit.
                 assert(_PyErr_Occurred(tstate));
@@ -6156,7 +6199,7 @@ dummy_func(
             frame->instr_ptr = prev_instr;
             opcode = next_instr->op.code;
             bool stop_tracing = (
-                frame->soac_checked_activation != NULL ||
+                frame->soac_source_authority ||
                 opcode == WITH_EXCEPT_START ||
                 opcode == RERAISE ||
                 opcode == CLEANUP_THROW ||
