@@ -611,6 +611,15 @@ specialize_dict_access_inline(
     }
     assert(index >= 0);
     assert(_PyObject_InlineValues(owner)->valid);
+    if (base_op == LOAD_ATTR &&
+        (type->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) &&
+        FT_ATOMIC_LOAD_PTR_ACQUIRE(
+            _PyObject_InlineValues(owner)->values[index]) == NULL) {
+        /* A shared key alone cannot make this instance-value cache hit.
+         * Keep ordinary backoff until this receiver has an actual value. */
+        SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_ATTR_NOT_IN_DICT);
+        return 0;
+    }
     char *value_addr = (char *)&_PyObject_InlineValues(owner)->values[index];
     Py_ssize_t offset = value_addr - (char *)owner;
     if (offset != (uint16_t)offset) {
