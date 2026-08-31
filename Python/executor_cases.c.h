@@ -20276,6 +20276,13 @@
             GOTO_TIER_ONE(_Py_TIER2_ERROR_AT_SAVED_IP);
         }
 
+        case _ERROR_UNWIND_r00: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
+            SET_CURRENT_CACHED_VALUES(0);
+            GOTO_TIER_ONE(_Py_TIER2_ERROR_UNWIND);
+        }
+
         case _SPILL_OR_RELOAD_r01: {
             CHECK_CURRENT_CACHED_VALUES(0);
             assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());

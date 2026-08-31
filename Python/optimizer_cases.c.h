@@ -4152,6 +4152,10 @@
             break;
         }
 
+        case _ERROR_UNWIND: {
+            break;
+        }
+
         case _SPILL_OR_RELOAD: {
             break;
         }

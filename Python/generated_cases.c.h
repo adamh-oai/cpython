@@ -781,7 +781,8 @@
                 int allowed = _PyFrame_CheckSoacExecution(frame);
                 stack_pointer = _PyFrame_GetStackPointer(frame);
                 if (allowed < 0) {
-                    JUMP_TO_LABEL(error);
+                    _PyFrame_SetStackPointer(frame, stack_pointer);
+                    JUMP_TO_LABEL(exit_unwind);
                 }
                 LLTRACE_RESUME_FRAME();
             }
@@ -2025,7 +2026,8 @@
                 int allowed = _PyFrame_CheckSoacExecution(frame);
                 stack_pointer = _PyFrame_GetStackPointer(frame);
                 if (allowed < 0) {
-                    JUMP_TO_LABEL(error);
+                    _PyFrame_SetStackPointer(frame, stack_pointer);
+                    JUMP_TO_LABEL(exit_unwind);
                 }
                 LLTRACE_RESUME_FRAME();
             }
@@ -2186,7 +2188,8 @@
                 int allowed = _PyFrame_CheckSoacExecution(frame);
                 stack_pointer = _PyFrame_GetStackPointer(frame);
                 if (allowed < 0) {
-                    JUMP_TO_LABEL(error);
+                    _PyFrame_SetStackPointer(frame, stack_pointer);
+                    JUMP_TO_LABEL(exit_unwind);
                 }
                 LLTRACE_RESUME_FRAME();
             }
@@ -2332,7 +2335,8 @@
                 int allowed = _PyFrame_CheckSoacExecution(frame);
                 stack_pointer = _PyFrame_GetStackPointer(frame);
                 if (allowed < 0) {
-                    JUMP_TO_LABEL(error);
+                    _PyFrame_SetStackPointer(frame, stack_pointer);
+                    JUMP_TO_LABEL(exit_unwind);
                 }
                 LLTRACE_RESUME_FRAME();
             }
@@ -2925,7 +2929,8 @@
                 int allowed = _PyFrame_CheckSoacExecution(frame);
                 stack_pointer = _PyFrame_GetStackPointer(frame);
                 if (allowed < 0) {
-                    JUMP_TO_LABEL(error);
+                    _PyFrame_SetStackPointer(frame, stack_pointer);
+                    JUMP_TO_LABEL(exit_unwind);
                 }
                 LLTRACE_RESUME_FRAME();
             }
@@ -3624,7 +3629,8 @@
                 int allowed = _PyFrame_CheckSoacExecution(frame);
                 stack_pointer = _PyFrame_GetStackPointer(frame);
                 if (allowed < 0) {
-                    JUMP_TO_LABEL(error);
+                    _PyFrame_SetStackPointer(frame, stack_pointer);
+                    JUMP_TO_LABEL(exit_unwind);
                 }
                 LLTRACE_RESUME_FRAME();
             }
@@ -3838,7 +3844,8 @@
                 int allowed = _PyFrame_CheckSoacExecution(frame);
                 stack_pointer = _PyFrame_GetStackPointer(frame);
                 if (allowed < 0) {
-                    JUMP_TO_LABEL(error);
+                    _PyFrame_SetStackPointer(frame, stack_pointer);
+                    JUMP_TO_LABEL(exit_unwind);
                 }
                 LLTRACE_RESUME_FRAME();
             }
@@ -4665,7 +4672,8 @@
                 int allowed = _PyFrame_CheckSoacExecution(frame);
                 stack_pointer = _PyFrame_GetStackPointer(frame);
                 if (allowed < 0) {
-                    JUMP_TO_LABEL(error);
+                    _PyFrame_SetStackPointer(frame, stack_pointer);
+                    JUMP_TO_LABEL(exit_unwind);
                 }
                 LLTRACE_RESUME_FRAME();
             }
@@ -4783,7 +4791,8 @@
                 int allowed = _PyFrame_CheckSoacExecution(frame);
                 stack_pointer = _PyFrame_GetStackPointer(frame);
                 if (allowed < 0) {
-                    JUMP_TO_LABEL(error);
+                    _PyFrame_SetStackPointer(frame, stack_pointer);
+                    JUMP_TO_LABEL(exit_unwind);
                 }
                 LLTRACE_RESUME_FRAME();
             }
@@ -6361,7 +6370,8 @@
                 int allowed = _PyFrame_CheckSoacExecution(frame);
                 stack_pointer = _PyFrame_GetStackPointer(frame);
                 if (allowed < 0) {
-                    JUMP_TO_LABEL(error);
+                    _PyFrame_SetStackPointer(frame, stack_pointer);
+                    JUMP_TO_LABEL(exit_unwind);
                 }
                 LLTRACE_RESUME_FRAME();
             }
@@ -9376,7 +9386,8 @@
                 int allowed = _PyFrame_CheckSoacExecution(frame);
                 stack_pointer = _PyFrame_GetStackPointer(frame);
                 if (allowed < 0) {
-                    JUMP_TO_LABEL(error);
+                    _PyFrame_SetStackPointer(frame, stack_pointer);
+                    JUMP_TO_LABEL(exit_unwind);
                 }
                 LLTRACE_RESUME_FRAME();
             }
@@ -11651,7 +11662,8 @@
                 int allowed = _PyFrame_CheckSoacExecution(frame);
                 stack_pointer = _PyFrame_GetStackPointer(frame);
                 if (allowed < 0) {
-                    JUMP_TO_LABEL(error);
+                    _PyFrame_SetStackPointer(frame, stack_pointer);
+                    JUMP_TO_LABEL(exit_unwind);
                 }
                 LLTRACE_RESUME_FRAME();
             }

@@ -272,7 +272,7 @@ const uint32_t _PyUop_Flags[MAX_UOP_ID+1] = {
     [_INIT_CALL_PY_EXACT_ARGS_3] = HAS_PURE_FLAG,
     [_INIT_CALL_PY_EXACT_ARGS_4] = HAS_PURE_FLAG,
     [_INIT_CALL_PY_EXACT_ARGS] = HAS_ARG_FLAG | HAS_PURE_FLAG,
-    [_PUSH_FRAME] = HAS_ERROR_FLAG | HAS_ESCAPES_FLAG | HAS_SYNC_SP_FLAG | HAS_NEEDS_GUARD_IP_FLAG,
+    [_PUSH_FRAME] = HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG | HAS_SYNC_SP_FLAG | HAS_NEEDS_GUARD_IP_FLAG,
     [_GUARD_NOS_NULL] = HAS_DEOPT_FLAG,
     [_GUARD_NOS_NOT_NULL] = HAS_EXIT_FLAG,
     [_GUARD_THIRD_NULL] = HAS_DEOPT_FLAG,
@@ -374,6 +374,7 @@ const uint32_t _PyUop_Flags[MAX_UOP_ID+1] = {
     [_HANDLE_PENDING_AND_DEOPT] = HAS_ESCAPES_FLAG | HAS_SYNC_SP_FLAG,
     [_ERROR_POP_N] = HAS_ARG_FLAG | HAS_SYNC_SP_FLAG,
     [_ERROR_AT_SAVED_IP] = HAS_SYNC_SP_FLAG,
+    [_ERROR_UNWIND] = HAS_SYNC_SP_FLAG,
     [_SPILL_OR_RELOAD] = 0,
     [_TIER2_RESUME_CHECK] = HAS_PERIODIC_FLAG,
     [_COLD_EXIT] = HAS_SYNC_SP_FLAG,
@@ -3457,6 +3458,15 @@ const _PyUopCachingInfo _PyUop_Caching[MAX_UOP_ID+1] = {
             { -1, -1, -1 },
         },
     },
+    [_ERROR_UNWIND] = {
+        .best = { 0, 0, 0, 0 },
+        .entries = {
+            { 0, 0, _ERROR_UNWIND_r00 },
+            { -1, -1, -1 },
+            { -1, -1, -1 },
+            { -1, -1, -1 },
+        },
+    },
     [_TIER2_RESUME_CHECK] = {
         .best = { 0, 1, 2, 3 },
         .entries = {
@@ -4298,6 +4308,7 @@ const uint16_t _PyUop_Uncached[MAX_UOP_REGS_ID+1] = {
     [_HANDLE_PENDING_AND_DEOPT_r30] = _HANDLE_PENDING_AND_DEOPT,
     [_ERROR_POP_N_r00] = _ERROR_POP_N,
     [_ERROR_AT_SAVED_IP_r00] = _ERROR_AT_SAVED_IP,
+    [_ERROR_UNWIND_r00] = _ERROR_UNWIND,
     [_SPILL_OR_RELOAD_r01] = _SPILL_OR_RELOAD,
     [_SPILL_OR_RELOAD_r02] = _SPILL_OR_RELOAD,
     [_SPILL_OR_RELOAD_r03] = _SPILL_OR_RELOAD,
@@ -4634,6 +4645,8 @@ const char *const _PyOpcode_uop_name[MAX_UOP_REGS_ID+1] = {
     [_ERROR_AT_SAVED_IP_r00] = "_ERROR_AT_SAVED_IP_r00",
     [_ERROR_POP_N] = "_ERROR_POP_N",
     [_ERROR_POP_N_r00] = "_ERROR_POP_N_r00",
+    [_ERROR_UNWIND] = "_ERROR_UNWIND",
+    [_ERROR_UNWIND_r00] = "_ERROR_UNWIND_r00",
     [_EXIT_INIT_CHECK] = "_EXIT_INIT_CHECK",
     [_EXIT_INIT_CHECK_r10] = "_EXIT_INIT_CHECK_r10",
     [_EXIT_TRACE] = "_EXIT_TRACE",
@@ -6195,6 +6208,8 @@ int _PyUop_num_popped(int opcode, int oparg)
         case _ERROR_POP_N:
             return 0;
         case _ERROR_AT_SAVED_IP:
+            return 0;
+        case _ERROR_UNWIND:
             return 0;
         case _SPILL_OR_RELOAD:
             return 0;
