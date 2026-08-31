@@ -1322,7 +1322,7 @@ dummy_func(
                 /* Match exit_unwind's caller coordinates after the callee
                  * has gone. Never search the caller with its child's IP. */
                 frame->return_offset = 0;
-                next_instr = frame->instr_ptr;
+                LOAD_IP(0);
                 ERROR_NO_POP();
             }
             LOAD_IP(frame->return_offset);
