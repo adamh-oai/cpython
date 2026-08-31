@@ -10086,12 +10086,12 @@
             {
                 uint16_t version = read_u16(&this_instr[2].cache);
                 #ifdef Py_GIL_DISABLED
-                if (true) {
+                if (Py_GIL_DISABLED) {
                     UPDATE_MISS_STATS(LOAD_GLOBAL);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
                     JUMP_TO_PREDICTED(LOAD_GLOBAL);
                 }
-                #else
+                #endif
                 PyDictObject *dict = (PyDictObject *)GLOBALS();
                 if (!PyDict_CheckExact(dict)) {
                     UPDATE_MISS_STATS(LOAD_GLOBAL);
@@ -10114,7 +10114,6 @@
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
                     JUMP_TO_PREDICTED(LOAD_GLOBAL);
                 }
-                #endif
             }
             // _LOAD_GLOBAL_BUILTINS
             {
@@ -10251,12 +10250,12 @@
                 uint16_t version = read_u16(&this_instr[2].cache);
                 uint16_t index = read_u16(&this_instr[4].cache);
                 #ifdef Py_GIL_DISABLED
-                if (true) {
+                if (Py_GIL_DISABLED) {
                     UPDATE_MISS_STATS(LOAD_GLOBAL);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
                     JUMP_TO_PREDICTED(LOAD_GLOBAL);
                 }
-                #else
+                #endif
                 PyDictObject *dict = (PyDictObject *)GLOBALS();
                 if (!PyDict_CheckExact(dict)) {
                     UPDATE_MISS_STATS(LOAD_GLOBAL);
@@ -10299,16 +10298,16 @@
                 }
                 res = PyStackRef_FromPyObjectNew(res_o);
                 STAT_INC(LOAD_GLOBAL, hit);
-                #endif
             }
             // _PUSH_NULL_CONDITIONAL
             {
-                null = &stack_pointer[0];
+                null = &stack_pointer[1];
                 if (oparg & 1) {
                     null[0] = PyStackRef_NULL;
                 }
             }
-            stack_pointer += (oparg & 1);
+            stack_pointer[0] = res;
+            stack_pointer += 1 + (oparg & 1);
             ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
             DISPATCH();
         }
