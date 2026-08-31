@@ -600,6 +600,42 @@ class TestUopsOptimization(unittest.TestCase):
         self.assertIn("_BINARY_OP_ADD_INT", uops)
         self.assertNotIn("_CHECK_PEP_523", uops)
 
+    def test_soac_call_guard_replacement_keeps_actual_tier2_calls(self):
+        is_active = sys._jit.is_active
+
+        def ordinary(value):
+            return value + 1
+
+        def drive(count):
+            result = 0
+            before = after = False
+            while count:
+                before = is_active()
+                result = ordinary(count)
+                after = is_active()
+                count -= 1
+            return result, before, after
+
+        result = drive(2 * TIER2_THRESHOLD + 2)
+        self.assertEqual(result, (2, True, True))
+        candidates = [
+            executor for executor in get_all_executors(drive)
+            if executor.is_valid()
+            and "_CALL_NON_PY_GENERAL" in get_opnames(executor)
+            and "_PUSH_FRAME" in get_opnames(executor)
+        ]
+        self.assertTrue(candidates, "ordinary C and Python calls must both trace")
+        names = get_opnames(candidates[0])
+        c_call = names.index("_CALL_NON_PY_GENERAL")
+        push = names.index("_PUSH_FRAME", c_call + 1)
+        self.assertIn("_CHECK_NO_SOAC_SOURCE_CALL", names[:c_call])
+        self.assertIn("_CHECK_NO_SOAC_SOURCE_CALL", names[c_call + 1:push])
+        self.assertTrue(any(
+            name in ("_CHECK_FUNCTION_VERSION", "_CHECK_FUNCTION_VERSION_INLINE")
+            for name in names[c_call + 1:push]
+        ))
+        self.assertNotIn("_CHECK_NO_SOAC_CONSTRUCTION_CALL", names)
+
     def test_int_type_propagate_through_range(self):
         def testfunc(n):
 

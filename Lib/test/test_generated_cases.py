@@ -172,6 +172,49 @@ class TestDefaultEvalFrameSelection(unittest.TestCase):
                     self.assertEqual(names[0], "_RECORD_4OS")
                     self.assertLess(names.index("_RECORD_4OS"), names.index(guard))
 
+    def test_real_call_macros_keep_a_viable_replaced_construction_guard(self):
+        analysis = analyzer.analyze_files([
+            os.path.join(test_tools.basepath, "Python", "bytecodes.c")
+        ])
+        source_guard = analysis.uops["_CHECK_NO_SOAC_CONSTRUCTION_CALL"]
+        tier2_guard = analysis.uops["_CHECK_NO_SOAC_SOURCE_CALL"]
+        # Tier 1 retains its exact instruction-dependent selection. The
+        # existing replacement mechanism supplies a separate tier-2 guard.
+        self.assertIn("replaced", source_guard.annotations)
+        self.assertTrue(source_guard.properties.needs_this)
+        self.assertTrue(source_guard.properties.deopts)
+        self.assertEqual(tier2_guard.properties.tier, 2)
+        self.assertTrue(tier2_guard.is_viable())
+        self.assertFalse(tier2_guard.properties.needs_this)
+        self.assertTrue(tier2_guard.properties.deopts)
+        self.assertFalse(tier2_guard.properties.escapes)
+        for guard in (source_guard, tier2_guard):
+            self.assertEqual(guard.stack.inputs, [])
+            self.assertEqual(guard.stack.outputs, [])
+            self.assertEqual(guard.caches, [])
+
+        checked = set()
+        for instruction in analysis.instructions.values():
+            parts = [
+                part.replicates or part
+                for part in instruction.parts if isinstance(part, analyzer.Uop)
+            ]
+            names = [part.name for part in parts]
+            if source_guard.name not in names:
+                continue
+            with self.subTest(instruction=instruction.name):
+                self.assertEqual(names.count(source_guard.name), 1)
+                self.assertTrue(
+                    opcode_metadata_generator.is_viable_expansion(instruction)
+                )
+                checked.add(instruction.name)
+        self.assertTrue({
+            "CALL_PY_EXACT_ARGS", "CALL_PY_GENERAL",
+            "CALL_BOUND_METHOD_EXACT_ARGS", "CALL_BOUND_METHOD_GENERAL",
+            "CALL_NON_PY_GENERAL", "CALL_BUILTIN_FAST",
+            "CALL_BUILTIN_FAST_WITH_KEYWORDS", "CALL_KW_PY",
+        }.issubset(checked))
+
     def test_known_guarded_producer_is_accepted(self):
         analysis = self.analyze_macro(
             "_CHECK_PEP_523 + _PY_FRAME_GENERAL + _SAVE_RETURN_OFFSET + _PUSH_FRAME"

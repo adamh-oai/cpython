@@ -3909,11 +3909,18 @@ dummy_func(
             #endif  /* ENABLE_SPECIALIZATION */
         }
 
-        op(_CHECK_NO_SOAC_CONSTRUCTION_CALL, (--)) {
+        replaced op(_CHECK_NO_SOAC_CONSTRUCTION_CALL, (--)) {
             /* Only preselected construction sites require source CALL dispatch.
              * Ordinary sites retain native CALL specialization even while a
              * surrounding declaration has an active metadata context. */
             DEOPT_IF(_PyFrame_HasSoacRelevantCall(frame, this_instr));
+        }
+
+        tier2 op(_CHECK_NO_SOAC_SOURCE_CALL, (--)) {
+            /* Tier 2 does not carry the tier-1 instruction pointer needed
+             * to select a construction site. Refuse actual source authority
+             * before calling; ordinary frames have no selected call sites. */
+            DEOPT_IF(frame->soac_source_authority);
         }
 
         op(_MAYBE_EXPAND_METHOD, (callable, self_or_null, unused[oparg] -- callable, self_or_null, unused[oparg])) {

@@ -503,6 +503,7 @@ _PyUOp_Replacements[MAX_UOP_ID + 1] = {
     [_FOR_ITER] = _FOR_ITER_TIER_TWO,
     [_ITER_NEXT_LIST] = _ITER_NEXT_LIST_TIER_TWO,
     [_CHECK_PERIODIC_AT_END] = _TIER2_RESUME_CHECK,
+    [_CHECK_NO_SOAC_CONSTRUCTION_CALL] = _CHECK_NO_SOAC_SOURCE_CALL,
 };
 
 static const uint8_t
@@ -889,6 +890,11 @@ _PyJit_translate_single_bytecode_to_trace(
                     case OPARG_REPLACED:
                         uop = _PyUOp_Replacements[uop];
                         assert(uop != 0);
+                        if (uop == _CHECK_NO_SOAC_SOURCE_CALL) {
+                            /* This guard resumes at the original CALL, not
+                             * at a FOR_ITER exit or the next instruction. */
+                            break;
+                        }
 
                         uint32_t next_inst = target + 1 + _PyOpcode_Caches[_PyOpcode_Deopt[opcode]];
                         if (uop == _TIER2_RESUME_CHECK) {
