@@ -1754,7 +1754,7 @@
                 (void)counter;
                 #if ENABLE_SPECIALIZATION
                 if (ADAPTIVE_COUNTER_TRIGGERS(counter) &&
-                    !_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                    !_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     next_instr = this_instr;
                     _PyFrame_SetStackPointer(frame, stack_pointer);
                     _Py_Specialize_Call(callable, self_or_null, next_instr, oparg + !PyStackRef_IsNull(self_or_null));
@@ -1794,7 +1794,7 @@
                 }
                 _PySoacInterpreterCallV1 soac_call_storage;
                 _PySoacInterpreterCallV1 *soac_call = NULL;
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     soac_call = &soac_call_storage;
                     stack_pointer[-2 - oparg] = callable;
                     stack_pointer[-1 - oparg] = self_or_null;
@@ -1908,7 +1908,7 @@
             _PyStackRef new_frame;
             // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -2050,7 +2050,7 @@
             _PyStackRef new_frame;
             // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -2211,7 +2211,7 @@
             _PyStackRef new_frame;
             // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -2356,7 +2356,7 @@
             _PyStackRef res;
             // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -2433,7 +2433,7 @@
             _PyStackRef res;
             // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -2515,7 +2515,7 @@
             _PyStackRef res;
             // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -2596,7 +2596,7 @@
             _PyStackRef value;
             // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -2702,7 +2702,7 @@
             _PyStackRef result;
             // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL_FUNCTION_EX);
                     assert(_PyOpcode_Deopt[opcode] == (CALL_FUNCTION_EX));
                     JUMP_TO_PREDICTED(CALL_FUNCTION_EX);
@@ -2817,7 +2817,7 @@
             _PyStackRef new_frame;
             // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL_FUNCTION_EX);
                     assert(_PyOpcode_Deopt[opcode] == (CALL_FUNCTION_EX));
                     JUMP_TO_PREDICTED(CALL_FUNCTION_EX);
@@ -2958,7 +2958,7 @@
                 (void)counter;
                 #if ENABLE_SPECIALIZATION
                 if (ADAPTIVE_COUNTER_TRIGGERS(counter) &&
-                    !_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                    !_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     next_instr = this_instr;
                     _PyFrame_SetStackPointer(frame, stack_pointer);
                     _Py_Specialize_CallFunctionEx(func, next_instr);
@@ -3007,7 +3007,7 @@
                 _PySoacInterpreterCallV1 soac_call_storage;
                 _PySoacInterpreterCallV1 *soac_call = NULL;
                 if (opcode != INSTRUMENTED_CALL_FUNCTION_EX) {
-                    if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                    if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                         soac_call = &soac_call_storage;
                         stack_pointer[-2] = callargs_st;
                         _PyFrame_SetStackPointer(frame, stack_pointer);
@@ -3038,7 +3038,7 @@
                         if (err) {
                             JUMP_TO_LABEL(error);
                         }
-                        if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                        if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                             soac_call = &soac_call_storage;
                             _PyFrame_SetStackPointer(frame, stack_pointer);
                             int soac_selected = _PySOAC_InterpreterSelectCall(
@@ -3260,7 +3260,7 @@
             _PyStackRef res;
             // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -3351,7 +3351,7 @@
                 (void)counter;
                 #if ENABLE_SPECIALIZATION
                 if (ADAPTIVE_COUNTER_TRIGGERS(counter) &&
-                    !_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                    !_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     next_instr = this_instr;
                     _PyFrame_SetStackPointer(frame, stack_pointer);
                     _Py_Specialize_CallKw(callable, next_instr, oparg + !PyStackRef_IsNull(self_or_null));
@@ -3394,7 +3394,7 @@
                 int positional_args = total_args - (int)PyTuple_GET_SIZE(kwnames_o);
                 _PySoacInterpreterCallV1 soac_call_storage;
                 _PySoacInterpreterCallV1 *soac_call = NULL;
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     soac_call = &soac_call_storage;
                     stack_pointer[-3 - oparg] = callable;
                     stack_pointer[-2 - oparg] = self_or_null;
@@ -3502,7 +3502,7 @@
             _PyStackRef new_frame;
             // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL_KW);
                     assert(_PyOpcode_Deopt[opcode] == (CALL_KW));
                     JUMP_TO_PREDICTED(CALL_KW);
@@ -3650,7 +3650,7 @@
             _PyStackRef res;
             // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL_KW);
                     assert(_PyOpcode_Deopt[opcode] == (CALL_KW));
                     JUMP_TO_PREDICTED(CALL_KW);
@@ -3735,7 +3735,7 @@
             _PyStackRef new_frame;
             // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL_KW);
                     assert(_PyOpcode_Deopt[opcode] == (CALL_KW));
                     JUMP_TO_PREDICTED(CALL_KW);
@@ -3865,7 +3865,7 @@
             _PyStackRef value;
             // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -3957,7 +3957,7 @@
             _PyStackRef value;
             // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -4056,7 +4056,7 @@
             _PyStackRef res;
             // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -4149,7 +4149,7 @@
             _PyStackRef res;
             // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -4243,7 +4243,7 @@
             _PyStackRef res;
             // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -4348,7 +4348,7 @@
             _PyStackRef value;
             // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -4475,7 +4475,7 @@
             _PyStackRef res;
             // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -4558,7 +4558,7 @@
             _PyStackRef new_frame;
             // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -4689,7 +4689,7 @@
             _PyStackRef new_frame;
             // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -4809,7 +4809,7 @@
             _PyStackRef value;
             // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -4892,7 +4892,7 @@
             _PyStackRef value;
             // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -4975,7 +4975,7 @@
             _PyStackRef value;
             // _CHECK_NO_SOAC_CONSTRUCTION_CALL
             {
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -6950,7 +6950,7 @@
                 }
                 _PySoacInterpreterCallV1 soac_call_storage;
                 _PySoacInterpreterCallV1 *soac_call = NULL;
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     soac_call = &soac_call_storage;
                     _PyFrame_SetStackPointer(frame, stack_pointer);
                     int soac_selected = _PySOAC_InterpreterSelectCall(
@@ -7096,7 +7096,7 @@
                 _PySoacInterpreterCallV1 soac_call_storage;
                 _PySoacInterpreterCallV1 *soac_call = NULL;
                 if (opcode != INSTRUMENTED_CALL_FUNCTION_EX) {
-                    if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                    if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                         soac_call = &soac_call_storage;
                         stack_pointer[-2] = callargs_st;
                         _PyFrame_SetStackPointer(frame, stack_pointer);
@@ -7127,7 +7127,7 @@
                         if (err) {
                             JUMP_TO_LABEL(error);
                         }
-                        if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                        if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                             soac_call = &soac_call_storage;
                             _PyFrame_SetStackPointer(frame, stack_pointer);
                             int soac_selected = _PySOAC_InterpreterSelectCall(
@@ -7339,7 +7339,7 @@
                 int positional_args = total_args - (int)PyTuple_GET_SIZE(kwnames_o);
                 _PySoacInterpreterCallV1 soac_call_storage;
                 _PySoacInterpreterCallV1 *soac_call = NULL;
-                if (_PySOAC_InterpreterCallRelevant(frame, this_instr)) {
+                if (_PyFrame_HasSoacRelevantCall(frame, this_instr)) {
                     soac_call = &soac_call_storage;
                     _PyFrame_SetStackPointer(frame, stack_pointer);
                     int soac_selected = _PySOAC_InterpreterSelectCall(
@@ -8099,7 +8099,7 @@
                 _Py_LeaveRecursiveCallPy(tstate);
                 _PyInterpreterFrame *dying = frame;
                 _PySoacInterpreterRootFinishV1 soac_finish;
-                _PySOAC_InterpreterTakeDataclassRoot(dying, &soac_finish);
+                _PyFrame_TakeSoacDataclassRoot(dying, &soac_finish);
                 frame = tstate->current_frame = dying->previous;
                 _PyEval_FrameClearAndPop(tstate, dying);
                 int soac_finished = 0;
@@ -8638,12 +8638,16 @@
                 uint32_t type_version = read_u32(&this_instr[2].cache);
                 PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
                 assert(type_version != 0);
-                if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
+                if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
                     UPDATE_MISS_STATS(LOAD_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                     JUMP_TO_PREDICTED(LOAD_ATTR);
                 }
-                if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
+            }
+            // _GUARD_NO_SOAC_TYPE
+            {
+                PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
+                if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
                     UPDATE_MISS_STATS(LOAD_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                     JUMP_TO_PREDICTED(LOAD_ATTR);
@@ -8776,12 +8780,17 @@
                 uint32_t type_version = read_u32(&this_instr[2].cache);
                 PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
                 assert(type_version != 0);
-                if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
+                if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
                     UPDATE_MISS_STATS(LOAD_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                     JUMP_TO_PREDICTED(LOAD_ATTR);
                 }
-                if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
+            }
+            // _GUARD_SOAC_TYPE_READ
+            {
+                PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
+                if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) &&
+                    !_PySOAC_TypeReadCacheReady(tp)) {
                     UPDATE_MISS_STATS(LOAD_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                     JUMP_TO_PREDICTED(LOAD_ATTR);
@@ -8866,12 +8875,17 @@
                 uint32_t type_version = read_u32(&this_instr[2].cache);
                 PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
                 assert(type_version != 0);
-                if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
+                if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
                     UPDATE_MISS_STATS(LOAD_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                     JUMP_TO_PREDICTED(LOAD_ATTR);
                 }
-                if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
+            }
+            // _GUARD_SOAC_TYPE_READ
+            {
+                PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
+                if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) &&
+                    !_PySOAC_TypeReadCacheReady(tp)) {
                     UPDATE_MISS_STATS(LOAD_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                     JUMP_TO_PREDICTED(LOAD_ATTR);
@@ -8927,12 +8941,17 @@
                 uint32_t type_version = read_u32(&this_instr[2].cache);
                 PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
                 assert(type_version != 0);
-                if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
+                if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
                     UPDATE_MISS_STATS(LOAD_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                     JUMP_TO_PREDICTED(LOAD_ATTR);
                 }
-                if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
+            }
+            // _GUARD_SOAC_TYPE_READ
+            {
+                PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
+                if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) &&
+                    !_PySOAC_TypeReadCacheReady(tp)) {
                     UPDATE_MISS_STATS(LOAD_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                     JUMP_TO_PREDICTED(LOAD_ATTR);
@@ -8978,12 +8997,17 @@
                 uint32_t type_version = read_u32(&this_instr[2].cache);
                 PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
                 assert(type_version != 0);
-                if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
+                if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
                     UPDATE_MISS_STATS(LOAD_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                     JUMP_TO_PREDICTED(LOAD_ATTR);
                 }
-                if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
+            }
+            // _GUARD_SOAC_TYPE_READ
+            {
+                PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
+                if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) &&
+                    !_PySOAC_TypeReadCacheReady(tp)) {
                     UPDATE_MISS_STATS(LOAD_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                     JUMP_TO_PREDICTED(LOAD_ATTR);
@@ -9130,12 +9154,17 @@
                 uint32_t type_version = read_u32(&this_instr[2].cache);
                 PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
                 assert(type_version != 0);
-                if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
+                if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
                     UPDATE_MISS_STATS(LOAD_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                     JUMP_TO_PREDICTED(LOAD_ATTR);
                 }
-                if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
+            }
+            // _GUARD_SOAC_TYPE_READ
+            {
+                PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
+                if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) &&
+                    !_PySOAC_TypeReadCacheReady(tp)) {
                     UPDATE_MISS_STATS(LOAD_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                     JUMP_TO_PREDICTED(LOAD_ATTR);
@@ -9182,12 +9211,17 @@
                 uint32_t type_version = read_u32(&this_instr[2].cache);
                 PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
                 assert(type_version != 0);
-                if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
+                if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
                     UPDATE_MISS_STATS(LOAD_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                     JUMP_TO_PREDICTED(LOAD_ATTR);
                 }
-                if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
+            }
+            // _GUARD_SOAC_TYPE_READ
+            {
+                PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
+                if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) &&
+                    !_PySOAC_TypeReadCacheReady(tp)) {
                     UPDATE_MISS_STATS(LOAD_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                     JUMP_TO_PREDICTED(LOAD_ATTR);
@@ -9255,12 +9289,17 @@
                 uint32_t type_version = read_u32(&this_instr[2].cache);
                 PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
                 assert(type_version != 0);
-                if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
+                if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
                     UPDATE_MISS_STATS(LOAD_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                     JUMP_TO_PREDICTED(LOAD_ATTR);
                 }
-                if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
+            }
+            // _GUARD_SOAC_TYPE_READ
+            {
+                PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
+                if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) &&
+                    !_PySOAC_TypeReadCacheReady(tp)) {
                     UPDATE_MISS_STATS(LOAD_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                     JUMP_TO_PREDICTED(LOAD_ATTR);
@@ -9367,12 +9406,16 @@
                 uint32_t type_version = read_u32(&this_instr[2].cache);
                 PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
                 assert(type_version != 0);
-                if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
+                if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
                     UPDATE_MISS_STATS(LOAD_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                     JUMP_TO_PREDICTED(LOAD_ATTR);
                 }
-                if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
+            }
+            // _GUARD_NO_SOAC_TYPE
+            {
+                PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
+                if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
                     UPDATE_MISS_STATS(LOAD_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                     JUMP_TO_PREDICTED(LOAD_ATTR);
@@ -9452,12 +9495,17 @@
                 uint32_t type_version = read_u32(&this_instr[2].cache);
                 PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
                 assert(type_version != 0);
-                if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
+                if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
                     UPDATE_MISS_STATS(LOAD_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                     JUMP_TO_PREDICTED(LOAD_ATTR);
                 }
-                if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
+            }
+            // _GUARD_SOAC_TYPE_READ
+            {
+                PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
+                if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) &&
+                    !_PySOAC_TypeReadCacheReady(tp)) {
                     UPDATE_MISS_STATS(LOAD_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                     JUMP_TO_PREDICTED(LOAD_ATTR);
@@ -9967,7 +10015,106 @@
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
                     JUMP_TO_PREDICTED(LOAD_GLOBAL);
                 }
+                assert(keys->dk_kind == DICT_KEYS_UNICODE ||
+                   (keys->dk_kind == DICT_KEYS_INDEXED_UNICODE &&
+                    keys->dk_nentries == 0));
+            }
+            // _LOAD_GLOBAL_BUILTINS
+            {
+                uint16_t version = read_u16(&this_instr[3].cache);
+                uint16_t index = read_u16(&this_instr[4].cache);
+                PyDictObject *dict = (PyDictObject *)BUILTINS();
+                if (!PyDict_CheckExact(dict)) {
+                    UPDATE_MISS_STATS(LOAD_GLOBAL);
+                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
+                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
+                }
+                PyDictKeysObject *keys = FT_ATOMIC_LOAD_PTR_ACQUIRE(dict->ma_keys);
+                if (FT_ATOMIC_LOAD_UINT32_RELAXED(keys->dk_version) != version) {
+                    UPDATE_MISS_STATS(LOAD_GLOBAL);
+                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
+                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
+                }
                 assert(keys->dk_kind == DICT_KEYS_UNICODE);
+                PyDictUnicodeEntry *entries = DK_UNICODE_ENTRIES(keys);
+                PyObject *res_o = FT_ATOMIC_LOAD_PTR_RELAXED(entries[index].me_value);
+                if (res_o == NULL) {
+                    UPDATE_MISS_STATS(LOAD_GLOBAL);
+                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
+                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
+                }
+                #if Py_GIL_DISABLED
+                int increfed = _Py_TryIncrefCompareStackRef(&entries[index].me_value, res_o, &res);
+                if (!increfed) {
+                    UPDATE_MISS_STATS(LOAD_GLOBAL);
+                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
+                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
+                }
+                #else
+                res = PyStackRef_FromPyObjectNew(res_o);
+                #endif
+                STAT_INC(LOAD_GLOBAL, hit);
+            }
+            // _PUSH_NULL_CONDITIONAL
+            {
+                null = &stack_pointer[1];
+                if (oparg & 1) {
+                    null[0] = PyStackRef_NULL;
+                }
+            }
+            stack_pointer[0] = res;
+            stack_pointer += 1 + (oparg & 1);
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            DISPATCH();
+        }
+
+        TARGET(LOAD_GLOBAL_BUILTIN_INDEXED) {
+            #if _Py_TAIL_CALL_INTERP
+            int opcode = LOAD_GLOBAL_BUILTIN_INDEXED;
+            (void)(opcode);
+            #endif
+            _Py_CODEUNIT* const this_instr = next_instr;
+            (void)this_instr;
+            frame->instr_ptr = next_instr;
+            next_instr += 5;
+            INSTRUCTION_STATS(LOAD_GLOBAL_BUILTIN_INDEXED);
+            static_assert(INLINE_CACHE_ENTRIES_LOAD_GLOBAL == 4, "incorrect cache size");
+            _PyStackRef res;
+            _PyStackRef *null;
+            /* Skip 1 cache entry */
+            // _GUARD_INDEXED_GLOBALS_VERSION
+            {
+                uint16_t version = read_u16(&this_instr[2].cache);
+                #ifdef Py_GIL_DISABLED
+                if (true) {
+                    UPDATE_MISS_STATS(LOAD_GLOBAL);
+                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
+                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
+                }
+                #else
+                PyDictObject *dict = (PyDictObject *)GLOBALS();
+                if (!PyDict_CheckExact(dict)) {
+                    UPDATE_MISS_STATS(LOAD_GLOBAL);
+                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
+                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
+                }
+                PyDictKeysObject *keys = dict->ma_keys;
+                if (keys->dk_kind != DICT_KEYS_INDEXED_UNICODE) {
+                    UPDATE_MISS_STATS(LOAD_GLOBAL);
+                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
+                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
+                }
+                if (keys->dk_version != version) {
+                    UPDATE_MISS_STATS(LOAD_GLOBAL);
+                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
+                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
+                }
+                if (dict->ma_values == NULL) {
+                    UPDATE_MISS_STATS(LOAD_GLOBAL);
+                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
+                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
+                }
+                #endif
             }
             // _LOAD_GLOBAL_BUILTINS
             {
@@ -10081,6 +10228,87 @@
             }
             stack_pointer[0] = res;
             stack_pointer += 1 + (oparg & 1);
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            DISPATCH();
+        }
+
+        TARGET(LOAD_GLOBAL_MODULE_INDEXED) {
+            #if _Py_TAIL_CALL_INTERP
+            int opcode = LOAD_GLOBAL_MODULE_INDEXED;
+            (void)(opcode);
+            #endif
+            _Py_CODEUNIT* const this_instr = next_instr;
+            (void)this_instr;
+            frame->instr_ptr = next_instr;
+            next_instr += 5;
+            INSTRUCTION_STATS(LOAD_GLOBAL_MODULE_INDEXED);
+            static_assert(INLINE_CACHE_ENTRIES_LOAD_GLOBAL == 4, "incorrect cache size");
+            _PyStackRef res;
+            _PyStackRef *null;
+            /* Skip 1 cache entry */
+            // _LOAD_GLOBAL_MODULE_INDEXED
+            {
+                uint16_t version = read_u16(&this_instr[2].cache);
+                uint16_t index = read_u16(&this_instr[4].cache);
+                #ifdef Py_GIL_DISABLED
+                if (true) {
+                    UPDATE_MISS_STATS(LOAD_GLOBAL);
+                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
+                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
+                }
+                #else
+                PyDictObject *dict = (PyDictObject *)GLOBALS();
+                if (!PyDict_CheckExact(dict)) {
+                    UPDATE_MISS_STATS(LOAD_GLOBAL);
+                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
+                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
+                }
+                PyDictKeysObject *keys = dict->ma_keys;
+                if (keys->dk_kind != DICT_KEYS_INDEXED_UNICODE) {
+                    UPDATE_MISS_STATS(LOAD_GLOBAL);
+                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
+                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
+                }
+                if (keys->dk_version != version) {
+                    UPDATE_MISS_STATS(LOAD_GLOBAL);
+                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
+                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
+                }
+                PyDictIndexedValues *values = (PyDictIndexedValues *)dict->ma_values;
+                if (values == NULL) {
+                    UPDATE_MISS_STATS(LOAD_GLOBAL);
+                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
+                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
+                }
+                if (index >= keys->dk_nentries || index >= values->capacity) {
+                    UPDATE_MISS_STATS(LOAD_GLOBAL);
+                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
+                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
+                }
+                if (DK_UNICODE_ENTRIES(keys)[index].me_key == NULL) {
+                    UPDATE_MISS_STATS(LOAD_GLOBAL);
+                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
+                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
+                }
+                PyObject *res_o = values->values[index];
+                if (res_o == NULL ||
+                    res_o == (PyObject *)&_PyDict_IndexedValueTombstone) {
+                    UPDATE_MISS_STATS(LOAD_GLOBAL);
+                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
+                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
+                }
+                res = PyStackRef_FromPyObjectNew(res_o);
+                STAT_INC(LOAD_GLOBAL, hit);
+                #endif
+            }
+            // _PUSH_NULL_CONDITIONAL
+            {
+                null = &stack_pointer[0];
+                if (oparg & 1) {
+                    null[0] = PyStackRef_NULL;
+                }
+            }
+            stack_pointer += (oparg & 1);
             ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
             DISPATCH();
         }
@@ -11214,7 +11442,7 @@
                 _Py_LeaveRecursiveCallPy(tstate);
                 _PyInterpreterFrame *dying = frame;
                 _PySoacInterpreterRootFinishV1 soac_finish;
-                _PySOAC_InterpreterTakeDataclassRoot(dying, &soac_finish);
+                _PyFrame_TakeSoacDataclassRoot(dying, &soac_finish);
                 frame = tstate->current_frame = dying->previous;
                 _PyEval_FrameClearAndPop(tstate, dying);
                 int soac_finished = 0;
@@ -11826,12 +12054,16 @@
                 uint32_t type_version = read_u32(&this_instr[2].cache);
                 PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
                 assert(type_version != 0);
-                if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
+                if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
                     UPDATE_MISS_STATS(STORE_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (STORE_ATTR));
                     JUMP_TO_PREDICTED(STORE_ATTR);
                 }
-                if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
+            }
+            // _GUARD_NO_SOAC_TYPE
+            {
+                PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
+                if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
                     UPDATE_MISS_STATS(STORE_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (STORE_ATTR));
                     JUMP_TO_PREDICTED(STORE_ATTR);
@@ -11893,9 +12125,20 @@
             _PyStackRef value;
             _PyStackRef o;
             /* Skip 1 cache entry */
-            // _GUARD_NO_ORDINARY_INSTANCE_WRITES
+            // _GUARD_TYPE_VERSION
             {
                 owner = stack_pointer[-1];
+                uint32_t type_version = read_u32(&this_instr[2].cache);
+                PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
+                assert(type_version != 0);
+                if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
+                    UPDATE_MISS_STATS(STORE_ATTR);
+                    assert(_PyOpcode_Deopt[opcode] == (STORE_ATTR));
+                    JUMP_TO_PREDICTED(STORE_ATTR);
+                }
+            }
+            // _GUARD_NO_ORDINARY_INSTANCE_WRITES
+            {
                 PyObject *owner_o = PyStackRef_AsPyObjectBorrow(owner);
                 if (_PyObject_HasTypeStateSlot(owner_o) ||
                     _PySOAC_HasOrdinaryInstanceWrites(Py_TYPE(owner_o))) {
@@ -11904,17 +12147,10 @@
                     JUMP_TO_PREDICTED(STORE_ATTR);
                 }
             }
-            // _GUARD_TYPE_VERSION
+            // _GUARD_NO_SOAC_TYPE
             {
-                uint32_t type_version = read_u32(&this_instr[2].cache);
                 PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
-                assert(type_version != 0);
                 if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
-                    UPDATE_MISS_STATS(STORE_ATTR);
-                    assert(_PyOpcode_Deopt[opcode] == (STORE_ATTR));
-                    JUMP_TO_PREDICTED(STORE_ATTR);
-                }
-                if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
                     UPDATE_MISS_STATS(STORE_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (STORE_ATTR));
                     JUMP_TO_PREDICTED(STORE_ATTR);
@@ -12547,12 +12783,16 @@
                 uint32_t type_version = read_u32(&this_instr[2].cache);
                 PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
                 assert(type_version != 0);
-                if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
+                if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
                     UPDATE_MISS_STATS(TO_BOOL);
                     assert(_PyOpcode_Deopt[opcode] == (TO_BOOL));
                     JUMP_TO_PREDICTED(TO_BOOL);
                 }
-                if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
+            }
+            // _GUARD_NO_SOAC_TYPE
+            {
+                PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
+                if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
                     UPDATE_MISS_STATS(TO_BOOL);
                     assert(_PyOpcode_Deopt[opcode] == (TO_BOOL));
                     JUMP_TO_PREDICTED(TO_BOOL);
@@ -13399,7 +13639,7 @@ JUMP_TO_LABEL(error);
             assert(frame->owner != FRAME_OWNED_BY_INTERPRETER);
             _PyInterpreterFrame *dying = frame;
             _PySoacInterpreterRootFinishV1 soac_finish;
-            _PySOAC_InterpreterTakeDataclassRoot(dying, &soac_finish);
+            _PyFrame_TakeSoacDataclassRoot(dying, &soac_finish);
             frame = tstate->current_frame = dying->previous;
             _PyEval_FrameClearAndPop(tstate, dying);
             _PySOAC_InterpreterFinishDataclassRoot(&soac_finish, NULL);

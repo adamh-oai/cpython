@@ -6690,7 +6690,7 @@
             _Py_LeaveRecursiveCallPy(tstate);
             _PyInterpreterFrame *dying = frame;
             _PySoacInterpreterRootFinishV1 soac_finish;
-            _PySOAC_InterpreterTakeDataclassRoot(dying, &soac_finish);
+            _PyFrame_TakeSoacDataclassRoot(dying, &soac_finish);
             frame = tstate->current_frame = dying->previous;
             _PyEval_FrameClearAndPop(tstate, dying);
             int soac_finished = 0;
@@ -7603,7 +7603,9 @@
                 SET_CURRENT_CACHED_VALUES(0);
                 JUMP_TO_JUMP_TARGET();
             }
-            assert(keys->dk_kind == DICT_KEYS_UNICODE);
+            assert(keys->dk_kind == DICT_KEYS_UNICODE ||
+                   (keys->dk_kind == DICT_KEYS_INDEXED_UNICODE &&
+                    keys->dk_nentries == 0));
             SET_CURRENT_CACHED_VALUES(0);
             assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
             break;
@@ -7628,7 +7630,9 @@
                 SET_CURRENT_CACHED_VALUES(1);
                 JUMP_TO_JUMP_TARGET();
             }
-            assert(keys->dk_kind == DICT_KEYS_UNICODE);
+            assert(keys->dk_kind == DICT_KEYS_UNICODE ||
+                   (keys->dk_kind == DICT_KEYS_INDEXED_UNICODE &&
+                    keys->dk_nentries == 0));
             _tos_cache0 = _stack_item_0;
             SET_CURRENT_CACHED_VALUES(1);
             assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
@@ -7657,7 +7661,9 @@
                 SET_CURRENT_CACHED_VALUES(2);
                 JUMP_TO_JUMP_TARGET();
             }
-            assert(keys->dk_kind == DICT_KEYS_UNICODE);
+            assert(keys->dk_kind == DICT_KEYS_UNICODE ||
+                   (keys->dk_kind == DICT_KEYS_INDEXED_UNICODE &&
+                    keys->dk_nentries == 0));
             _tos_cache1 = _stack_item_1;
             _tos_cache0 = _stack_item_0;
             SET_CURRENT_CACHED_VALUES(2);
@@ -7690,7 +7696,9 @@
                 SET_CURRENT_CACHED_VALUES(3);
                 JUMP_TO_JUMP_TARGET();
             }
-            assert(keys->dk_kind == DICT_KEYS_UNICODE);
+            assert(keys->dk_kind == DICT_KEYS_UNICODE ||
+                   (keys->dk_kind == DICT_KEYS_INDEXED_UNICODE &&
+                    keys->dk_nentries == 0));
             _tos_cache2 = _stack_item_2;
             _tos_cache1 = _stack_item_1;
             _tos_cache0 = _stack_item_0;
@@ -8799,6 +8807,180 @@
             break;
         }
 
+        case _GUARD_NO_SOAC_TYPE_r01: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
+            _PyStackRef owner;
+            owner = stack_pointer[-1];
+            PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
+            if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
+                UOP_STAT_INC(uopcode, miss);
+                SET_CURRENT_CACHED_VALUES(0);
+                JUMP_TO_JUMP_TARGET();
+            }
+            _tos_cache0 = owner;
+            SET_CURRENT_CACHED_VALUES(1);
+            stack_pointer += -1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
+            break;
+        }
+
+        case _GUARD_NO_SOAC_TYPE_r11: {
+            CHECK_CURRENT_CACHED_VALUES(1);
+            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
+            _PyStackRef owner;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            owner = _stack_item_0;
+            PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
+            if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
+                UOP_STAT_INC(uopcode, miss);
+                _tos_cache0 = owner;
+                SET_CURRENT_CACHED_VALUES(1);
+                JUMP_TO_JUMP_TARGET();
+            }
+            _tos_cache0 = owner;
+            SET_CURRENT_CACHED_VALUES(1);
+            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
+            break;
+        }
+
+        case _GUARD_NO_SOAC_TYPE_r22: {
+            CHECK_CURRENT_CACHED_VALUES(2);
+            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
+            _PyStackRef owner;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            owner = _stack_item_1;
+            PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
+            if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
+                UOP_STAT_INC(uopcode, miss);
+                _tos_cache1 = owner;
+                _tos_cache0 = _stack_item_0;
+                SET_CURRENT_CACHED_VALUES(2);
+                JUMP_TO_JUMP_TARGET();
+            }
+            _tos_cache1 = owner;
+            _tos_cache0 = _stack_item_0;
+            SET_CURRENT_CACHED_VALUES(2);
+            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
+            break;
+        }
+
+        case _GUARD_NO_SOAC_TYPE_r33: {
+            CHECK_CURRENT_CACHED_VALUES(3);
+            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
+            _PyStackRef owner;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            _PyStackRef _stack_item_2 = _tos_cache2;
+            owner = _stack_item_2;
+            PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
+            if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
+                UOP_STAT_INC(uopcode, miss);
+                _tos_cache2 = owner;
+                _tos_cache1 = _stack_item_1;
+                _tos_cache0 = _stack_item_0;
+                SET_CURRENT_CACHED_VALUES(3);
+                JUMP_TO_JUMP_TARGET();
+            }
+            _tos_cache2 = owner;
+            _tos_cache1 = _stack_item_1;
+            _tos_cache0 = _stack_item_0;
+            SET_CURRENT_CACHED_VALUES(3);
+            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
+            break;
+        }
+
+        case _GUARD_SOAC_TYPE_READ_r01: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
+            _PyStackRef owner;
+            owner = stack_pointer[-1];
+            PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
+            if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) &&
+                    !_PySOAC_TypeReadCacheReady(tp)) {
+                UOP_STAT_INC(uopcode, miss);
+                SET_CURRENT_CACHED_VALUES(0);
+                JUMP_TO_JUMP_TARGET();
+            }
+            _tos_cache0 = owner;
+            SET_CURRENT_CACHED_VALUES(1);
+            stack_pointer += -1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
+            break;
+        }
+
+        case _GUARD_SOAC_TYPE_READ_r11: {
+            CHECK_CURRENT_CACHED_VALUES(1);
+            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
+            _PyStackRef owner;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            owner = _stack_item_0;
+            PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
+            if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) &&
+                    !_PySOAC_TypeReadCacheReady(tp)) {
+                UOP_STAT_INC(uopcode, miss);
+                _tos_cache0 = owner;
+                SET_CURRENT_CACHED_VALUES(1);
+                JUMP_TO_JUMP_TARGET();
+            }
+            _tos_cache0 = owner;
+            SET_CURRENT_CACHED_VALUES(1);
+            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
+            break;
+        }
+
+        case _GUARD_SOAC_TYPE_READ_r22: {
+            CHECK_CURRENT_CACHED_VALUES(2);
+            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
+            _PyStackRef owner;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            owner = _stack_item_1;
+            PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
+            if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) &&
+                    !_PySOAC_TypeReadCacheReady(tp)) {
+                UOP_STAT_INC(uopcode, miss);
+                _tos_cache1 = owner;
+                _tos_cache0 = _stack_item_0;
+                SET_CURRENT_CACHED_VALUES(2);
+                JUMP_TO_JUMP_TARGET();
+            }
+            _tos_cache1 = owner;
+            _tos_cache0 = _stack_item_0;
+            SET_CURRENT_CACHED_VALUES(2);
+            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
+            break;
+        }
+
+        case _GUARD_SOAC_TYPE_READ_r33: {
+            CHECK_CURRENT_CACHED_VALUES(3);
+            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
+            _PyStackRef owner;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            _PyStackRef _stack_item_2 = _tos_cache2;
+            owner = _stack_item_2;
+            PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
+            if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) &&
+                    !_PySOAC_TypeReadCacheReady(tp)) {
+                UOP_STAT_INC(uopcode, miss);
+                _tos_cache2 = owner;
+                _tos_cache1 = _stack_item_1;
+                _tos_cache0 = _stack_item_0;
+                SET_CURRENT_CACHED_VALUES(3);
+                JUMP_TO_JUMP_TARGET();
+            }
+            _tos_cache2 = owner;
+            _tos_cache1 = _stack_item_1;
+            _tos_cache0 = _stack_item_0;
+            SET_CURRENT_CACHED_VALUES(3);
+            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
+            break;
+        }
+
         case _GUARD_TYPE_VERSION_r01: {
             CHECK_CURRENT_CACHED_VALUES(0);
             assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
@@ -8807,11 +8989,6 @@
             uint32_t type_version = (uint32_t)CURRENT_OPERAND0_32();
             PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
             assert(type_version != 0);
-            if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
-                UOP_STAT_INC(uopcode, miss);
-                SET_CURRENT_CACHED_VALUES(0);
-                JUMP_TO_JUMP_TARGET();
-            }
             if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
                 UOP_STAT_INC(uopcode, miss);
                 SET_CURRENT_CACHED_VALUES(0);
@@ -8834,12 +9011,6 @@
             uint32_t type_version = (uint32_t)CURRENT_OPERAND0_32();
             PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
             assert(type_version != 0);
-            if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
-                UOP_STAT_INC(uopcode, miss);
-                _tos_cache0 = owner;
-                SET_CURRENT_CACHED_VALUES(1);
-                JUMP_TO_JUMP_TARGET();
-            }
             if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
                 UOP_STAT_INC(uopcode, miss);
                 _tos_cache0 = owner;
@@ -8862,13 +9033,6 @@
             uint32_t type_version = (uint32_t)CURRENT_OPERAND0_32();
             PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
             assert(type_version != 0);
-            if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
-                UOP_STAT_INC(uopcode, miss);
-                _tos_cache1 = owner;
-                _tos_cache0 = _stack_item_0;
-                SET_CURRENT_CACHED_VALUES(2);
-                JUMP_TO_JUMP_TARGET();
-            }
             if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
                 UOP_STAT_INC(uopcode, miss);
                 _tos_cache1 = owner;
@@ -8894,14 +9058,6 @@
             uint32_t type_version = (uint32_t)CURRENT_OPERAND0_32();
             PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
             assert(type_version != 0);
-            if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
-                UOP_STAT_INC(uopcode, miss);
-                _tos_cache2 = owner;
-                _tos_cache1 = _stack_item_1;
-                _tos_cache0 = _stack_item_0;
-                SET_CURRENT_CACHED_VALUES(3);
-                JUMP_TO_JUMP_TARGET();
-            }
             if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
                 UOP_STAT_INC(uopcode, miss);
                 _tos_cache2 = owner;
