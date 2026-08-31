@@ -8116,7 +8116,7 @@
                     PyErr_SetRaisedException(primary);
                     stack_pointer = _PyFrame_GetStackPointer(frame);
                     frame->return_offset = 0;
-                    next_instr = frame->instr_ptr;
+                    LOAD_IP(0);
                     JUMP_TO_LABEL(error);
                 }
                 LOAD_IP(frame->return_offset);
@@ -11460,7 +11460,7 @@
                     PyErr_SetRaisedException(primary);
                     stack_pointer = _PyFrame_GetStackPointer(frame);
                     frame->return_offset = 0;
-                    next_instr = frame->instr_ptr;
+                    LOAD_IP(0);
                     JUMP_TO_LABEL(error);
                 }
                 LOAD_IP(frame->return_offset);
