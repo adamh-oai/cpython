@@ -149,7 +149,9 @@ class TestDefaultEvalFrameSelection(unittest.TestCase):
         analysis = analyzer.analyze_files([
             os.path.join(test_tools.basepath, "Python", "bytecodes.c")
         ])
-        guard = "_CHECK_NO_SOAC_GENERATED_ACTIVATION"
+        # Only prepared construction sites deopt. An active enclosing
+        # definition no longer disables unrelated ordinary CALL caches.
+        guard = "_CHECK_NO_SOAC_CONSTRUCTION_CALL"
         self.assertTrue(analysis.uops[guard].properties.deopts)
         for name, consumer in (
             ("CALL_EX_PY", "_PY_FRAME_EX"),
