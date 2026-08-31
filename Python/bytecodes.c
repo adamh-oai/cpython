@@ -4237,7 +4237,11 @@ dummy_func(
             LOAD_SP();
             LOAD_IP(0);
             int allowed = _PyFrame_CheckSoacExecution(frame);
-            ERROR_IF(allowed < 0);
+            if (allowed < 0) {
+                /* Refused entry cannot execute a fresh or suspended frame's
+                 * handlers. The shared unwind path owns its native cleanup. */
+                goto exit_unwind;
+            }
             LLTRACE_RESUME_FRAME();
         }
 
@@ -5956,6 +5960,12 @@ dummy_func(
              * Its saved IP, not the trace's originating code, locates the error. */
             SYNC_SP();
             GOTO_TIER_ONE(_Py_TIER2_ERROR_AT_SAVED_IP);
+            Py_UNREACHABLE();
+        }
+
+        tier2 op(_ERROR_UNWIND, (--)) {
+            SYNC_SP();
+            GOTO_TIER_ONE(_Py_TIER2_ERROR_UNWIND);
             Py_UNREACHABLE();
         }
 

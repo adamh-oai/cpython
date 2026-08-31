@@ -564,6 +564,7 @@ def has_error_without_pop(op: parser.CodeDef) -> bool:
     return (
         variable_used(op, "ERROR_NO_POP")
         or variable_used(op, "exception_unwind")
+        or variable_used(op, "exit_unwind")
     )
 
 
@@ -1447,7 +1448,7 @@ def get_uop_cache_depths(uop: Uop) -> Iterator[tuple[int, int, int]]:
     if uop.name in ("_START_EXECUTOR", "_JUMP_TO_TOP", "_COLD_EXIT"):
         yield 0, 0, 0
         return
-    if uop.name in ("_ERROR_POP_N", "_ERROR_AT_SAVED_IP"):
+    if uop.name in ("_ERROR_POP_N", "_ERROR_AT_SAVED_IP", "_ERROR_UNWIND"):
         yield 0, 0, 0
         return
     ideal_inputs = 0

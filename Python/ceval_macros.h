@@ -427,6 +427,8 @@ _PyFrame_SetStackPointer(frame, stack_pointer)
  * saved IP. Ordinary NULL errors still resume at saved IP + 1, and a tagged
  * non-NULL bytecode address still requests continued tracing. */
 #define _Py_TIER2_ERROR_AT_SAVED_IP ((_Py_CODEUNIT *)(uintptr_t)1)
+/* A distinct non-address marker for refusal before frame execution. */
+#define _Py_TIER2_ERROR_UNWIND ((_Py_CODEUNIT *)(uintptr_t)3)
 
 #define TIER1_TO_TIER2(EXECUTOR)                        \
 do {                                                   \
@@ -434,6 +436,11 @@ do {                                                   \
     next_instr = _Py_jit_entry((EXECUTOR), frame, stack_pointer, tstate); \
     frame = tstate->current_frame;                     \
     stack_pointer = _PyFrame_GetStackPointer(frame);   \
+    if (next_instr == _Py_TIER2_ERROR_UNWIND) {         \
+        next_instr = frame->instr_ptr;                 \
+        SAVE_SP();                                    \
+        JUMP_TO_LABEL(exit_unwind);                    \
+    }                                                  \
     if (next_instr == _Py_TIER2_ERROR_AT_SAVED_IP) {     \
         next_instr = frame->instr_ptr;                 \
         JUMP_TO_LABEL(error);                          \

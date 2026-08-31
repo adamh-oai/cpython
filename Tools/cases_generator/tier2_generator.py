@@ -79,6 +79,14 @@ class Tier2Emitter(Emitter):
         self.emit("SET_CURRENT_CACHED_VALUES(0);\n")
         return "JUMP_TO_ERROR();"
 
+    def goto_label(self, goto: Token, label: Token, storage: Storage) -> None:
+        if label.text == "exit_unwind":
+            # The optimizer selects the no-handler unwind footer for this
+            # error edge; the source goto's semicolon is emitted by the caller.
+            self.emit(self.goto_error(0, storage).removesuffix(";"))
+        else:
+            super().goto_label(goto, label, storage)
+
     def exit_if(
         self,
         tkn: Token,

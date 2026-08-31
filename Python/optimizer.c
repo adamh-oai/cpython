@@ -1246,12 +1246,15 @@ prepare_for_execution(_PyUOpInstruction *buffer, int length)
         if (_PyUop_Flags[base_opcode] & HAS_ERROR_FLAG) {
             int popped = (_PyUop_Flags[base_opcode] & HAS_ERROR_NO_POP_FLAG) ?
                 0 : _PyUop_num_popped(base_opcode, inst->oparg);
-            /* These uops error only after installing a different current
-             * frame. Their trace target belongs to the previous frame. */
-            bool error_at_saved_ip =
-                base_opcode == _PUSH_FRAME || base_opcode == _RETURN_VALUE;
-            int16_t error_op = error_at_saved_ip ?
-                _ERROR_AT_SAVED_IP_r00 : _ERROR_POP_N_r00;
+            /* Refused entry must not search the installed frame's handlers.
+             * A post-return error instead uses the restored caller's saved IP. */
+            int16_t error_op = _ERROR_POP_N_r00;
+            if (base_opcode == _PUSH_FRAME) {
+                error_op = _ERROR_UNWIND_r00;
+            }
+            else if (base_opcode == _RETURN_VALUE) {
+                error_op = _ERROR_AT_SAVED_IP_r00;
+            }
             if (target != current_error_target || popped != current_popped ||
                 error_op != current_error_op) {
                 current_popped = popped;
@@ -1259,7 +1262,7 @@ prepare_for_execution(_PyUOpInstruction *buffer, int length)
                 current_error = next_spare;
                 current_error_target = target;
                 make_exit(&buffer[next_spare], error_op, 0, false);
-                buffer[next_spare].operand0 = error_at_saved_ip ? 0 : target;
+                buffer[next_spare].operand0 = error_op == _ERROR_POP_N_r00 ? target : 0;
                 next_spare++;
             }
             buffer[i].error_target = current_error;
@@ -1355,6 +1358,7 @@ sanity_check(_PyExecutorObject *executor)
             base_opcode == _EXIT_TRACE ||
             base_opcode == _ERROR_POP_N ||
             base_opcode == _ERROR_AT_SAVED_IP ||
+            base_opcode == _ERROR_UNWIND ||
             base_opcode == _DYNAMIC_EXIT);
     }
 }

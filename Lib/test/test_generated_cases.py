@@ -35,6 +35,7 @@ with test_tools.imports_under_tool("cases_generator"):
     import parser
     from stack import Local, Stack, get_stack_effect
     import tier1_generator
+    import tier2_generator
     import optimizer_generator
     import opcode_metadata_generator
 
@@ -458,27 +459,64 @@ class TestSoacTier2FrameErrors(unittest.TestCase):
     def test_actual_frame_changes_retain_error_and_guard_ip_metadata(self):
         push = self.analysis.uops["_PUSH_FRAME"].properties
         returned = self.analysis.uops["_RETURN_VALUE"].properties
-        self.assertTrue(push.error_with_pop)
-        self.assertFalse(push.error_without_pop)
+        self.assertFalse(push.error_with_pop)
+        self.assertTrue(push.error_without_pop)
         self.assertTrue(returned.error_without_pop)
         self.assertFalse(returned.error_with_pop)
         for properties in (push, returned):
             self.assertTrue(properties.escapes)
             self.assertTrue(properties.needs_guard_ip)
 
-    def test_saved_ip_error_stub_has_no_target_or_cached_stack_values(self):
-        stub = self.analysis.uops["_ERROR_AT_SAVED_IP"]
-        self.assertEqual(stub.properties.tier, 2)
-        self.assertTrue(stub.properties.sync_sp)
-        self.assertEqual(stub.stack.inputs, [])
-        self.assertEqual(stub.stack.outputs, [])
-        self.assertEqual(stub.caches, [])
-        self.assertEqual(list(analyzer.get_uop_cache_depths(stub)), [(0, 0, 0)])
+    def test_frame_error_stubs_have_no_target_or_cached_stack_values(self):
+        for name in ("_ERROR_AT_SAVED_IP", "_ERROR_UNWIND"):
+            with self.subTest(uop=name):
+                stub = self.analysis.uops[name]
+                self.assertEqual(stub.properties.tier, 2)
+                self.assertTrue(stub.properties.sync_sp)
+                self.assertEqual(stub.stack.inputs, [])
+                self.assertEqual(stub.stack.outputs, [])
+                self.assertEqual(stub.caches, [])
+                self.assertEqual(
+                    list(analyzer.get_uop_cache_depths(stub)), [(0, 0, 0)]
+                )
         # Ordinary errors still carry a target belonging to their current code.
         ordinary = self.analysis.uops["_ERROR_POP_N"]
         self.assertEqual(
             [(cache.name, cache.size) for cache in ordinary.caches], [("target", 2)]
         )
+
+
+    def test_actual_push_refusal_uses_a_no_pop_tier2_error_edge(self):
+        analysis = self.analysis
+        uop = analysis.uops["_PUSH_FRAME"]
+        self.assertTrue(uop.is_viable())
+
+        class RefusalEmitter(tier2_generator.Tier2Emitter):
+            def __init__(self, exit_cache_depth):
+                super().__init__(CWriter.null(), analysis.labels, exit_cache_depth)
+                self.refusals = []
+
+            def goto_error(self, offset, storage):
+                self.refusals.append((offset, storage.copy()))
+                return super().goto_error(offset, storage)
+
+        for inputs, outputs, exits in analyzer.get_uop_cache_depths(uop):
+            with self.subTest(cache=(inputs, outputs, exits)):
+                emitter = RefusalEmitter(exits)
+                stack = Stack()
+                stack.push_cache(
+                    [f"_tos_cache{i}" for i in range(inputs)], emitter.out
+                )
+                reachable, _ = tier2_generator.write_uop(
+                    uop, emitter, stack, outputs
+                )
+                self.assertTrue(reachable)
+                self.assertEqual(len(emitter.refusals), 1)
+                offset, refused = emitter.refusals[0]
+                self.assertEqual(offset, 0)
+                self.assertEqual(refused.inputs, [])
+                self.assertEqual(refused.outputs, [])
+                self.assertEqual(refused.stack.variables, [])
 
 
 class TestIndexedGlobalResultStack(unittest.TestCase):
