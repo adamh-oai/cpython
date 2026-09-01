@@ -1317,6 +1317,8 @@ soac_frame_birth_identity(_PyInterpreterFrame *frame)
 static int
 soac_source_parent_live(_PyInterpreterFrame *frame)
 {
+    if (_PyInterpreterState_GET()->soac.interpreter_closed)
+        return soac_interpreter_error("interpreter construction is closed");
     PyObject *object = PyStackRef_AsPyObjectBorrow(frame->f_funcobj);
     if (!PyFunction_Check(object))
         return soac_interpreter_error("source parent has no actual native function");
@@ -1757,8 +1759,13 @@ PySoac_EvalInterpreterModuleV2(PyObject *module, PyObject *root_code,
         soac_interpreter_error("interpreter root needs an authenticated module and code");
         return NULL;
     }
+    /* A supported clear may release binding->publication during callbacks.
+     * Keep this metadata owner alive through root_end independently of that
+     * mutable edge; no function, code, globals or execution values are pinned. */
+    Py_INCREF(module_owner);
     int status = callbacks->root_begin(module_owner, module, root_code);
     if (soac_interpreter_status(status, "interpreter root initialization was refused") < 0) {
+        soac_interpreter_xdecref_preserving_error(module_owner);
         return NULL;
     }
     PyObject *result = NULL;
@@ -1791,6 +1798,7 @@ PySoac_EvalInterpreterModuleV2(PyObject *module, PyObject *root_code,
         }
     }
     callbacks->root_end(module_owner, result != NULL);
+    soac_interpreter_xdecref_preserving_error(module_owner);
     return result;
 }
 
