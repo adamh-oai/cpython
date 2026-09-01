@@ -18,6 +18,21 @@ static PyTypeObject SoacInterpreterExecutionGuard_Type = {
 };
 
 typedef struct {
+    PyObject_VAR_HEAD
+    PyObject *publication;
+    SoacInterpreterExecutionGuard *execution;
+    PyObject *globals;               /* Comparison only; actual module owns. */
+    uint64_t source_id;
+    int64_t interpreter_id;
+    uint8_t terminal;
+    PySoacInterpreterDescriptorV1 descriptors[1];
+} SoacInterpreterSourceBinding;
+
+#define SOAC_FUNCTION_READY 1u
+#define SOAC_FUNCTION_TERMINAL 2u
+#define SOAC_FUNCTION_ENTERED 4u
+
+typedef struct {
     PyObject_HEAD
     PyCodeObject *original_code; /* Comparison only; function/source own code. */
     PyObject *globals, *builtins; /* Immutable function edges, never dereferenced here. */
@@ -25,6 +40,10 @@ typedef struct {
     int64_t interpreter_id;
     uint8_t ready, terminal, entered;
     SoacInterpreterExecutionGuard *execution;
+    /* Borrowed from the actual function's dynamic owner GC vector. */
+    SoacInterpreterSourceBinding *binding;
+    const PySoacInterpreterDescriptorV1 *descriptor;
+    uint64_t birth_activation_id;
 } SoacInterpreterFunctionGuard;
 
 static void
@@ -69,6 +88,272 @@ soac_interpreter_status(int status, const char *message)
     return soac_interpreter_error(message);
 }
 
+static int
+soac_source_binding_traverse(SoacInterpreterSourceBinding *binding,
+                            visitproc visit, void *arg)
+{
+    Py_VISIT(binding->publication);
+    Py_VISIT(binding->execution);
+    return 0;
+}
+
+static int
+soac_source_binding_clear(SoacInterpreterSourceBinding *binding)
+{
+    /* Descriptors remain stable until deallocation. No callback following a
+     * decref may use a live-looking binding whose publication was cleared. */
+    binding->terminal = 1;
+    if (binding->execution != NULL) binding->execution->terminal = 1;
+    Py_CLEAR(binding->publication);
+    Py_CLEAR(binding->execution);
+    return 0;
+}
+
+static void
+soac_source_binding_dealloc(SoacInterpreterSourceBinding *binding)
+{
+    PyObject_GC_UnTrack(binding);
+    soac_source_binding_clear(binding);
+    PyObject_GC_Del(binding);
+}
+
+static PyTypeObject SoacInterpreterSourceBinding_Type = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "_soac_interpreter_source_binding",
+    .tp_basicsize = offsetof(SoacInterpreterSourceBinding, descriptors),
+    .tp_itemsize = sizeof(PySoacInterpreterDescriptorV1),
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_DISALLOW_INSTANTIATION,
+    .tp_traverse = (traverseproc)soac_source_binding_traverse,
+    .tp_clear = (inquiry)soac_source_binding_clear,
+    .tp_dealloc = (destructor)soac_source_binding_dealloc,
+};
+
+int
+PySoac_IsInterpreterSourceBindingV1(PyObject *object)
+{
+    return object != NULL && Py_IS_TYPE(object, &SoacInterpreterSourceBinding_Type);
+}
+
+static int
+soac_source_binding_live(const SoacInterpreterSourceBinding *binding)
+{
+    return binding != NULL && !binding->terminal && binding->publication != NULL &&
+        binding->execution != NULL && !binding->execution->terminal &&
+        binding->interpreter_id == _PyInterpreterState_GET()->id;
+}
+
+static SoacInterpreterSourceBinding *
+soac_source_binding(PyObject *object)
+{
+    if (!PySoac_IsInterpreterSourceBindingV1(object)) {
+        soac_interpreter_error("invalid interpreter source binding");
+        return NULL;
+    }
+    SoacInterpreterSourceBinding *binding = (SoacInterpreterSourceBinding *)object;
+    if (!soac_source_binding_live(binding)) {
+        soac_interpreter_error("interpreter source binding is unavailable");
+        return NULL;
+    }
+    return binding;
+}
+
+int
+PySoac_SetInterpreterCodeDescriptorV1(PyObject *object, uint32_t ordinal,
+                                     uint32_t requirements)
+{
+    if (object == NULL || !PyCode_Check(object) || ordinal == UINT32_MAX ||
+        (requirements & ~Py_SOAC_DESCRIPTOR_REQUIREMENTS_MASK))
+        return soac_interpreter_error("invalid prepared interpreter descriptor");
+    PyCodeObject *code = (PyCodeObject *)object;
+    if (!(code->co_flags & CO_FUTURE_STRICT) || code->_co_soac_strict_source_id == 0 ||
+        code->_co_soac_scope_kind == UINT8_MAX)
+        return soac_interpreter_error("descriptor code has no original source identity");
+    if (code->_co_soac_descriptor_ordinal != UINT32_MAX &&
+        (code->_co_soac_descriptor_ordinal != ordinal ||
+         code->_co_soac_descriptor_requirements != requirements))
+        return soac_interpreter_error("prepared interpreter descriptor is immutable");
+    code->_co_soac_descriptor_ordinal = ordinal;
+    code->_co_soac_descriptor_requirements = requirements;
+    return 0;
+}
+
+PyObject *
+PySoac_NewInterpreterSourceBindingV1(
+    PyObject *publication, PyObject *execution, PyObject *globals,
+    uint64_t source_id, const PySoacInterpreterDescriptorV1 *descriptors,
+    size_t count, size_t descriptor_size)
+{
+    if (publication == NULL || execution == NULL ||
+        !Py_IS_TYPE(execution, &SoacInterpreterExecutionGuard_Type) ||
+        globals == NULL || !PyDict_CheckExact(globals) || source_id == 0 ||
+        descriptors == NULL || descriptor_size != sizeof(*descriptors) ||
+        count == 0 || count > UINT32_MAX ||
+        count > (size_t)(PY_SSIZE_T_MAX - sizeof(SoacInterpreterSourceBinding)) / sizeof(*descriptors)) {
+        soac_interpreter_error("invalid interpreter source publication");
+        return NULL;
+    }
+    SoacInterpreterExecutionGuard *guard = (SoacInterpreterExecutionGuard *)execution;
+    if (guard->terminal || guard->interpreter_id != _PyInterpreterState_GET()->id) {
+        soac_interpreter_error("interpreter publication execution is unavailable");
+        return NULL;
+    }
+    for (size_t i = 0; i < count; i++) {
+        const PySoacInterpreterDescriptorV1 *descriptor = &descriptors[i];
+        if (descriptor->ordinal != i || descriptor->original_code == NULL ||
+            !PyCode_Check(descriptor->original_code) ||
+            (descriptor->requirements & ~Py_SOAC_DESCRIPTOR_REQUIREMENTS_MASK) ||
+            (descriptor->parent_ordinal != UINT32_MAX && descriptor->parent_ordinal >= count)) {
+            soac_interpreter_error("invalid interpreter descriptor array");
+            return NULL;
+        }
+        PyCodeObject *code = (PyCodeObject *)descriptor->original_code;
+        if (code->_co_soac_strict_source_id != source_id ||
+            code->_co_soac_descriptor_ordinal != descriptor->ordinal ||
+            code->_co_soac_descriptor_requirements != descriptor->requirements ||
+            code->_co_soac_scope_kind != descriptor->scope_kind ||
+            !(code->co_flags & CO_FUTURE_STRICT) ||
+            ((descriptor->parent_ordinal == UINT32_MAX) !=
+             (descriptor->scope_kind == Py_SOAC_SCOPE_MODULE))) {
+            soac_interpreter_error("interpreter descriptor differs from its original code");
+            return NULL;
+        }
+    }
+    if (PyType_Ready(&SoacInterpreterSourceBinding_Type) < 0) return NULL;
+    SoacInterpreterSourceBinding *binding = PyObject_GC_NewVar(
+        SoacInterpreterSourceBinding, &SoacInterpreterSourceBinding_Type, (Py_ssize_t)count);
+    if (binding == NULL) return NULL;
+    binding->publication = Py_NewRef(publication);
+    binding->execution = (SoacInterpreterExecutionGuard *)Py_NewRef(execution);
+    binding->globals = globals;
+    binding->source_id = source_id;
+    binding->interpreter_id = guard->interpreter_id;
+    binding->terminal = 0;
+    memcpy(binding->descriptors, descriptors, count * sizeof(*descriptors));
+    PyObject_GC_Track(binding);
+    if (!soac_source_binding_live(binding)) {
+        Py_DECREF(binding);
+        soac_interpreter_error("interpreter publication changed during preparation");
+        return NULL;
+    }
+    return (PyObject *)binding;
+}
+
+PyObject *
+PySoac_GetInterpreterSourcePublicationV1(PyObject *object)
+{
+    SoacInterpreterSourceBinding *binding = soac_source_binding(object);
+    return binding == NULL ? NULL : binding->publication;
+}
+
+PyObject *
+PySoac_GetInterpreterSourcePublicationForTeardownV1(PyObject *object)
+{
+    if (!PySoac_IsInterpreterSourceBindingV1(object)) return NULL;
+    SoacInterpreterSourceBinding *binding = (SoacInterpreterSourceBinding *)object;
+    return binding->interpreter_id == _PyInterpreterState_GET()->id
+        ? binding->publication : NULL;
+}
+
+int
+PySoac_InterpreterSourceBindingInvalidateV1(PyObject *object)
+{
+    if (!PySoac_IsInterpreterSourceBindingV1(object))
+        return soac_interpreter_error("invalid interpreter source binding");
+    SoacInterpreterSourceBinding *binding = (SoacInterpreterSourceBinding *)object;
+    if (binding->interpreter_id != _PyInterpreterState_GET()->id)
+        return soac_interpreter_error("interpreter source binding belongs to another interpreter");
+    binding->terminal = 1;
+    if (binding->execution != NULL) binding->execution->terminal = 1;
+    return 0;
+}
+
+static const PySoacInterpreterDescriptorV1 *
+soac_source_descriptor(SoacInterpreterSourceBinding *binding, PyCodeObject *code)
+{
+    uint32_t ordinal = code->_co_soac_descriptor_ordinal;
+    if (code->_co_soac_strict_source_id != binding->source_id ||
+        ordinal >= (uint32_t)Py_SIZE(binding)) return NULL;
+    const PySoacInterpreterDescriptorV1 *descriptor = &binding->descriptors[ordinal];
+    return descriptor->original_code == (PyObject *)code &&
+        descriptor->requirements == code->_co_soac_descriptor_requirements &&
+        descriptor->scope_kind == code->_co_soac_scope_kind ? descriptor : NULL;
+}
+
+/* The actual function's owner edge supports this pointer. Dynamic owners
+ * include the same binding in their GC vector; guards never own it. */
+static SoacInterpreterSourceBinding *
+soac_function_source_binding(PyFunctionObject *function)
+{
+    if (function->func_soac_strict_owner_state != FUNC_SOAC_OWNER_INTERPRETER_ATTACHED)
+        return NULL;
+    if (function->func_soac_interpreter_descriptor != NULL) {
+        return PySoac_IsInterpreterSourceBindingV1(function->func_soac_strict_owner)
+            ? (SoacInterpreterSourceBinding *)function->func_soac_strict_owner : NULL;
+    }
+    SoacInterpreterFunctionGuard *guard =
+        (SoacInterpreterFunctionGuard *)function->func_soac_interpreter_guard;
+    return guard == NULL ? NULL : guard->binding;
+}
+
+static SoacInterpreterSourceBinding *
+soac_frame_source_binding(_PyInterpreterFrame *frame)
+{
+    if (_PySOAC_InterpreterIsActivation(frame->soac_checked_activation)) {
+        _PySoacInterpreterActivationV1 *activation =
+            (_PySoacInterpreterActivationV1 *)frame->soac_checked_activation;
+        return (SoacInterpreterSourceBinding *)activation->source_binding;
+    }
+    PyObject *function = PyStackRef_AsPyObjectBorrow(frame->f_funcobj);
+    return PyFunction_Check(function)
+        ? soac_function_source_binding((PyFunctionObject *)function) : NULL;
+}
+
+int
+PySoac_GetInterpreterFunctionViewV1(
+    PyObject *object, PySoacInterpreterFunctionViewV1 *out, size_t out_size)
+{
+    if (object == NULL || !PyFunction_Check(object) || out == NULL || out_size != sizeof(*out))
+        return soac_interpreter_error("invalid interpreter function view");
+    PyFunctionObject *function = (PyFunctionObject *)object;
+    *out = (PySoacInterpreterFunctionViewV1){
+        .abi_version = 1, .ordinal = UINT32_MAX,
+        .interpreter_id = _PyInterpreterState_GET()->id,
+        .terminal = function->func_soac_strict_owner_state == FUNC_SOAC_OWNER_TERMINAL,
+    };
+    if (function->func_soac_strict_owner_state != FUNC_SOAC_OWNER_INTERPRETER_ATTACHED)
+        return 0;
+    SoacInterpreterSourceBinding *binding = soac_function_source_binding(function);
+    const PySoacInterpreterDescriptorV1 *descriptor = function->func_soac_interpreter_descriptor;
+    if (descriptor != NULL) {
+        if (binding == NULL) return soac_interpreter_error("shared function lost its source binding");
+        out->owner_kind = 2;
+        out->ready = !!(function->func_soac_interpreter_flags & SOAC_FUNCTION_READY);
+        out->terminal |= !!(function->func_soac_interpreter_flags & SOAC_FUNCTION_TERMINAL);
+        out->entered = !!(function->func_soac_interpreter_flags & SOAC_FUNCTION_ENTERED);
+        out->birth_activation_id = function->func_soac_interpreter_birth_id;
+    }
+    else {
+        SoacInterpreterFunctionGuard *guard =
+            (SoacInterpreterFunctionGuard *)function->func_soac_interpreter_guard;
+        if (guard == NULL) return soac_interpreter_error("dynamic function lost its native guard");
+        descriptor = guard->descriptor;
+        out->owner_kind = 1;
+        out->ready = guard->ready;
+        out->terminal |= guard->terminal;
+        out->entered = guard->entered;
+        out->birth_activation_id = guard->birth_activation_id;
+        if (guard->terminal) return 0;
+    }
+    if (binding == NULL || descriptor == NULL)
+        return soac_interpreter_error("interpreter function has no prepared descriptor");
+    out->binding = (PyObject *)binding;
+    out->ordinal = descriptor->ordinal;
+    out->requirements = descriptor->requirements;
+    out->interpreter_id = binding->interpreter_id;
+    out->terminal |= !soac_source_binding_live(binding);
+    return 0;
+}
+
 static SoacInterpreterFunctionGuard *
 soac_function_guard(PyObject *guard)
 {
@@ -98,6 +383,9 @@ _PySOAC_InterpreterGuardCreate(PyFunctionObject *function)
     guard->interpreter_id = _PyInterpreterState_GET()->id;
     guard->ready = guard->terminal = guard->entered = 0;
     guard->execution = NULL;
+    guard->binding = NULL;
+    guard->descriptor = NULL;
+    guard->birth_activation_id = 0;
     function->func_soac_interpreter_guard = (PyObject *)guard;
     return 0;
 }
@@ -144,6 +432,8 @@ _PySOAC_InterpreterGuardInvalidate(PyObject *object)
         assert(Py_IS_TYPE(object, &SoacInterpreterFunctionGuard_Type));
         guard->terminal = 1;
         guard->ready = 0;
+        guard->binding = NULL;
+        guard->descriptor = NULL;
     }
 }
 
@@ -167,11 +457,24 @@ _PySOAC_InterpreterFunctionFastReady(PyFunctionObject *function)
 {
     if (function->func_soac_strict_owner_state != FUNC_SOAC_OWNER_INTERPRETER_ATTACHED)
         return function->func_soac_strict_owner_state != FUNC_SOAC_OWNER_TERMINAL;
+    if (function->func_soac_interpreter_descriptor != NULL) {
+        return (function->func_soac_interpreter_flags &
+                (SOAC_FUNCTION_READY | SOAC_FUNCTION_TERMINAL)) == SOAC_FUNCTION_READY &&
+            soac_source_binding_live(soac_function_source_binding(function));
+    }
     SoacInterpreterFunctionGuard *guard =
         (SoacInterpreterFunctionGuard *)function->func_soac_interpreter_guard;
     return guard != NULL && guard->ready && !guard->terminal &&
         guard->execution != NULL && !guard->execution->terminal &&
         guard->interpreter_id == _PyInterpreterState_GET()->id;
+}
+
+void
+_PySOAC_InterpreterFunctionInvalidate(PyFunctionObject *function)
+{
+    function->func_soac_interpreter_flags |= SOAC_FUNCTION_TERMINAL;
+    function->func_soac_interpreter_flags &= ~SOAC_FUNCTION_READY;
+    _PySOAC_InterpreterGuardInvalidate(function->func_soac_interpreter_guard);
 }
 
 PyObject *
@@ -465,6 +768,18 @@ soac_interpreter_check_view(const PySoacInterpreterFrameViewV1 *view)
     return 0;
 }
 
+PyObject *
+PySoac_InterpreterFrameSourceBindingV1(const PySoacInterpreterFrameViewV1 *view)
+{
+    if (soac_interpreter_check_view(view) < 0) return NULL;
+    SoacInterpreterSourceBinding *binding = soac_frame_source_binding(view->frame);
+    if (!soac_source_binding_live(binding)) {
+        soac_interpreter_error("interpreter frame has no live source binding");
+        return NULL;
+    }
+    return (PyObject *)binding;
+}
+
 int
 PySoac_GetInterpreterFrameInfoV2(
     const PySoacInterpreterFrameViewV1 *view,
@@ -514,10 +829,12 @@ static void
 soac_interpreter_retire(_PySoacInterpreterActivationV1 *activation, uint32_t reason)
 {
     PyObject *state = activation->state;
+    PyObject *source_binding = activation->source_binding;
     activation->state = NULL;
     activation->thread = NULL;
     activation->function = NULL;
     activation->code = NULL;
+    activation->source_binding = NULL;
     activation->namespace_state_out = NULL;
     memset(&activation->incoming_call, 0, sizeof(activation->incoming_call));
     activation->source_authority = 0;
@@ -533,6 +850,7 @@ soac_interpreter_retire(_PySoacInterpreterActivationV1 *activation, uint32_t rea
                          activation->activation_id); /* Metadata/scalars only. */
         soac_interpreter_xdecref_preserving_error(state);
     }
+    soac_interpreter_xdecref_preserving_error(source_binding);
 }
 
 static int
@@ -540,6 +858,7 @@ soac_interpreter_activation_traverse(
     _PySoacInterpreterActivationV1 *activation, visitproc visit, void *arg)
 {
     Py_VISIT(activation->state);
+    Py_VISIT(activation->source_binding);
     return 0;
 }
 
@@ -616,10 +935,39 @@ soac_interpreter_capture_entry(
 }
 
 static int
+soac_shared_function_authorize(_PyInterpreterFrame *frame, PyFunctionObject *function)
+{
+    SoacInterpreterSourceBinding *binding = soac_function_source_binding(function);
+    const PySoacInterpreterDescriptorV1 *descriptor = function->func_soac_interpreter_descriptor;
+    if (function->func_soac_strict_owner_state != FUNC_SOAC_OWNER_INTERPRETER_ATTACHED ||
+        descriptor == NULL || !soac_source_binding_live(binding) ||
+        function->func_soac_interpreter_flags & SOAC_FUNCTION_TERMINAL ||
+        function->func_soac_metadata != NULL || function->func_soac_strict_id != 0 ||
+        function->func_globals != binding->globals ||
+        frame->f_globals != function->func_globals || frame->f_builtins != function->func_builtins)
+        return soac_interpreter_error("shared interpreter function owner is unavailable");
+    PyCodeObject *code = _PyFrame_GetCode(frame);
+    int original = (PyObject *)code == descriptor->original_code &&
+        soac_source_descriptor(binding, code) == descriptor;
+    if (original && (descriptor->scope_kind == Py_SOAC_SCOPE_MODULE ||
+                     descriptor->scope_kind == Py_SOAC_SCOPE_CLASS || descriptor->requirements != 0))
+        return soac_interpreter_error("shared function has a dynamic source requirement");
+    if (!original && ((code->co_flags & CO_FUTURE_STRICT) || code->_co_soac_strict_source_id != 0))
+        return soac_interpreter_error("shared interpreter function captured unrelated strict code");
+    /* A CREATE callback may call an unselected function before its final birth
+     * instruction. The ordinary binding and closure representation checks
+     * still apply; the ready bit only selects the completed fast entry. */
+    frame->soac_source_authority = original;
+    return 0;
+}
+
+static int
 soac_interpreter_authorize(_PyInterpreterFrame *frame)
 {
     PyFunctionObject *function =
         (PyFunctionObject *)PyStackRef_AsPyObjectBorrow(frame->f_funcobj);
+    if (function->func_soac_interpreter_descriptor != NULL)
+        return soac_shared_function_authorize(frame, function);
     SoacInterpreterFunctionGuard *guard =
         (SoacInterpreterFunctionGuard *)function->func_soac_interpreter_guard;
     if (function->func_soac_strict_owner_state != FUNC_SOAC_OWNER_INTERPRETER_ATTACHED ||
@@ -694,13 +1042,20 @@ _PySOAC_InterpreterInitFrame(
         return soac_interpreter_error("invalid checked interpreter frame entry");
     }
     PyInterpreterState *interp = _PyInterpreterState_GET();
-    if (interp->soac.interpreter_activation_counter == UINT64_MAX) {
-        return soac_interpreter_error("interpreter activation identity space is exhausted");
-    }
     /* The GIL-build-only ABI serializes this counter. Reserve before metadata
      * allocation can reenter; failed entries leave holes, never reused tokens.
      * The interpreter identity separates independently advancing counters. */
+    if (interp->soac.interpreter_activation_counter == UINT64_MAX)
+        return soac_interpreter_error("interpreter activation identity space is exhausted");
+    /* Each selected context has its own pending-definition obligations. The
+     * separate lazy frame token is only for allocation-free simple births;
+     * reusing it here could make a later failure retire earlier definitions. */
     uint64_t activation_id = ++interp->soac.interpreter_activation_counter;
+    SoacInterpreterSourceBinding *binding = entry->source_binding == NULL
+        ? soac_function_source_binding(function) : soac_source_binding(entry->source_binding);
+    if (!soac_source_binding_live(binding) || binding->globals != frame->f_globals ||
+        (original_source && soac_source_descriptor(binding, code) == NULL))
+        return soac_interpreter_error("interpreter activation has no matching source binding");
     if (PyType_Ready(&SoacInterpreterActivation_Type) < 0) {
         return -1;
     }
@@ -710,6 +1065,7 @@ _PySOAC_InterpreterInitFrame(
         return -1;
     }
     activation->state = NULL;
+    activation->source_binding = Py_NewRef((PyObject *)binding);
     activation->thread = _PyThreadState_GET();
     activation->function = function;
     activation->code = code;
@@ -812,15 +1168,23 @@ _PySOAC_CheckedFrameExecution(_PyInterpreterFrame *frame)
         ((PyFunctionObject *)function_object)->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
         PyFunctionObject *function = (PyFunctionObject *)function_object;
         SoacInterpreterFunctionGuard *guard = (SoacInterpreterFunctionGuard *)function->func_soac_interpreter_guard;
+        int shared = function->func_soac_interpreter_descriptor != NULL;
         if (!frame->soac_owner_checked) {
             if (soac_interpreter_authorize(frame) < 0 || soac_interpreter_closure_complete(frame) < 0) return -1;
             frame->soac_owner_checked = 1;
         }
-        else if (guard == NULL || guard->terminal || function->func_soac_metadata != NULL ||
-                 (guard->execution != NULL && guard->execution->terminal)) {
+        else if (function->func_soac_metadata != NULL ||
+                 (shared ?
+                    ((function->func_soac_interpreter_flags & SOAC_FUNCTION_TERMINAL) ||
+                     !soac_source_binding_live(soac_function_source_binding(function))) :
+                    (guard == NULL || guard->terminal ||
+                     (guard->execution != NULL && guard->execution->terminal)))) {
             return soac_interpreter_error("interpreter function owner became terminal");
         }
-        if (frame->soac_source_authority) guard->entered = 1;
+        if (frame->soac_source_authority) {
+            if (shared) function->func_soac_interpreter_flags |= SOAC_FUNCTION_ENTERED;
+            else guard->entered = 1;
+        }
         if (object == NULL) return 0;
     }
     if (_PySOAC_InterpreterIsActivation(object)) {
@@ -936,10 +1300,124 @@ soac_interpreter_ensure_context(_PyInterpreterFrame *frame)
     return _PySOAC_InterpreterInitFrame(frame, &entry) < 0 ? -1 : 1;
 }
 
+static uint64_t
+soac_frame_birth_identity(_PyInterpreterFrame *frame)
+{
+    if (frame->soac_invocation_id == 0) {
+        PyInterpreterState *interp = _PyInterpreterState_GET();
+        if (interp->soac.interpreter_activation_counter == UINT64_MAX) {
+            soac_interpreter_error("interpreter activation identity space is exhausted");
+            return 0;
+        }
+        frame->soac_invocation_id = ++interp->soac.interpreter_activation_counter;
+    }
+    return frame->soac_invocation_id;
+}
+
+static int
+soac_source_parent_live(_PyInterpreterFrame *frame)
+{
+    PyObject *object = PyStackRef_AsPyObjectBorrow(frame->f_funcobj);
+    if (!PyFunction_Check(object))
+        return soac_interpreter_error("source parent has no actual native function");
+    PyFunctionObject *function = (PyFunctionObject *)object;
+    if (function->func_soac_strict_owner_state == FUNC_SOAC_OWNER_TERMINAL)
+        return soac_interpreter_error("source parent function became terminal");
+    if (function->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
+        if (function->func_soac_interpreter_descriptor != NULL) {
+            if (function->func_soac_interpreter_flags & SOAC_FUNCTION_TERMINAL)
+                return soac_interpreter_error("shared source parent became terminal");
+        }
+        else {
+            SoacInterpreterFunctionGuard *guard =
+                (SoacInterpreterFunctionGuard *)function->func_soac_interpreter_guard;
+            if (guard == NULL || guard->terminal || guard->execution == NULL || guard->execution->terminal)
+                return soac_interpreter_error("dynamic source parent became terminal");
+        }
+        if (function->func_soac_metadata != NULL)
+            return soac_interpreter_error("source parent acquired incompatible metadata");
+    }
+    if (_PySOAC_InterpreterIsActivation(frame->soac_checked_activation)) {
+        _PySoacInterpreterActivationV1 *activation =
+            (_PySoacInterpreterActivationV1 *)frame->soac_checked_activation;
+        if (activation->phase != Py_SOAC_INTERPRETER_RUNNING || !activation->source_authority ||
+            activation->state == NULL || !soac_interpreter_activation_matches(activation, frame))
+            return soac_interpreter_error("source parent has no active native invocation");
+        if (function->func_soac_strict_owner_state == FUNC_SOAC_OWNER_NONE &&
+            activation->kind != Py_SOAC_INTERPRETER_ROOT)
+            return soac_interpreter_error("source parent has no actual birth owner");
+    }
+    else if (function->func_soac_strict_owner_state != FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
+        return soac_interpreter_error("source parent has no authenticated native entry");
+    }
+    return 0;
+}
+
+/* No allocation, Python callback or temporary construction activation. The
+ * actual native MAKE_FUNCTION supplies the newly allocated function; code
+ * correspondence only routes this already authenticated birth. */
+static int
+soac_shared_function_birth(_PyInterpreterFrame *parent, PyFunctionObject *function)
+{
+    if (parent == NULL || !parent->soac_source_authority) return 0;
+    if (soac_source_parent_live(parent) < 0) return -1;
+    SoacInterpreterSourceBinding *binding = soac_frame_source_binding(parent);
+    if (!soac_source_binding_live(binding))
+        return soac_interpreter_error("function birth has no live source binding");
+    const PySoacInterpreterDescriptorV1 *descriptor =
+        soac_source_descriptor(binding, (PyCodeObject *)function->func_code);
+    const PySoacInterpreterDescriptorV1 *parent_descriptor =
+        soac_source_descriptor(binding, _PyFrame_GetCode(parent));
+    if (descriptor == NULL || parent_descriptor == NULL ||
+        descriptor->parent_ordinal != parent_descriptor->ordinal ||
+        parent->f_globals != binding->globals || function->func_globals != binding->globals)
+        return soac_interpreter_error("function birth differs from its prepared source parent");
+    if (descriptor->requirements != 0) return 0;
+    if (descriptor->scope_kind == Py_SOAC_SCOPE_MODULE || descriptor->scope_kind == Py_SOAC_SCOPE_CLASS ||
+        function->func_soac_strict_owner_state != FUNC_SOAC_OWNER_NONE ||
+        function->func_soac_strict_owner != NULL || function->func_soac_interpreter_guard != NULL ||
+        function->func_soac_interpreter_descriptor != NULL || function->func_soac_strict_id != 0 ||
+        function->func_soac_metadata != NULL || function->vectorcall != _PyFunction_Vectorcall)
+        return soac_interpreter_error("shared function birth has an invalid native shape");
+    uint64_t birth = soac_frame_birth_identity(parent);
+    if (birth == 0) return -1;
+    function->func_soac_interpreter_descriptor = descriptor;
+    function->func_soac_interpreter_birth_id = birth;
+    function->func_soac_interpreter_flags = 0;
+    function->func_soac_strict_owner = Py_NewRef((PyObject *)binding);
+    function->func_soac_strict_owner_state = FUNC_SOAC_OWNER_INTERPRETER_ATTACHED;
+    return 1;
+}
+
+static int
+soac_shared_function_parent(_PyInterpreterFrame *parent, PyFunctionObject *function)
+{
+    if (parent == NULL || soac_source_parent_live(parent) < 0) return -1;
+    SoacInterpreterSourceBinding *binding = soac_function_source_binding(function);
+    const PySoacInterpreterDescriptorV1 *descriptor = function->func_soac_interpreter_descriptor;
+    if (parent == NULL || !parent->soac_source_authority ||
+        function->func_soac_strict_owner_state != FUNC_SOAC_OWNER_INTERPRETER_ATTACHED ||
+        !soac_source_binding_live(binding) || binding != soac_frame_source_binding(parent) ||
+        descriptor == NULL || descriptor->requirements != 0 ||
+        (function->func_soac_interpreter_flags & SOAC_FUNCTION_TERMINAL) ||
+        function->func_soac_strict_id != 0 || function->func_soac_metadata != NULL ||
+        parent->soac_invocation_id == 0 ||
+        parent->soac_invocation_id != function->func_soac_interpreter_birth_id ||
+        function->func_globals != binding->globals || parent->f_globals != binding->globals)
+        return soac_interpreter_error("shared function has no actual birth parent");
+    const PySoacInterpreterDescriptorV1 *parent_descriptor =
+        soac_source_descriptor(binding, _PyFrame_GetCode(parent));
+    if (parent_descriptor == NULL || descriptor->parent_ordinal != parent_descriptor->ordinal)
+        return soac_interpreter_error("shared function has another source parent");
+    return 0;
+}
+
 int
 _PySOAC_InterpreterBirth(_PyInterpreterFrame *parent,
                          const _Py_CODEUNIT *this_instr, PyFunctionObject *function)
 {
+    int shared = soac_shared_function_birth(parent, function);
+    if (shared != 0) return shared < 0 ? -1 : 0;
     int active = soac_interpreter_ensure_context(parent);
     if (active <= 0) return active;
     _PySoacInterpreterActivationV1 *activation =
@@ -961,6 +1439,15 @@ _PySOAC_InterpreterBirth(_PyInterpreterFrame *parent,
     }
     PyObject *owner = NULL;
     if (_PySOAC_InterpreterGuardCreate(function) < 0) { view.self = NULL; return -1; }
+    SoacInterpreterFunctionGuard *guard =
+        (SoacInterpreterFunctionGuard *)function->func_soac_interpreter_guard;
+    guard->binding = (SoacInterpreterSourceBinding *)activation->source_binding;
+    guard->descriptor = soac_source_descriptor(guard->binding, (PyCodeObject *)code);
+    guard->birth_activation_id = activation->activation_id;
+    if (guard->descriptor == NULL) {
+        view.self = NULL;
+        return soac_interpreter_error("dynamic function birth has no source descriptor");
+    }
     int status = callbacks->birth(&view, (PyObject *)function, &owner);
     view.self = NULL;
     if (soac_interpreter_status(status, "interpreter function birth failed") < 0 ||
@@ -1011,6 +1498,19 @@ _PySOAC_InterpreterFunctionAttribute(
     _PyInterpreterFrame *parent, const _Py_CODEUNIT *instruction,
     PyFunctionObject *function, uint32_t attribute_flag, PyObject *installed)
 {
+    if (function != NULL && PyFunction_Check(function) &&
+        function->func_soac_interpreter_descriptor != NULL) {
+        if (soac_shared_function_parent(parent, function) < 0) return -1;
+        PyObject *actual;
+        switch (attribute_flag) {
+            case MAKE_FUNCTION_DEFAULTS: actual = function->func_defaults; break;
+            case MAKE_FUNCTION_KWDEFAULTS: actual = function->func_kwdefaults; break;
+            case MAKE_FUNCTION_CLOSURE: actual = function->func_closure; break;
+            default: return soac_interpreter_error("shared function requires a dynamic association");
+        }
+        return installed != NULL && installed == actual ? 0
+            : soac_interpreter_error("shared function attribute differs from its actual field");
+    }
     PySoacInterpreterFrameViewV1 view;
     int selected = _PySOAC_InterpreterParentView(parent, instruction, &view);
     if (selected <= 0) {
@@ -1089,6 +1589,13 @@ _PySOAC_InterpreterEndFunctionBirth(_PyInterpreterFrame *frame,
     const _Py_CODEUNIT *instruction, PyObject *function)
 {
     if (!frame->soac_source_authority) return 0;
+    if (function != NULL && PyFunction_Check(function) &&
+        ((PyFunctionObject *)function)->func_soac_interpreter_descriptor != NULL) {
+        PyFunctionObject *actual = (PyFunctionObject *)function;
+        if (soac_shared_function_parent(frame, actual) < 0) return -1;
+        actual->func_soac_interpreter_flags |= SOAC_FUNCTION_READY;
+        return 0;
+    }
     PySoacInterpreterFrameViewV1 view;
     int active = _PySOAC_InterpreterParentView(frame, instruction, &view);
     if (active <= 0) return active;
@@ -1228,8 +1735,8 @@ _PySOAC_CheckedFrameReturnCommit(_PyInterpreterFrame *frame)
  * wrapper itself is never assigned a reusable owner or execution permission.
  * root_begin consumes the initialization attempt before any CREATE watcher. */
 PyObject *
-PySoac_EvalInterpreterModuleV1(PyObject *module, PyObject *root_code,
-                               PyObject *module_owner)
+PySoac_EvalInterpreterModuleV2(PyObject *module, PyObject *root_code,
+                               PyObject *source_binding)
 {
     if (PyErr_Occurred()) {
         return NULL;
@@ -1238,10 +1745,15 @@ PySoac_EvalInterpreterModuleV1(PyObject *module, PyObject *root_code,
     if (callbacks == NULL) {
         return NULL;
     }
+    SoacInterpreterSourceBinding *binding = soac_source_binding(source_binding);
+    if (binding == NULL) return NULL;
+    PyObject *module_owner = binding->publication;
     if (module == NULL || !PyModule_Check(module) ||
         root_code == NULL || !PyCode_Check(root_code) || module_owner == NULL ||
         !(((PyCodeObject *)root_code)->co_flags & CO_FUTURE_STRICT) ||
-        ((PyCodeObject *)root_code)->_co_soac_strict_source_id == 0) {
+        ((PyCodeObject *)root_code)->_co_soac_strict_source_id == 0 ||
+        binding->globals != PyModule_GetDict(module) ||
+        soac_source_descriptor(binding, (PyCodeObject *)root_code) == NULL) {
         soac_interpreter_error("interpreter root needs an authenticated module and code");
         return NULL;
     }
@@ -1269,6 +1781,7 @@ PySoac_EvalInterpreterModuleV1(PyObject *module, PyObject *root_code,
             const _PySoacInterpreterEntryV1 entry = {
                 .kind = Py_SOAC_INTERPRETER_ROOT,
                 .subject_owner = module_owner,
+                .source_binding = source_binding,
                 .parent = NULL,
                 .namespace_state_out = NULL,
             };

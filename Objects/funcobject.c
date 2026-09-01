@@ -381,6 +381,9 @@ _PyFunction_FromConstructor(PyFrameConstructor *constr)
     op->func_soac_strict_id = 0;
     op->func_soac_strict_owner = NULL;
     op->func_soac_interpreter_guard = NULL;
+    op->func_soac_interpreter_descriptor = NULL;
+    op->func_soac_interpreter_birth_id = 0;
+    op->func_soac_interpreter_flags = 0;
     op->func_soac_strict_owner_state = FUNC_SOAC_OWNER_NONE;
     // NOTE: functions created via FrameConstructor do not use deferred
     // reference counting because they are typically not part of cycles
@@ -472,6 +475,9 @@ func_new_with_qualname(PyObject *code, PyObject *globals, PyObject *qualname,
     op->func_soac_strict_id = 0;
     op->func_soac_strict_owner = NULL;
     op->func_soac_interpreter_guard = NULL;
+    op->func_soac_interpreter_descriptor = NULL;
+    op->func_soac_interpreter_birth_id = 0;
+    op->func_soac_interpreter_flags = 0;
     op->func_soac_strict_owner_state = FUNC_SOAC_OWNER_NONE;
     if (record != NULL && soac_dataclass_attach_record(op, record, producer) < 0) {
         /* Created may have allocated a weak witness whose observer acquired
@@ -1560,7 +1566,7 @@ static int
 func_clear(PyObject *self)
 {
     PyFunctionObject *op = _PyFunction_CAST(self);
-    _PySOAC_InterpreterGuardInvalidate(op->func_soac_interpreter_guard);
+    _PySOAC_InterpreterFunctionInvalidate(op);
     soac_dataclass_function_clear(op);
     /* Mark terminal before globals, defaults, owner, or metadata DECREFs can
      * run callbacks. Clearing never makes an assigned owner reinstallable and
@@ -1592,6 +1598,7 @@ func_clear(PyObject *self)
     Py_CLEAR(op->func_annotate);
     Py_CLEAR(op->func_typeparams);
     func_clear_soac_metadata(op);
+    op->func_soac_interpreter_descriptor = NULL;
     Py_CLEAR(op->func_soac_strict_owner);
     Py_CLEAR(op->func_soac_interpreter_guard);
     // Don't Py_CLEAR(op->func_code), since code is always required

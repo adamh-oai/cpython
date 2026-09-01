@@ -28,6 +28,9 @@ typedef struct _PySoacInterpreterCallV1 _PySoacInterpreterCallV1;
 typedef struct {
     PyObject_HEAD
     PyObject *state;                  /* Sole owned interpreter metadata edge. */
+    /* Own metadata independently of state: a state shell may be cleared while
+     * this activation remains. No execution value or code is retained. */
+    PyObject *source_binding;
     PyThreadState *thread;            /* Comparison only during active frame. */
     PyFunctionObject *function;       /* Borrowed, actual native frame pins. */
     PyCodeObject *code;               /* Borrowed, actual f_executable pins. */
@@ -65,6 +68,7 @@ typedef struct {
     uint32_t kind;
     uint32_t construction;
     PyObject *subject_owner;          /* Borrowed, caller/frame supports it. */
+    PyObject *source_binding;         /* ROOT only; otherwise actual function. */
     const PySoacInterpreterFrameViewV1 *parent;
     PyObject **namespace_state_out;   /* NULL except namespace; *out starts NULL. */
     const _PySoacInterpreterConsumedCallV1 *incoming_call; /* Before transfer only. */
@@ -121,6 +125,7 @@ PyAPI_FUNC(int) _PySOAC_InterpreterCallRelevant(
 PyAPI_FUNC(int) _PySOAC_InterpreterFunctionFastReady(PyFunctionObject *);
 extern int _PySOAC_InterpreterGuardCreate(PyFunctionObject *);
 extern void _PySOAC_InterpreterGuardInvalidate(PyObject *);
+extern void _PySOAC_InterpreterFunctionInvalidate(PyFunctionObject *);
 PyAPI_FUNC(int) _PySOAC_InterpreterCallCommit(
     _PySoacInterpreterCallV1 *, _PyInterpreterFrame *);
 PyAPI_FUNC(void) _PySOAC_InterpreterCallClear(_PySoacInterpreterCallV1 *);

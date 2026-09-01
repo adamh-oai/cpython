@@ -529,6 +529,8 @@ init_code(PyCodeObject *co, struct _PyCodeConstructor *con)
     co->_co_soac_strict_source_id = 0;
     co->_co_soac_scope_kind = UINT8_MAX;
     co->_co_soac_sites = NULL;
+    co->_co_soac_descriptor_ordinal = UINT32_MAX;
+    co->_co_soac_descriptor_requirements = 0;
 
     co->co_firstlineno = con->firstlineno;
     co->co_linetable = Py_NewRef(con->linetable);

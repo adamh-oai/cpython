@@ -32,6 +32,57 @@ extern "C" {
 typedef struct _PySoacInterpreterFrameViewV1
     PySoacInterpreterFrameViewV1;
 
+/* Immutable prepared requirements, not permission to execute a copied code
+ * object or a function constructed outside its actual native birth. */
+#define Py_SOAC_DESCRIPTOR_ANNOTATION 1u
+#define Py_SOAC_DESCRIPTOR_CLASS_NAMESPACE 2u
+#define Py_SOAC_DESCRIPTOR_COMPLETION 4u
+#define Py_SOAC_DESCRIPTOR_GENERIC 8u
+#define Py_SOAC_DESCRIPTOR_NOMINAL 16u
+#define Py_SOAC_DESCRIPTOR_BODY_CONTEXT 32u
+#define Py_SOAC_DESCRIPTOR_REQUIREMENTS_MASK 63u
+
+typedef struct _PySoacInterpreterDescriptorV1 {
+    uint32_t ordinal;
+    uint32_t parent_ordinal;          /* UINT32_MAX for the root. */
+    uint32_t requirements;
+    uint32_t scope_kind;
+    PyObject *original_code;          /* Comparison only, never an owned edge. */
+} PySoacInterpreterDescriptorV1;
+
+typedef struct {
+    uint32_t abi_version;             /* Exactly 1. */
+    uint32_t owner_kind;              /* 0:none, 1:dynamic, 2:shared descriptor. */
+    uint32_t ordinal;
+    uint32_t requirements;
+    int64_t interpreter_id;
+    uint64_t birth_activation_id;
+    PyObject *binding;                /* Borrowed, supported by the function. */
+    uint32_t ready, terminal, entered, reserved;
+} PySoacInterpreterFunctionViewV1;
+
+/* One GC-visible binding per actual module execution. These APIs do not
+ * authenticate source artifacts. The trusted caller has already verified the
+ * exact original code tree and supplies its module execution/guard. Native
+ * copies POD descriptors and stores globals/code only as identity scalars.
+ * The binding never pins code, functions, defaults, cells or globals. */
+PyAPI_FUNC(PyObject *) PySoac_NewInterpreterSourceBindingV1(
+    PyObject *root_owner, PyObject *execution_guard, PyObject *globals,
+    uint64_t source_id, const PySoacInterpreterDescriptorV1 *descriptors,
+    size_t count, size_t descriptor_size);
+PyAPI_FUNC(int) PySoac_IsInterpreterSourceBindingV1(PyObject *binding);
+PyAPI_FUNC(PyObject *) PySoac_GetInterpreterSourcePublicationV1(PyObject *binding);
+/* Same-interpreter borrowed publication, including terminal bindings whose
+ * publication edge still exists. No allocation, errors or reference changes. */
+PyAPI_FUNC(PyObject *) PySoac_GetInterpreterSourcePublicationForTeardownV1(PyObject *binding);
+PyAPI_FUNC(int) PySoac_InterpreterSourceBindingInvalidateV1(PyObject *binding);
+PyAPI_FUNC(int) PySoac_SetInterpreterCodeDescriptorV1(
+    PyObject *code, uint32_t ordinal, uint32_t requirements);
+PyAPI_FUNC(int) PySoac_GetInterpreterFunctionViewV1(
+    PyObject *function, PySoacInterpreterFunctionViewV1 *out, size_t out_size);
+PyAPI_FUNC(PyObject *) PySoac_InterpreterFrameSourceBindingV1(
+    const PySoacInterpreterFrameViewV1 *view);
+
 /* Callback-local native execution facts. A construction activation pair is
  * reserved before enter, survives suspension/native frame moves while its
  * event is active, and is never reused. Ordinary function calls have no such
@@ -356,8 +407,8 @@ PyAPI_FUNC(int) PySoac_BindInterpreterFunctionExecutionV1(PyObject *, PyObject *
 PyAPI_FUNC(int) PySoac_SetInterpreterCallbacksV4(
     const PySoacInterpreterCallbacksV4 *callbacks, size_t callbacks_size);
 
-PyAPI_FUNC(PyObject *) PySoac_EvalInterpreterModuleV1(
-    PyObject *module, PyObject *root_code, PyObject *module_owner);
+PyAPI_FUNC(PyObject *) PySoac_EvalInterpreterModuleV2(
+    PyObject *module, PyObject *root_code, PyObject *source_binding);
 
 PyAPI_FUNC(int) PySoac_GetInterpreterFrameInfoV2(
     const PySoacInterpreterFrameViewV1 *view,

@@ -111,6 +111,8 @@ typedef struct {
     uint64_t _co_soac_strict_source_id;                                         \
     uint8_t _co_soac_scope_kind; /* Trusted compiler role; UINT8_MAX otherwise. */ \
     struct _PySoacInterpreterSiteV1 *_co_soac_sites;                            \
+    uint32_t _co_soac_descriptor_ordinal; /* UINT32_MAX before preparation. */   \
+    uint32_t _co_soac_descriptor_requirements;                                \
     _PyCode_DEF_THREAD_LOCAL_BYTECODE()                                        \
     char co_code_adaptive[(SIZE)];                                             \
 }

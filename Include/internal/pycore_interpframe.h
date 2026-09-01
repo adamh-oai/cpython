@@ -254,11 +254,13 @@ static inline void _PyFrame_Copy(_PyInterpreterFrame *src, _PyInterpreterFrame *
     dest->soac_dataclass_role = src->soac_dataclass_role;
     dest->soac_dataclass_invocation = src->soac_dataclass_invocation;
     dest->soac_checked_activation = src->soac_checked_activation;
+    dest->soac_invocation_id = src->soac_invocation_id;
     dest->soac_source_authority = src->soac_source_authority;
     dest->soac_owner_checked = src->soac_owner_checked;
     src->soac_dataclass_role = 0;
     src->soac_dataclass_invocation = NULL;
     src->soac_checked_activation = NULL;
+    src->soac_invocation_id = 0;
     src->soac_source_authority = 0;
     src->soac_owner_checked = 0;
 #ifdef Py_GIL_DISABLED
@@ -324,6 +326,7 @@ _PyFrame_Initialize(
     frame->soac_dataclass_role = 0;
     frame->soac_dataclass_invocation = NULL;
     frame->soac_checked_activation = NULL;
+    frame->soac_invocation_id = 0;
     frame->soac_source_authority = 0;
     frame->soac_owner_checked = 0;
 #ifdef Py_DEBUG
@@ -511,6 +514,7 @@ _PyFrame_PushTrampolineUnchecked(PyThreadState *tstate, PyCodeObject *code, int 
     frame->soac_dataclass_role = 0;
     frame->soac_dataclass_invocation = NULL;
     frame->soac_checked_activation = NULL;
+    frame->soac_invocation_id = 0;
     frame->soac_source_authority = 0;
     frame->soac_owner_checked = 0;
 #ifdef Py_DEBUG

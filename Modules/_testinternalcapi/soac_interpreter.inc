@@ -2,7 +2,9 @@
  *
  * Installs the proposed interpreter callbacks. It borrows exact source
  * nodes/completion coordinates from one native schema-8 Details result during cold
- * setup, then stores scalar identities only. It does NOT retain that result,
+ * setup, then stores scalar identities and copied POD descriptors only. It
+ * creates a source binding at actual evaluation, not during fixture setup.
+ * The fixture does NOT retain that binding, that result,
  * any source code/function/module/globals, or any argument/result object.
  * Deliberate Python probes are test observers, not production checks.
  *
@@ -85,13 +87,14 @@ typedef struct {
     PyInterpreterState *interpreter;
     uintptr_t module, globals, root_code;
     uint64_t source_id;
-    int root_phase;              /* 0:fresh, 1:consumed, 2:done, 3:failed/cleared */
+    int root_phase;  /* 0:fresh, 1:consumed, 2:done, 3:failed/cleared, 4:preparing */
     int overflow;
     unsigned int call_fault; /* Trusted test decision corruption, never source policy. */
     int class_decision;       /* Closed test-only Enforced / Dynamic decision. */
     int select_all_calls;     /* Explicit raw operand-view test coverage only. */
     Py_ssize_t serial, node_count, site_count, event_count;
     SoacInterpreterTestNode nodes[SOAC_IP_MAX_NODES];
+    PySoacInterpreterDescriptorV1 descriptors[SOAC_IP_MAX_NODES];
     SoacInterpreterTestSite sites[SOAC_IP_MAX_SITES];
     Py_ssize_t call_count;
     SoacInterpreterTestCallSite calls[SOAC_IP_MAX_SITES];
@@ -101,6 +104,7 @@ typedef struct {
 typedef struct {
     PyObject_HEAD
     SoacInterpreterFixture *fixture; /* One actual metadata edge. */
+    PyObject *source_binding;        /* Metadata only, never frame/value owners. */
     Py_ssize_t node, serial;
     int64_t interpreter_id;
     uint64_t activation_id;
@@ -111,6 +115,7 @@ typedef struct {
 typedef struct {
     PyObject_HEAD
     SoacInterpreterFixture *fixture;
+    PyObject *source_binding;    /* Supports the native guard's borrowed binding. */
     Py_ssize_t node;
     uintptr_t function;          /* Comparison only, NEVER dereference later. */
     PyObject *self_weak, *provider_weak, *guard;
@@ -340,6 +345,7 @@ static int
 soac_ip_call_traverse(SoacInterpreterTestCall *state, visitproc visit, void *arg)
 {
     Py_VISIT(state->fixture);
+    Py_VISIT(state->source_binding);
     return 0;
 }
 
@@ -348,6 +354,7 @@ soac_ip_call_clear(SoacInterpreterTestCall *state)
 {
     state->phase = Py_SOAC_INTERPRETER_RETIRED;
     state->node = -1;
+    Py_CLEAR(state->source_binding);
     Py_CLEAR(state->fixture);
     return 0;
 }
@@ -367,6 +374,7 @@ soac_ip_function_traverse(SoacInterpreterTestFunction *record, visitproc visit, 
     Py_VISIT(record->self_weak);
     Py_VISIT(record->provider_weak);
     Py_VISIT(record->guard);
+    Py_VISIT(record->source_binding);
     return 0;
 }
 
@@ -381,6 +389,7 @@ soac_ip_function_clear(SoacInterpreterTestFunction *record)
         (void)PySoac_InterpreterFunctionInvalidateV1(record->guard);
     }
     Py_CLEAR(record->guard);
+    Py_CLEAR(record->source_binding);
     Py_CLEAR(record->self_weak);
     Py_CLEAR(record->provider_weak);
     Py_CLEAR(record->fixture);
@@ -432,7 +441,7 @@ soac_ip_root_begin(PyObject *owner, PyObject *module, PyObject *code)
 {
     SoacInterpreterFixture *fixture = soac_ip_fixture(owner);
     if (fixture == NULL) return -1;
-    if (fixture->root_phase != 0 || fixture->module != (uintptr_t)module ||
+    if (fixture->root_phase != 4 || fixture->module != (uintptr_t)module ||
         fixture->root_code != (uintptr_t)code || !PyModule_Check(module) ||
         fixture->globals != (uintptr_t)PyModule_GetDict(module) ||
         soac_ip_node(fixture, code) != 0) {
@@ -464,6 +473,12 @@ soac_ip_birth(const PySoacInterpreterFrameViewV1 *parent, PyObject *function,
     SoacInterpreterTestCall *state = soac_ip_call(info.call_state);
     if (state == NULL) return -1;
     SoacInterpreterFixture *fixture = state->fixture;
+    PyObject *binding = PySoac_InterpreterFrameSourceBindingV1(parent);
+    if (binding == NULL) return -1;
+    if (binding != state->source_binding ||
+        PySoac_GetInterpreterSourcePublicationV1(binding) != (PyObject *)fixture) {
+        return soac_ip_error("interpreter fixture birth has a foreign source binding");
+    }
     PyFunctionObject *fn = (PyFunctionObject *)function;
     Py_ssize_t node = soac_ip_node(fixture, fn->func_code);
     if (node < 0 || fixture->nodes[node].parent != state->node ||
@@ -483,6 +498,7 @@ soac_ip_birth(const PySoacInterpreterFrameViewV1 *parent, PyObject *function,
         SoacInterpreterTestFunction, &SoacInterpreterTestFunction_Type);
     if (record == NULL) return -1;
     record->fixture = (SoacInterpreterFixture *)Py_NewRef((PyObject *)fixture);
+    record->source_binding = Py_NewRef(binding);
     record->node = node;
     record->function = (uintptr_t)function;
     record->birth_serial = state->serial;
@@ -645,6 +661,12 @@ soac_ip_enter(uint32_t kind, PyObject *owner,
         fixture = record == NULL ? NULL : record->fixture;
     }
     if (fixture == NULL) return -1;
+    PyObject *binding = PySoac_InterpreterFrameSourceBindingV1(view);
+    if (binding == NULL) return -1;
+    if (PySoac_GetInterpreterSourcePublicationV1(binding) != (PyObject *)fixture ||
+        (record != NULL && record->source_binding != binding)) {
+        return soac_ip_error("interpreter fixture entry has a foreign source binding");
+    }
     if (fixture->root_phase == 3) {
         return soac_ip_error("interpreter fixture module initialization failed");
     }
@@ -680,6 +702,7 @@ soac_ip_enter(uint32_t kind, PyObject *owner,
         SoacInterpreterTestCall, &SoacInterpreterTestCall_Type);
     if (state == NULL) return -1;
     state->fixture = (SoacInterpreterFixture *)Py_NewRef((PyObject *)fixture);
+    state->source_binding = Py_NewRef(binding);
     state->node = node;
     state->serial = ++fixture->serial;
     state->interpreter_id = info.interpreter_id;
@@ -1599,6 +1622,84 @@ soac_ip_install_events(SoacInterpreterFixture *fixture, PyObject *nodes, PyObjec
     return 0;
 }
 
+static int
+soac_ip_install_descriptors(SoacInterpreterFixture *fixture, PyObject *nodes)
+{
+    for (Py_ssize_t n = 0; n < fixture->node_count; n++) {
+        const SoacInterpreterTestNode *node = &fixture->nodes[n];
+        PyObject *code = PyTuple_GET_ITEM(PyTuple_GET_ITEM(nodes, n), 2);
+        /* These raw protocol tests deliberately observe every birth. Even a
+         * lambda/comprehension therefore keeps dynamic completion metadata;
+         * zero-requirement sharing is covered by authenticated SOAC tests. */
+        uint32_t requirements = Py_SOAC_DESCRIPTOR_COMPLETION;
+        if (node->kind == Py_SOAC_INTERPRETER_ROOT ||
+            node->kind == Py_SOAC_INTERPRETER_CLASS_NAMESPACE) {
+            requirements |= Py_SOAC_DESCRIPTOR_CLASS_NAMESPACE;
+        }
+        if (node->native_scope == Py_SOAC_SCOPE_ANNOTATIONS) {
+            requirements |= node->symtable_kind == Py_SOAC_SYMTABLE_TYPE_PARAMETERS
+                ? Py_SOAC_DESCRIPTOR_GENERIC : Py_SOAC_DESCRIPTOR_ANNOTATION;
+        }
+        if (PySoac_SetInterpreterCodeDescriptorV1(code, (uint32_t)n, requirements) < 0)
+            return -1;
+        fixture->descriptors[n] = (PySoacInterpreterDescriptorV1){
+            .ordinal = (uint32_t)n,
+            .parent_ordinal = node->parent < 0 ? UINT32_MAX : (uint32_t)node->parent,
+            .requirements = requirements,
+            .scope_kind = node->native_scope,
+            .original_code = code,  /* Comparison only, supported by actual root. */
+        };
+    }
+    return 0;
+}
+
+static PyObject *
+soac_ip_new_source_binding(SoacInterpreterFixture *fixture,
+                          PyObject *module, PyObject *root)
+{
+    if (fixture->root_phase != 0 || !PyModule_Check(module) || !PyCode_Check(root) ||
+        fixture->module != (uintptr_t)module || fixture->root_code != (uintptr_t)root ||
+        fixture->globals != (uintptr_t)PyModule_GetDict(module) ||
+        PyCode_GetSoacStrictSourceId(root) != fixture->source_id) {
+        soac_ip_error("interpreter fixture root is consumed, copied or foreign");
+        return NULL;
+    }
+    /* The caller owns the original root. Re-establish each child's actual
+     * immutable co_consts edge before the binding constructor inspects any
+     * saved descriptor pointer. No raw saved code address is dereferenced
+     * without that native ownership witness. */
+    for (Py_ssize_t n = 1; n < fixture->node_count; n++) {
+        const PySoacInterpreterDescriptorV1 *descriptor = &fixture->descriptors[n];
+        PyCodeObject *parent = (PyCodeObject *)
+            fixture->descriptors[descriptor->parent_ordinal].original_code;
+        PyObject *constants = parent->co_consts;
+        int found = 0;
+        for (Py_ssize_t c = 0; c < PyTuple_GET_SIZE(constants); c++) {
+            found |= PyTuple_GET_ITEM(constants, c) == descriptor->original_code;
+        }
+        if (!found) {
+            soac_ip_error("interpreter fixture descriptor lost its actual source parent");
+            return NULL;
+        }
+    }
+    /* Reserve the single attempt before binding allocation can reenter. The
+     * native root_begin consumes this reserved phase before wrapper CREATE.
+     * Only actual call/function owners retain the binding after evaluation;
+     * the publication never owns it, so there is no fixture cycle. */
+    fixture->root_phase = 4;
+    PyObject *binding = PySoac_NewInterpreterSourceBindingV1(
+        (PyObject *)fixture, fixture->execution_guard, PyModule_GetDict(module),
+        fixture->source_id, fixture->descriptors, (size_t)fixture->node_count,
+        sizeof(*fixture->descriptors));
+    if (binding == NULL) {
+        fixture->root_phase = 3;
+        if (fixture->execution_guard != NULL) {
+            (void)PySoac_InvalidateInterpreterExecutionGuardV1(fixture->execution_guard);
+        }
+    }
+    return binding;
+}
+
 static PyObject *
 soac_interpreter_fixture(PyObject *self, PyObject *args)
 {
@@ -1661,7 +1762,8 @@ soac_interpreter_fixture(PyObject *self, PyObject *args)
         soac_ip_read_nodes(fixture, PyTuple_GET_ITEM(catalog, 1)) < 0 ||
         soac_ip_read_sites(fixture, PyTuple_GET_ITEM(catalog, 1), PyTuple_GET_ITEM(catalog, 3)) < 0 ||
         soac_ip_read_calls(fixture, PyTuple_GET_ITEM(catalog, 1), PyTuple_GET_ITEM(catalog, 3)) < 0 ||
-        soac_ip_install_events(fixture, PyTuple_GET_ITEM(catalog, 1), PyTuple_GET_ITEM(catalog, 3)) < 0) {
+        soac_ip_install_events(fixture, PyTuple_GET_ITEM(catalog, 1), PyTuple_GET_ITEM(catalog, 3)) < 0 ||
+        soac_ip_install_descriptors(fixture, PyTuple_GET_ITEM(catalog, 1)) < 0) {
         PyObject *error = PyErr_GetRaisedException();
         Py_DECREF(fixture);
         PyErr_SetRaisedException(error);
@@ -1677,10 +1779,20 @@ soac_interpreter_eval(PyObject *self, PyObject *args)
     PyObject *fixture, *module, *root;
     if (!PyArg_ParseTuple(args, "OOO:soac_interpreter_eval",
                           &fixture, &module, &root)) return NULL;
-    if (soac_ip_fixture(fixture) == NULL) return NULL;
+    SoacInterpreterFixture *publication = soac_ip_fixture(fixture);
+    if (publication == NULL) return NULL;
+    PyObject *binding = soac_ip_new_source_binding(publication, module, root);
+    if (binding == NULL) return NULL;
     /* Real proposed native entry. Never substitute PyEval_EvalCode or an
      * interpreter of our own if the required implementation is missing. */
-    return PySoac_EvalInterpreterModuleV1(module, root, fixture);
+    PyObject *result = PySoac_EvalInterpreterModuleV2(module, root, binding);
+    if (result == NULL && publication->root_phase == 4) {
+        publication->root_phase = 3;
+    }
+    PyObject *error = PyErr_GetRaisedException();
+    Py_DECREF(binding);
+    PyErr_SetRaisedException(error);
+    return result;
 }
 
 static PyObject *

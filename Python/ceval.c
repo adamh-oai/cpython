@@ -1248,6 +1248,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int 
     entry.frame.soac_dataclass_role = 0;
     entry.frame.soac_dataclass_invocation = NULL;
     entry.frame.soac_checked_activation = NULL;
+    entry.frame.soac_invocation_id = 0;
     entry.frame.soac_source_authority = 0;
     entry.frame.soac_owner_checked = 0;
     entry.frame.return_offset = 0;

@@ -61,6 +61,11 @@ typedef struct {
     /* GC-visible strict runtime state; never stored in the opaque JIT pointer. */
     PyObject *func_soac_strict_owner;
     PyObject *func_soac_interpreter_guard; /* Shared liveness scalars, no value edges. */
+    /* Simple native births use the owner's immutable source binding directly.
+     * The descriptor is borrowed from that edge, never mutable func_code. */
+    const struct _PySoacInterpreterDescriptorV1 *func_soac_interpreter_descriptor;
+    uint64_t func_soac_interpreter_birth_id;
+    uint8_t func_soac_interpreter_flags;
     uint8_t func_soac_strict_owner_state;
 
     /* Invariant:
