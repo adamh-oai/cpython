@@ -83,6 +83,14 @@ struct SoacTypeContract {
     PySoacTypeFinalCommitV4 commit_final; /* immutable construction authority */
     PySoacStorageStateFactoryV1 storage_state_factory;
     int binding_storage_factory;
+    int empty_write_policy_ready; /* immutable shape, published only at seal */
+    /* Stable scalar borrows supported by directly owned metadata shells.
+     * No reverse type/MRO edge: even an escaped owner cannot keep the actual
+     * class alive through this opt-in. Registration belongs to this birth,
+     * not the shared logical layout or a temporary prepared policy. */
+    const PySoacOwnerLivenessV1 *empty_write_class_record;
+    PyObject *empty_write_storage_owner;
+    const PySoacOwnerLivenessV1 *empty_write_storage_record;
     int (*check_instance_write)(PyObject *, PyObject *, PyObject *, PyObject *);
     PyObject *(*new_instance_dict)(PyObject *, PyObject *);
     int (*prepare_instance_dictionary_policy)(
@@ -95,6 +103,24 @@ static PyTypeObject SoacTypeContract_Type;
 static PyObject *type_new_impl(type_new_ctx *ctx);
 static int type_new_get_bases(type_new_ctx *ctx, PyObject **type);
 static int soac_final_override(PyTypeObject *, PyObject *);
+
+/* Scalar retirement is safe even in callback-free teardown hooks. Keep the
+ * storage shell owned until the ordinary release phase, but never leave a
+ * borrow that could survive release of either supporting owner. */
+static void
+soac_forget_empty_write_records(SoacTypeContract *state)
+{
+    state->empty_write_policy_ready = 0;
+    state->empty_write_class_record = NULL;
+    state->empty_write_storage_record = NULL;
+}
+
+static void
+soac_clear_empty_write_policy(SoacTypeContract *state)
+{
+    soac_forget_empty_write_records(state);
+    Py_CLEAR(state->empty_write_storage_owner);
+}
 
 static PyObject *
 soac_type_mutation_error(void)
@@ -211,6 +237,7 @@ PyType_AbandonSoacPendingV1(PyObject *object, PyObject *expected_owner)
         !state->terminal && soac_has_pending_construction(state) &&
         (state->phase == Py_SOAC_TYPE_STATE_PENDING || state->phase == Py_SOAC_TYPE_STATE_ADMITTING)) {
         soac_fail_construction(state->construction);
+        soac_forget_empty_write_records(state);
     }
 }
 
@@ -278,6 +305,7 @@ _PySOAC_FailPendingType(PyTypeObject *type)
         SoacConstructionHandle *handle = state->construction;
         soac_fail_construction(handle);
         state->phase = Py_SOAC_TYPE_STATE_FAILED;
+        soac_forget_empty_write_records(state);
         if (handle->spec.construction_mode == Py_SOAC_TYPE_CONSTRUCT_ENFORCED) {
             /* Publish failure before retiring the transient metadata edge.
              * An escaped failed type must not extend the legacy caller's
@@ -375,11 +403,34 @@ _PySOAC_UsesInstanceDictionaryPolicy(PyTypeObject *type)
 }
 
 static int
+soac_owner_liveness_error(const char *message)
+{
+    if (!PyErr_Occurred()) {
+        PyObject *error = PySoac_GetStrictRuntimeUnavailableError();
+        PyErr_SetString(error != NULL ? error : PyExc_RuntimeError, message);
+    }
+    return -1;
+}
+
+static int
 soac_contract_live(SoacTypeContract *state)
 {
     if (state->terminal || state->interpreter != _PyInterpreterState_GET()) {
         PyErr_SetString(soac_type_mutation_error(), "strict class contract is unavailable in this execution");
         return -1;
+    }
+    if (state->empty_write_class_record != NULL ||
+        state->empty_write_storage_record != NULL ||
+        state->empty_write_storage_owner != NULL) {
+        /* Direct native owner edges support both scalar reads. Rust tp_clear
+         * publishes TERMINAL before draining its own GC reference vector. */
+        if (state->owner == NULL || state->empty_write_storage_owner == NULL ||
+            state->empty_write_class_record == NULL ||
+            state->empty_write_storage_record == NULL ||
+            state->empty_write_class_record->state >= Py_SOAC_OWNER_LIVENESS_TERMINAL ||
+            state->empty_write_storage_record->state >= Py_SOAC_OWNER_LIVENESS_TERMINAL) {
+            return soac_owner_liveness_error("strict class or storage owner is terminal");
+        }
     }
     return 0;
 }
@@ -407,6 +458,46 @@ PyType_SetSoacStorageStateFactoryV1(PyObject *object, PyObject *expected_owner,
         return -1;
     }
     state->storage_state_factory = prepare;
+    return 0;
+}
+
+int
+PyType_SetSoacEmptyInstanceWritePolicyV1(
+    PyObject *object, PyObject *expected_class_owner,
+    const PySoacOwnerLivenessV1 *class_record,
+    PyObject *storage_owner, const PySoacOwnerLivenessV1 *storage_record)
+{
+    if (PyErr_Occurred()) return -1;
+    if (!_Py_TYPE_STATE_SUPPORTED || sizeof(long) != 8) {
+        PyErr_SetString(PyExc_NotImplementedError,
+                        "empty instance writes require the audited LP64 GIL layout");
+        return -1;
+    }
+    SoacTypeContract *state = object != NULL && PyType_Check(object)
+        ? soac_type_state((PyTypeObject *)object) : NULL;
+    if (state == NULL || expected_class_owner == NULL ||
+        class_record == NULL || storage_owner == NULL || storage_record == NULL ||
+        storage_owner == expected_class_owner || class_record == storage_record ||
+        state->owner != expected_class_owner || state->type != (PyTypeObject *)object ||
+        state->interpreter != _PyInterpreterState_GET() || state->terminal ||
+        soac_type_phase(state) != Py_SOAC_TYPE_STATE_PENDING ||
+        state->permanent_contract_published || !soac_has_pending_construction(state) ||
+        !state->binding_storage_factory ||
+        state->empty_write_class_record != NULL ||
+        state->empty_write_storage_record != NULL ||
+        state->empty_write_storage_owner != NULL ||
+        (((PyTypeObject *)object)->tp_flags & (Py_TPFLAGS_READY | Py_TPFLAGS_READYING))) {
+        return soac_type_state_error("empty instance writes require the original unopened pending bind");
+    }
+    if (class_record->state != Py_SOAC_OWNER_LIVENESS_PENDING ||
+        storage_record->state != Py_SOAC_OWNER_LIVENESS_READY) {
+        return soac_owner_liveness_error("empty instance write owners are not in their original bind phase");
+    }
+    /* INCREF cannot allocate or call Python. Publish only after both records
+     * and their support have passed the original actual-construction checks. */
+    state->empty_write_storage_owner = Py_NewRef(storage_owner);
+    state->empty_write_class_record = class_record;
+    state->empty_write_storage_record = storage_record;
     return 0;
 }
 
@@ -637,6 +728,7 @@ soac_state_traverse(SoacTypeContract *state, visitproc visit, void *arg)
     Py_VISIT(state->annotation_provider);
     Py_VISIT(state->construction);
     Py_VISIT(state->inherited_final_names);
+    Py_VISIT(state->empty_write_storage_owner);
     return 0;
 }
 
@@ -656,6 +748,7 @@ soac_state_clear(SoacTypeContract *state)
     state->initial_frozen_delattr = NULL;
     state->pending_frozen_setattr_birth = 0;
     state->pending_frozen_delattr_birth = 0;
+    soac_clear_empty_write_policy(state);
     Py_CLEAR(state->owner);
     Py_CLEAR(state->annotation_provider);
     Py_CLEAR(state->fields);
@@ -1049,6 +1142,7 @@ soac_class_dictionary_policy(PyObject *owner, PyObject *dict, PyObject *key,
         state->initial_frozen_delattr = NULL;
         state->pending_frozen_setattr_birth = 0;
         state->pending_frozen_delattr_birth = 0;
+        soac_forget_empty_write_records(state);
         return 0;
     }
     if (operation == PyDict_SOAC_VALIDATE_INITIAL) {
@@ -1286,6 +1380,13 @@ soac_move_prepared_policy(SoacTypeContract *state, SoacTypeContract *prepared)
      * dictionary owner remains this exact state, never removed/replaced. */
     assert(state->fields == NULL && state->protected_names == NULL &&
            state->final_methods == NULL && state->object_slots == NULL);
+    /* Preserve this actual birth's write-liveness registration. A temporary
+     * policy has none, and a dataclass replacement binds its own records. The
+     * seal commit checks the final moved dictionary/slot policy before
+     * publishing the shortcut; registration alone is not eligibility. */
+    assert(prepared->empty_write_class_record == NULL &&
+           prepared->empty_write_storage_record == NULL &&
+           prepared->empty_write_storage_owner == NULL);
     state->fields = prepared->fields; prepared->fields = NULL;
     state->object_slot_fields = prepared->object_slot_fields; prepared->object_slot_fields = NULL;
     state->protected_names = prepared->protected_names; prepared->protected_names = NULL;
@@ -1428,6 +1529,7 @@ failed_binding:
         state->terminal = 1;
         state->initial_frozen_setattr = NULL;
         state->initial_frozen_delattr = NULL;
+        soac_forget_empty_write_records(state);
     }
     _PySOAC_FailPendingType(type);
     PyObject *error = PyErr_GetRaisedException();
@@ -1771,6 +1873,24 @@ soac_commit_type_seal(SoacTypeContract *state, PyObject *provider)
     assert(!state->sealed && state->annotation_provider == NULL && provider != NULL);
     state->annotation_provider = provider;
     state->sealed = 1;
+    /* The actual final policy has already MOVE-committed. Its native shape
+     * cannot change after sealing; compute it once here, not at each write.
+     * fields catalogs inferred names independently of selected predicates,
+     * so the catalog may be nonempty. Rust's authenticated empty-rule proof
+     * is the original registration, not the number of recorded names.
+     * Owner readiness remains a per-use check: Rust is still Bound during
+     * pending native admission and publishes READY only at its own seal. */
+    state->empty_write_policy_ready =
+        state->empty_write_class_record != NULL &&
+        state->empty_write_storage_record != NULL &&
+        state->empty_write_storage_owner != NULL && state->owner != NULL &&
+        state->dictionary_mode == Py_SOAC_INSTANCE_DICT_NONE &&
+        state->check_instance_write != NULL &&
+        state->fields != NULL && PyTuple_CheckExact(state->fields) &&
+        state->object_slot_count == 0 &&
+        (state->object_slot_fields == NULL ||
+         (PyTuple_CheckExact(state->object_slot_fields) &&
+          PyTuple_GET_SIZE(state->object_slot_fields) == 0));
 }
 
 #include "soac_type_pending.inc"
@@ -1918,6 +2038,18 @@ _PySOAC_CheckInstanceWrite(PyObject *object, PyObject *name, PyObject *value)
             PyErr_Format(soac_type_mutation_error(), "cannot assign protected strict class member %R on an instance", name);
         }
         return -1;
+    }
+    /* Seal computed immutable policy eligibility. The protected-name check
+     * above also checked both native-owned liveness records; an exact name
+     * cannot allocate or reenter between that check and these scalar reads.
+     * Record retirement clears eligibility before releasing either support.
+     * Nonexact names keep the original callback path after normalization. */
+    if (state->empty_write_policy_ready && PyUnicode_CheckExact(name) &&
+        state->type == Py_TYPE(object) &&
+        state->sealed && soac_type_phase(state) == Py_SOAC_TYPE_STATE_ENFORCED &&
+        state->empty_write_class_record->state == Py_SOAC_OWNER_LIVENESS_READY &&
+        state->empty_write_storage_record->state == Py_SOAC_OWNER_LIVENESS_READY) {
+        return 0;
     }
     /* A selected native slot is validated by actual physical member offset at
      * the final PyMember_SetOne commit, not twice by its lookup spelling. */
@@ -2179,6 +2311,7 @@ _PySOAC_TypeContractBeginTeardown(PyTypeObject *type)
         state->initial_frozen_delattr = NULL;
         state->pending_frozen_setattr_birth = 0;
         state->pending_frozen_delattr_birth = 0;
+        soac_forget_empty_write_records(state);
     }
 }
 

@@ -182,6 +182,7 @@ failed:
     state->terminal = 1;
     soac_type_state_error("pending final admission failed");
     PyObject *error = PyErr_GetRaisedException();
+    soac_clear_empty_write_policy(state);
     Py_XDECREF(prepared);
     Py_XDECREF(seal_provider);
     soac_release_contract_inputs(&inputs);
@@ -213,6 +214,7 @@ PyType_DisposeSoacProvisionalV1(PyObject *object, PyObject *owner,
      * are untouched. Publish dynamic before the first callback-capable release. */
     state->phase = Py_SOAC_TYPE_STATE_DYNAMIC;
     PyObject *error = PyErr_GetRaisedException();
+    soac_clear_empty_write_policy(state);
     Py_CLEAR(state->owner);
     Py_CLEAR(state->construction);
     PyErr_SetRaisedException(error);

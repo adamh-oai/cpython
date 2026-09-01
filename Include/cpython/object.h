@@ -331,6 +331,42 @@ PyAPI_FUNC(int) PyType_SetSoacStorageStateFactoryV1(
     PyObject *actual_type, PyObject *expected_owner,
     PySoacStorageStateFactoryV1 prepare);
 
+enum {
+    Py_SOAC_OWNER_LIVENESS_PENDING = 0,
+    Py_SOAC_OWNER_LIVENESS_READY = 1,
+    Py_SOAC_OWNER_LIVENESS_TERMINAL = 2,
+};
+
+/* A stable, GIL-only scalar embedded in the supported owner's payload. The
+ * owner must keep it allocated through tp_clear until final deallocation.
+ * Publish TERMINAL before releasing any owner references; never reset it.
+ * Class records start PENDING and become READY only after authenticated Rust
+ * class sealing. Storage records are READY when their immutable rules exist.
+ * This is not a Python object, a type pointer, or an execution capability. */
+typedef struct {
+    uint32_t state;
+} PySoacOwnerLivenessV1;
+
+/* Trusted, write-once opt-in during the original unopened PENDING bind, on
+ * the audited LP64 GIL layout only. The caller must authenticate the exact
+ * class/storage owners and prove an ordinary policy with no inherited or own
+ * instance-write checks. The class record must still be PENDING and storage
+ * READY. Native independently checks the final empty native policy before
+ * skipping a callback; the callback remains installed for all other cases.
+ * The fields tuple is a name catalog, not selected value checks, and may be
+ * nonempty. No native object slots or dictionary write policy may be present.
+ * Both records are borrowed for the lifetime of native-owned supporting
+ * shells: the contract already owns expected_class_owner and acquires one
+ * storage_owner reference. Neither record may retain a type or be shared
+ * through a source/layout cache. Invalid/repeated registration changes nothing.
+ * This API cannot register a pre-existing, already-ready, or replacement type
+ * through another construction's exposed owner. */
+PyAPI_FUNC(int) PyType_SetSoacEmptyInstanceWritePolicyV1(
+    PyObject *actual_type, PyObject *expected_class_owner,
+    const PySoacOwnerLivenessV1 *class_record,
+    PyObject *storage_owner,
+    const PySoacOwnerLivenessV1 *storage_record);
+
 /* Checked borrowed view: absent layout bit returns NULL without reading a
  * trailer. A present but invalid/terminal attachment raises, never authorizes
  * unchecked writes. Neither this pointer nor its presence grants a contract. */
