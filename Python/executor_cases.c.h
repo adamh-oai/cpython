@@ -9088,7 +9088,8 @@
                 JUMP_TO_JUMP_TARGET();
             }
             PyTypeObject *tp = Py_TYPE(owner_o);
-            if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) ||
+            if (_PyObject_HasTypeStateSlot(owner_o) ||
+                (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) ||
                 FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
                 UNLOCK_OBJECT(owner_o);
                 if (true) {
@@ -9121,7 +9122,8 @@
                 JUMP_TO_JUMP_TARGET();
             }
             PyTypeObject *tp = Py_TYPE(owner_o);
-            if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) ||
+            if (_PyObject_HasTypeStateSlot(owner_o) ||
+                (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) ||
                 FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
                 UNLOCK_OBJECT(owner_o);
                 if (true) {
@@ -9155,7 +9157,8 @@
                 JUMP_TO_JUMP_TARGET();
             }
             PyTypeObject *tp = Py_TYPE(owner_o);
-            if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) ||
+            if (_PyObject_HasTypeStateSlot(owner_o) ||
+                (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) ||
                 FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
                 UNLOCK_OBJECT(owner_o);
                 if (true) {
@@ -9193,7 +9196,8 @@
                 JUMP_TO_JUMP_TARGET();
             }
             PyTypeObject *tp = Py_TYPE(owner_o);
-            if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) ||
+            if (_PyObject_HasTypeStateSlot(owner_o) ||
+                (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) ||
                 FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
                 UNLOCK_OBJECT(owner_o);
                 if (true) {

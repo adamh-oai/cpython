@@ -11961,19 +11961,9 @@
             _PyStackRef value;
             _PyStackRef o;
             /* Skip 1 cache entry */
-            // _GUARD_NO_ORDINARY_INSTANCE_WRITES
-            {
-                owner = stack_pointer[-1];
-                PyObject *owner_o = PyStackRef_AsPyObjectBorrow(owner);
-                if (_PyObject_HasTypeStateSlot(owner_o) ||
-                    _PySOAC_HasOrdinaryInstanceWrites(Py_TYPE(owner_o))) {
-                    UPDATE_MISS_STATS(STORE_ATTR);
-                    assert(_PyOpcode_Deopt[opcode] == (STORE_ATTR));
-                    JUMP_TO_PREDICTED(STORE_ATTR);
-                }
-            }
             // _GUARD_TYPE_VERSION_AND_LOCK
             {
+                owner = stack_pointer[-1];
                 uint32_t type_version = read_u32(&this_instr[2].cache);
                 PyObject *owner_o = PyStackRef_AsPyObjectBorrow(owner);
                 assert(type_version != 0);
@@ -11983,7 +11973,8 @@
                     JUMP_TO_PREDICTED(STORE_ATTR);
                 }
                 PyTypeObject *tp = Py_TYPE(owner_o);
-                if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) ||
+                if (_PyObject_HasTypeStateSlot(owner_o) ||
+                    (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) ||
                     FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
                     UNLOCK_OBJECT(owner_o);
                     if (true) {
