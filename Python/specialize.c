@@ -599,6 +599,18 @@ specialize_dict_access_inline(
     PyObject *name, unsigned int tp_version,
     int base_op, int values_op)
 {
+    if (base_op == STORE_ATTR &&
+        (Py_TYPE(owner) != type || tp_version == 0 ||
+         FT_ATOMIC_LOAD_UINT_RELAXED(type->tp_version_tag) != tp_version ||
+         _PyObject_HasTypeStateSlot(owner) ||
+         (type->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) ||
+         _PySOAC_HasOrdinaryInstanceWrites(type))) {
+        /* Descriptor lookup can call equality on a non-string MRO key.
+         * Publish the negative inherited-write fact only for the same
+         * actual receiver type and version observed by that lookup. */
+        SPECIALIZATION_FAIL(STORE_ATTR, SPEC_FAIL_OVERRIDDEN);
+        return 0;
+    }
     _PyAttrCache *cache = (_PyAttrCache *)(instr + 1);
     PyDictKeysObject *keys = ((PyHeapTypeObject *)type)->ht_cached_keys;
     assert(PyUnicode_CheckExact(name));

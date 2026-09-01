@@ -2516,7 +2516,10 @@ dummy_func(
             assert(type_version != 0);
             EXIT_IF(!LOCK_OBJECT(owner_o));
             PyTypeObject *tp = Py_TYPE(owner_o);
-            if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) ||
+            /* The specializer proved a negative inherited-write policy for
+             * this version. Keep the actual object-state check in tier 2. */
+            if (_PyObject_HasTypeStateSlot(owner_o) ||
+                (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) ||
                 FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
                 UNLOCK_OBJECT(owner_o);
                 EXIT_IF(true);
@@ -2801,7 +2804,6 @@ dummy_func(
 
         macro(STORE_ATTR_INSTANCE_VALUE) =
             unused/1 +
-            _GUARD_NO_ORDINARY_INSTANCE_WRITES +
             _GUARD_TYPE_VERSION_AND_LOCK +
             _GUARD_DORV_NO_DICT +
             _STORE_ATTR_INSTANCE_VALUE +
