@@ -312,7 +312,10 @@ _PyFrame_Initialize(
     frame->soac_checked_activation = NULL;
     frame->soac_invocation_id = 0;
     frame->soac_source_authority = 0;
-    frame->soac_namespace = (code->co_flags & (CO_FUTURE_STRICT | CO_OPTIMIZED)) == CO_FUTURE_STRICT;
+    /* Public flags can also describe ordinary copies. Only the trusted
+     * compiler role identifies a namespace requiring explicit admission. */
+    frame->soac_namespace = code->_co_soac_scope_kind == Py_SOAC_SCOPE_MODULE ||
+                            code->_co_soac_scope_kind == Py_SOAC_SCOPE_CLASS;
 #ifdef Py_DEBUG
     frame->lltrace = 0;
 #endif
