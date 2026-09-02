@@ -741,11 +741,6 @@
                     assert(_PyOpcode_Deopt[opcode] == (BINARY_OP));
                     JUMP_TO_PREDICTED(BINARY_OP);
                 }
-                if (!_PySOAC_InterpreterFunctionFastReady((PyFunctionObject *)getitem_o)) {
-                    UPDATE_MISS_STATS(BINARY_OP);
-                    assert(_PyOpcode_Deopt[opcode] == (BINARY_OP));
-                    JUMP_TO_PREDICTED(BINARY_OP);
-                }
                 PyCodeObject *code = (PyCodeObject *)PyFunction_GET_CODE(getitem_o);
                 assert(code->co_argcount == 2);
                 if (!_PyThreadState_HasStackSpace(tstate, code->co_framesize)) {
@@ -1956,11 +1951,6 @@
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
                 }
-                if (!_PySOAC_InterpreterFunctionFastReady(init_func)) {
-                    UPDATE_MISS_STATS(CALL);
-                    assert(_PyOpcode_Deopt[opcode] == (CALL));
-                    JUMP_TO_PREDICTED(CALL);
-                }
                 PyCodeObject *code = (PyCodeObject *)init_func->func_code;
                 if (!_PyThreadState_HasStackSpace(tstate, code->co_framesize + _Py_InitCleanup.co_framesize)) {
                     UPDATE_MISS_STATS(CALL);
@@ -2113,11 +2103,6 @@
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
                 }
-                if (!_PySOAC_InterpreterFunctionFastReady(func)) {
-                    UPDATE_MISS_STATS(CALL);
-                    assert(_PyOpcode_Deopt[opcode] == (CALL));
-                    JUMP_TO_PREDICTED(CALL);
-                }
             }
             // _CHECK_FUNCTION_EXACT_ARGS
             {
@@ -2247,11 +2232,6 @@
                     JUMP_TO_PREDICTED(CALL);
                 }
                 if (((PyFunctionObject *)func)->func_version != func_version) {
-                    UPDATE_MISS_STATS(CALL);
-                    assert(_PyOpcode_Deopt[opcode] == (CALL));
-                    JUMP_TO_PREDICTED(CALL);
-                }
-                if (!_PySOAC_InterpreterFunctionFastReady((PyFunctionObject *)func)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -3544,11 +3524,6 @@
                     assert(_PyOpcode_Deopt[opcode] == (CALL_KW));
                     JUMP_TO_PREDICTED(CALL_KW);
                 }
-                if (!_PySOAC_InterpreterFunctionFastReady((PyFunctionObject *)func)) {
-                    UPDATE_MISS_STATS(CALL_KW);
-                    assert(_PyOpcode_Deopt[opcode] == (CALL_KW));
-                    JUMP_TO_PREDICTED(CALL_KW);
-                }
                 if (!PyStackRef_IsNull(null)) {
                     UPDATE_MISS_STATS(CALL_KW);
                     assert(_PyOpcode_Deopt[opcode] == (CALL_KW));
@@ -3768,11 +3743,6 @@
                 }
                 PyFunctionObject *func = (PyFunctionObject *)callable_o;
                 if (func->func_version != func_version) {
-                    UPDATE_MISS_STATS(CALL_KW);
-                    assert(_PyOpcode_Deopt[opcode] == (CALL_KW));
-                    JUMP_TO_PREDICTED(CALL_KW);
-                }
-                if (!_PySOAC_InterpreterFunctionFastReady(func)) {
                     UPDATE_MISS_STATS(CALL_KW);
                     assert(_PyOpcode_Deopt[opcode] == (CALL_KW));
                     JUMP_TO_PREDICTED(CALL_KW);
@@ -4596,11 +4566,6 @@
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
                 }
-                if (!_PySOAC_InterpreterFunctionFastReady(func)) {
-                    UPDATE_MISS_STATS(CALL);
-                    assert(_PyOpcode_Deopt[opcode] == (CALL));
-                    JUMP_TO_PREDICTED(CALL);
-                }
             }
             // _CHECK_FUNCTION_EXACT_ARGS
             {
@@ -4724,11 +4689,6 @@
                 }
                 PyFunctionObject *func = (PyFunctionObject *)callable_o;
                 if (func->func_version != func_version) {
-                    UPDATE_MISS_STATS(CALL);
-                    assert(_PyOpcode_Deopt[opcode] == (CALL));
-                    JUMP_TO_PREDICTED(CALL);
-                }
-                if (!_PySOAC_InterpreterFunctionFastReady(func)) {
                     UPDATE_MISS_STATS(CALL);
                     assert(_PyOpcode_Deopt[opcode] == (CALL));
                     JUMP_TO_PREDICTED(CALL);
@@ -5756,10 +5716,33 @@
             assert(PyStackRef_FunctionCheck(frame->f_funcobj));
             PyFunctionObject *func = (PyFunctionObject *)PyStackRef_AsPyObjectBorrow(frame->f_funcobj);
             PyObject *closure = func->func_closure;
+            if (closure == NULL || !PyTuple_Check(closure) ||
+                PyTuple_GET_SIZE(closure) != co->co_nfreevars) {
+                _PyFrame_SetStackPointer(frame, stack_pointer);
+                PyObject *error = PySoac_GetStrictRuntimeUnavailableError();
+                stack_pointer = _PyFrame_GetStackPointer(frame);
+                if (error != NULL) {
+                    _PyFrame_SetStackPointer(frame, stack_pointer);
+                    PyErr_SetString(error, "interpreter function construction is incomplete");
+                    stack_pointer = _PyFrame_GetStackPointer(frame);
+                }
+                JUMP_TO_LABEL(error);
+            }
             assert(oparg == co->co_nfreevars);
             int offset = co->co_nlocalsplus - oparg;
             for (int i = 0; i < oparg; ++i) {
                 PyObject *o = PyTuple_GET_ITEM(closure, i);
+                if (!PyCell_Check(o)) {
+                    _PyFrame_SetStackPointer(frame, stack_pointer);
+                    PyObject *error = PySoac_GetStrictRuntimeUnavailableError();
+                    stack_pointer = _PyFrame_GetStackPointer(frame);
+                    if (error != NULL) {
+                        _PyFrame_SetStackPointer(frame, stack_pointer);
+                        PyErr_SetString(error, "interpreter function closure has an invalid cell");
+                        stack_pointer = _PyFrame_GetStackPointer(frame);
+                    }
+                    JUMP_TO_LABEL(error);
+                }
                 frame->localsplus[offset + i] = PyStackRef_FromPyObjectNew(o);
             }
             DISPATCH();
@@ -6116,7 +6099,7 @@
             assert(executor->vm_data.code == code);
             assert(executor->vm_data.valid);
             assert(tstate->current_executor == NULL);
-            if (frame->soac_source_authority ||
+            if ((_PyFrame_GetCode(frame)->co_flags & CO_FUTURE_STRICT) ||
                 (_Py_atomic_load_uintptr_relaxed(&tstate->eval_breaker) & _PY_EVAL_EVENTS_MASK)) {
                 opcode = executor->vm_data.opcode;
                 oparg = (oparg & ~255) | executor->vm_data.oparg;
@@ -6336,7 +6319,7 @@
                     assert(_PyOpcode_Deopt[opcode] == (FOR_ITER));
                     JUMP_TO_PREDICTED(FOR_ITER);
                 }
-                if (gen->gi_iframe.soac_source_authority) {
+                if (gen->gi_iframe.soac_checked_activation != NULL) {
                     UPDATE_MISS_STATS(FOR_ITER);
                     assert(_PyOpcode_Deopt[opcode] == (FOR_ITER));
                     JUMP_TO_PREDICTED(FOR_ITER);
@@ -8356,7 +8339,7 @@
             {
                 #ifdef _Py_TIER2
                 _Py_BackoffCounter counter = this_instr[1].counter;
-                if (!frame->soac_source_authority &&
+                if (!(_PyFrame_GetCode(frame)->co_flags & CO_FUTURE_STRICT) &&
                     !IS_JIT_TRACING() && backoff_counter_triggers(counter) &&
                     this_instr->op.code == JUMP_BACKWARD_JIT &&
                     next_instr->op.code != ENTER_EXECUTOR) {
@@ -8739,11 +8722,6 @@
             PyFunctionObject *f = (PyFunctionObject *)getattribute;
             assert(func_version != 0);
             if (f->func_version != func_version) {
-                UPDATE_MISS_STATS(LOAD_ATTR);
-                assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
-                JUMP_TO_PREDICTED(LOAD_ATTR);
-            }
-            if (!_PySOAC_InterpreterFunctionFastReady(f)) {
                 UPDATE_MISS_STATS(LOAD_ATTR);
                 assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                 JUMP_TO_PREDICTED(LOAD_ATTR);
@@ -9330,11 +9308,6 @@
                 assert((oparg & 1) == 0);
                 assert(Py_IS_TYPE(fget, &PyFunction_Type));
                 PyFunctionObject *f = (PyFunctionObject *)fget;
-                if (!_PySOAC_InterpreterFunctionFastReady(f)) {
-                    UPDATE_MISS_STATS(LOAD_ATTR);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
-                    JUMP_TO_PREDICTED(LOAD_ATTR);
-                }
                 PyCodeObject *code = (PyCodeObject *)f->func_code;
                 if ((code->co_flags & (CO_VARKEYWORDS | CO_VARARGS | CO_OPTIMIZED)) != CO_OPTIMIZED) {
                     UPDATE_MISS_STATS(LOAD_ATTR);
@@ -11625,7 +11598,7 @@
                     assert(_PyOpcode_Deopt[opcode] == (SEND));
                     JUMP_TO_PREDICTED(SEND);
                 }
-                if (gen->gi_iframe.soac_source_authority) {
+                if (gen->gi_iframe.soac_checked_activation != NULL) {
                     UPDATE_MISS_STATS(SEND);
                     assert(_PyOpcode_Deopt[opcode] == (SEND));
                     JUMP_TO_PREDICTED(SEND);
@@ -13019,7 +12992,7 @@
             frame->instr_ptr = prev_instr;
             opcode = next_instr->op.code;
             bool stop_tracing = (
-                                 frame->soac_source_authority ||
+                                 (_PyFrame_GetCode(frame)->co_flags & CO_FUTURE_STRICT) ||
                                  opcode == WITH_EXCEPT_START ||
                                  opcode == RERAISE ||
                                  opcode == CLEANUP_THROW ||
