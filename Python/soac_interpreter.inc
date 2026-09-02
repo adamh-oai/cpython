@@ -737,6 +737,43 @@ _PySOAC_InterpreterView(_PyInterpreterFrame *frame,
         frame, this_instr, &view->instruction_units, &view->instruction_ordinal);
 }
 
+/* A pending function can need cold ownership validation while one of its
+ * definition events already has a RUNNING context. Validate and snapshot that
+ * real context, then expose only binding operands to check_entry. This view
+ * grants no construction authority and never changes the live activation.
+ * The saved context is borrowed only for identity comparisons after callback.
+ */
+static int
+soac_interpreter_cold_entry_view(
+    _PyInterpreterFrame *frame, PySoacInterpreterFrameViewV1 *view,
+    PySoacInterpreterFrameViewV1 *context)
+{
+    *context = (PySoacInterpreterFrameViewV1){0};
+    PyObject *object = frame->soac_checked_activation;
+    if (object == NULL) {
+        return _PySOAC_InterpreterView(
+            frame, NULL, Py_SOAC_INTERPRETER_BINDING, NULL, view);
+    }
+    if (!_PySOAC_InterpreterIsActivation(object)) {
+        return soac_interpreter_error("cold interpreter entry has unknown frame metadata");
+    }
+    _PySoacInterpreterActivationV1 *activation = (_PySoacInterpreterActivationV1 *)object;
+    if (activation->kind != Py_SOAC_INTERPRETER_FUNCTION ||
+        activation->phase != Py_SOAC_INTERPRETER_RUNNING || activation->state == NULL ||
+        !soac_interpreter_activation_matches(activation, frame) ||
+        _PySOAC_InterpreterView(frame, NULL, Py_SOAC_INTERPRETER_RUNNING,
+                               activation->state, context) < 0) {
+        return soac_interpreter_error("cold interpreter entry has no active function context");
+    }
+    *view = (PySoacInterpreterFrameViewV1){
+        .frame = frame, .thread = _PyThreadState_GET(), .self = view,
+        .phase = Py_SOAC_INTERPRETER_BINDING, .kind = Py_SOAC_INTERPRETER_FUNCTION,
+        .interpreter_id = context->interpreter_id,
+        .instruction_units = -1, .instruction_ordinal = -1,
+    };
+    return 0;
+}
+
 static int
 soac_interpreter_check_view(const PySoacInterpreterFrameViewV1 *view)
 {
@@ -949,12 +986,35 @@ soac_interpreter_authorize(_PyInterpreterFrame *frame)
      * metadata. Completed ordinary calls never enter this path. */
     if (!guard->ready || guard->execution == NULL) {
         const PySoacInterpreterCallbacksV4 *callbacks = soac_interpreter_callbacks();
-        PySoacInterpreterFrameViewV1 view;
-        if (callbacks == NULL || _PySOAC_InterpreterView(frame, NULL,
-                Py_SOAC_INTERPRETER_BINDING, NULL, &view) < 0) return -1;
+        PyObject *active_object = frame->soac_checked_activation;
+        PySoacInterpreterFrameViewV1 view, active_context;
+        if (callbacks == NULL ||
+            soac_interpreter_cold_entry_view(frame, &view, &active_context) < 0) return -1;
         int status = callbacks->check_entry(function->func_soac_strict_owner, &view);
         view.self = NULL;
+        active_context.self = NULL;
         if (soac_interpreter_status(status, "interpreter function entry was refused") < 0) return -1;
+        /* Reacquire through the actual frame before reading metadata:
+         * callbacks may have retired the snapshotted borrowed object. An
+         * operand-only check must not create a previously absent context. */
+        PyObject *object = frame->soac_checked_activation;
+        if (object != active_object)
+            return soac_interpreter_error("interpreter context changed during cold entry");
+        if (object != NULL) {
+            if (!_PySOAC_InterpreterIsActivation(object))
+                return soac_interpreter_error("interpreter context changed during cold entry");
+            _PySoacInterpreterActivationV1 *activation = (_PySoacInterpreterActivationV1 *)object;
+            if (activation->activation_id != active_context.activation_id ||
+                activation->interpreter_id != active_context.interpreter_id ||
+                activation->interpreter_id != _PyInterpreterState_GET()->id ||
+                activation->kind != active_context.kind ||
+                activation->phase != active_context.phase ||
+                activation->state != active_context.call_state ||
+                activation->source_authority != active_context.source_authority ||
+                activation->function != function || activation->code != code ||
+                !soac_interpreter_activation_matches(activation, frame))
+                return soac_interpreter_error("interpreter context changed during cold entry");
+        }
         /* A cold check can run callbacks. Repeat native captured-code and
          * liveness facts before granting actual frame authority. */
         if (guard->terminal || (guard->execution != NULL && guard->execution->terminal) ||

@@ -224,11 +224,15 @@ PyAPI_FUNC(void) _PySOAC_InterpreterAbortDefinition(
  * - Exact owner/source/native code+parent checks precede callback grants.
  * - Ordinary _PyFrame_Initialize, initialize_locals, COPY_FREE_VARS/MAKE_CELL,
  *   RETURN_GENERATOR and frame cleanup own every Python execution value.
- * - Common native init enforces actual source owners, including a restored
- *   stock vectorcall or a semantics-preserving C forwarder. Do not use public
- *   vectorcall pointer equality as authority; arbitrary/unowned frames refuse.
- * - Capture the actual source owner before binding. Incompatible fast calls
- *   deopt before operand transfer.
+ * - Ordinary function calls/resumes do not authenticate source owners.
+ *   Actual definition events authenticate the captured code and owner,
+ *   including after restored stock vectorcall or a C forwarder. A copied
+ *   leaf may execute but does not acquire construction authority.
+ *   Public vectorcall pointer equality is never source authority.
+ * - ROOT/class namespace admission remains explicit. Cold function ownership
+ *   checks expose only binding operands, even inside an active definition;
+ *   they never alter that context or grant invocation authority. Selected
+ *   construction calls deopt before operand transfer.
  * - Mark phase/attempted and unpublish borrowed fields BEFORE releases/reentry.
  * - Never route failed definition completion through callee handlers.
  * - _PyFrame_Copy MOVE-transfers the one activation and zeros the source.
