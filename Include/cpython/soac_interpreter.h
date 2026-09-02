@@ -86,7 +86,8 @@ PyAPI_FUNC(PyObject *) PySoac_InterpreterFrameSourceBindingV1(
 /* Callback-local native execution facts. A construction activation pair is
  * reserved before enter, survives suspension/native frame moves while its
  * event is active, and is never reused. Ordinary function calls have no such
- * activation; check_entry reports activation_id=0 and call_state=NULL. The
+ * activation. Definition-time check_entry reports activation_id=0 and
+ * call_state=NULL before opening construction. The
  * pair is correspondence, not execution authority or a Python value owner. */
 typedef struct {
     uint32_t abi_version;             /* Set by GetInfo, exactly V2. */
@@ -259,9 +260,9 @@ typedef struct {
     /* ROOT/CLASS_NAMESPACE committed default-VM entry after native binding,
      * evaluator selection and recursion success, before their first opcode.
      * RUNNING view; successful validation is callback/allocation-free. Ordinary
-     * function entry/resume does not invoke this callback; its actual VM-entry
-     * witness is the scalar InterpreterFunctionEnteredV1 guard bit. Binder,
-     * ownership and external-evaluator refusals do not fabricate that bit. */
+     * function entry/resume does not invoke this callback or set the scalar
+     * InterpreterFunctionEnteredV1 bit. That bit records successful native
+     * authentication at an actual definition event, never an ordinary call. */
     int (*started)(PyObject *state, const PySoacInterpreterFrameViewV1 *frame);
 
     /* An indexed, potentially relevant source-authorized CALL, after native
@@ -336,11 +337,12 @@ typedef struct {
      * SET_FUNCTION_ATTRIBUTE nor an arbitrary code pointer is authority. */
     int (*definition_complete)(const PySoacInterpreterFrameViewV1 *frame,
                                PyObject *borrowed_value);
-    /* Cold unsealed/uncached ownership validation, before native argument
-     * binding. BINDING view with no activation/state. It can permit an actual
+    /* Cold unsealed/uncached ownership validation at a definition event.
+     * BINDING view with no activation/state. It can permit an actual
      * ordinary code replacement, never a transplanted strict code object.
-     * Ready guards avoid this callback; native checks retain actual identity,
-     * supported mutation rules and shared execution-guard liveness. */
+     * Ready guards avoid this callback; definition-time native checks retain
+     * actual identity, supported mutation rules and shared guard liveness.
+     * Ordinary function entry and resume never invoke this callback. */
     int (*check_entry)(PyObject *owner, const PySoacInterpreterFrameViewV1 *frame);
     /* Actual post-attribute function birth, or one exact generic-scope result
      * handoff. complete_context=0: keep enclosing definition context active;
@@ -374,10 +376,12 @@ PyAPI_FUNC(int) PySoac_SetInterpreterCodeEventsV1(
     PyObject *, const PySoacInterpreterCodeEventV1 *, size_t, size_t);
 /* Shared native metadata guards, with no owned function/code/argument values.
  * GetFunctionGuard and NewExecutionGuard return new references. Ready caches
- * validated native entry ownership; it is not metadata sealing or a value-type
- * guarantee. Invalidate is terminal. Entered records actual committed VM entry.
- * BindExecution ties every function to its module's admission lifetime; failed
- * initialization/terminal teardown must invalidate that shared guard. */
+ * validated native construction ownership; it is not metadata sealing or a
+ * value-type guarantee. Invalidate is terminal. Entered records successful
+ * authentication at an actual definition event, not ordinary VM entry.
+ * BindExecution ties construction and metadata authority to the module's
+ * admission lifetime; failed initialization/terminal teardown must invalidate
+ * that shared guard without refusing ordinary leaf execution. */
 PyAPI_FUNC(PyObject *) PySoac_GetInterpreterFunctionGuardV1(PyObject *);
 PyAPI_FUNC(int) PySoac_InterpreterFunctionReadyV1(PyObject *);
 PyAPI_FUNC(int) PySoac_InterpreterFunctionInvalidateV1(PyObject *);

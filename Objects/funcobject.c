@@ -934,8 +934,25 @@ PyFunction_SetClosure(PyObject *op, PyObject *closure)
                      Py_TYPE(closure)->tp_name);
         return -1;
     }
-    _PyFunction_ClearVersion((PyFunctionObject *)op);
-    Py_XSETREF(((PyFunctionObject *)op)->func_closure, closure);
+    PyFunctionObject *function = (PyFunctionObject *)op;
+    PyCodeObject *code = (PyCodeObject *)function->func_code;
+    if (function->func_soac_strict_owner != NULL || (code->co_flags & CO_FUTURE_STRICT)) {
+        Py_ssize_t count = closure == NULL ? 0 : PyTuple_GET_SIZE(closure);
+        if (count != code->co_nfreevars) {
+            Py_XDECREF(closure);
+            PyErr_SetString(PyExc_ValueError, "closure length does not match function code");
+            return -1;
+        }
+        for (Py_ssize_t i = 0; i < count; i++) {
+            if (!PyCell_Check(PyTuple_GET_ITEM(closure, i))) {
+                Py_DECREF(closure);
+                PyErr_SetString(PyExc_TypeError, "closure entries must be cells");
+                return -1;
+            }
+        }
+    }
+    _PyFunction_ClearVersion(function);
+    Py_XSETREF(function->func_closure, closure);
     return 0;
 }
 

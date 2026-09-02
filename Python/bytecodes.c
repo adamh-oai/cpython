@@ -1096,7 +1096,6 @@ dummy_func(
             assert(PyFunction_Check(getitem_o));
             uint32_t cached_version = FT_ATOMIC_LOAD_UINT32_RELAXED(ht->_spec_cache.getitem_version);
             DEOPT_IF(((PyFunctionObject *)getitem_o)->func_version != cached_version);
-            DEOPT_IF(!_PySOAC_InterpreterFunctionFastReady((PyFunctionObject *)getitem_o));
             PyCodeObject *code = (PyCodeObject *)PyFunction_GET_CODE(getitem_o);
             assert(code->co_argcount == 2);
             DEOPT_IF(!_PyThreadState_HasStackSpace(tstate, code->co_framesize));
@@ -1466,7 +1465,7 @@ dummy_func(
             PyGenObject *gen = (PyGenObject *)PyStackRef_AsPyObjectBorrow(receiver);
             DEOPT_IF(Py_TYPE(gen) != &PyGen_Type && Py_TYPE(gen) != &PyCoro_Type);
             DEOPT_IF(_PyGen_IsSoacManaged(gen));
-            DEOPT_IF(gen->gi_iframe.soac_source_authority);
+            DEOPT_IF(gen->gi_iframe.soac_checked_activation != NULL);
             DEOPT_IF(!gen_try_set_executing((PyGenObject *)gen));
             STAT_INC(SEND, hit);
             _PyInterpreterFrame *pushed_frame = &gen->gi_iframe;
@@ -2112,10 +2111,28 @@ dummy_func(
             assert(PyStackRef_FunctionCheck(frame->f_funcobj));
             PyFunctionObject *func = (PyFunctionObject *)PyStackRef_AsPyObjectBorrow(frame->f_funcobj);
             PyObject *closure = func->func_closure;
+            /* CREATE can expose a function before SET_FUNCTION_ATTRIBUTE has
+             * installed its closure. Check at the first actual cell read;
+             * ordinary calls do not scan the closure or source owner. */
+            if (closure == NULL || !PyTuple_Check(closure) ||
+                PyTuple_GET_SIZE(closure) != co->co_nfreevars) {
+                PyObject *error = PySoac_GetStrictRuntimeUnavailableError();
+                if (error != NULL) {
+                    PyErr_SetString(error, "interpreter function construction is incomplete");
+                }
+                ERROR_IF(true);
+            }
             assert(oparg == co->co_nfreevars);
             int offset = co->co_nlocalsplus - oparg;
             for (int i = 0; i < oparg; ++i) {
                 PyObject *o = PyTuple_GET_ITEM(closure, i);
+                if (!PyCell_Check(o)) {
+                    PyObject *error = PySoac_GetStrictRuntimeUnavailableError();
+                    if (error != NULL) {
+                        PyErr_SetString(error, "interpreter function closure has an invalid cell");
+                    }
+                    ERROR_IF(true);
+                }
                 frame->localsplus[offset + i] = PyStackRef_FromPyObjectNew(o);
             }
         }
@@ -2709,7 +2726,6 @@ dummy_func(
             assert((oparg & 1) == 0);
             assert(Py_IS_TYPE(fget, &PyFunction_Type));
             PyFunctionObject *f = (PyFunctionObject *)fget;
-            DEOPT_IF(!_PySOAC_InterpreterFunctionFastReady(f));
             PyCodeObject *code = (PyCodeObject *)f->func_code;
             DEOPT_IF((code->co_flags & (CO_VARKEYWORDS | CO_VARARGS | CO_OPTIMIZED)) != CO_OPTIMIZED);
             DEOPT_IF(code->co_kwonlyargcount);
@@ -2745,7 +2761,6 @@ dummy_func(
             PyFunctionObject *f = (PyFunctionObject *)getattribute;
             assert(func_version != 0);
             DEOPT_IF(f->func_version != func_version);
-            DEOPT_IF(!_PySOAC_InterpreterFunctionFastReady(f));
             PyCodeObject *code = (PyCodeObject *)f->func_code;
             assert(code->co_argcount == 2);
             DEOPT_IF(!_PyThreadState_HasStackSpace(tstate, code->co_framesize));
@@ -3154,7 +3169,7 @@ dummy_func(
         tier1 op(_JIT, (--)) {
         #ifdef _Py_TIER2
             _Py_BackoffCounter counter = this_instr[1].counter;
-            if (!frame->soac_source_authority &&
+            if (!(_PyFrame_GetCode(frame)->co_flags & CO_FUTURE_STRICT) &&
                 !IS_JIT_TRACING() && backoff_counter_triggers(counter) &&
                 this_instr->op.code == JUMP_BACKWARD_JIT &&
                 next_instr->op.code != ENTER_EXECUTOR) {
@@ -3228,7 +3243,7 @@ dummy_func(
             /* If the eval breaker is set then stay in tier 1.
              * This avoids any potentially infinite loops
              * involving _RESUME_CHECK */
-            if (frame->soac_source_authority ||
+            if ((_PyFrame_GetCode(frame)->co_flags & CO_FUTURE_STRICT) ||
                 (_Py_atomic_load_uintptr_relaxed(&tstate->eval_breaker) & _PY_EVAL_EVENTS_MASK)) {
                 opcode = executor->vm_data.opcode;
                 oparg = (oparg & ~255) | executor->vm_data.oparg;
@@ -3638,7 +3653,7 @@ dummy_func(
             PyGenObject *gen = (PyGenObject *)PyStackRef_AsPyObjectBorrow(iter);
             DEOPT_IF(Py_TYPE(gen) != &PyGen_Type);
             DEOPT_IF(_PyGen_IsSoacManaged(gen));
-            DEOPT_IF(gen->gi_iframe.soac_source_authority);
+            DEOPT_IF(gen->gi_iframe.soac_checked_activation != NULL);
             DEOPT_IF(!gen_try_set_executing((PyGenObject *)gen));
             STAT_INC(FOR_ITER, hit);
             _PyInterpreterFrame *pushed_frame = &gen->gi_iframe;
@@ -3922,7 +3937,7 @@ dummy_func(
             /* Tier 2 does not carry the tier-1 instruction pointer needed
              * to select a construction site. Refuse actual source authority
              * before calling; ordinary frames have no selected call sites. */
-            DEOPT_IF(frame->soac_source_authority);
+            DEOPT_IF(_PyFrame_GetCode(frame)->co_flags & CO_FUTURE_STRICT);
         }
 
         op(_MAYBE_EXPAND_METHOD, (callable, self_or_null, unused[oparg] -- callable, self_or_null, unused[oparg])) {
@@ -4076,14 +4091,12 @@ dummy_func(
             EXIT_IF(!PyFunction_Check(callable_o));
             PyFunctionObject *func = (PyFunctionObject *)callable_o;
             EXIT_IF(func->func_version != func_version);
-            EXIT_IF(!_PySOAC_InterpreterFunctionFastReady(func));
         }
 
         tier2 op(_CHECK_FUNCTION_VERSION_INLINE, (func_version/2, callable_o/4 --)) {
             assert(PyFunction_Check(callable_o));
             PyFunctionObject *func = (PyFunctionObject *)callable_o;
             EXIT_IF(func->func_version != func_version);
-            EXIT_IF(!_PySOAC_InterpreterFunctionFastReady(func));
         }
 
         macro(CALL_PY_GENERAL) =
@@ -4104,7 +4117,6 @@ dummy_func(
             PyObject *func = ((PyMethodObject *)callable_o)->im_func;
             EXIT_IF(!PyFunction_Check(func));
             EXIT_IF(((PyFunctionObject *)func)->func_version != func_version);
-            EXIT_IF(!_PySOAC_InterpreterFunctionFastReady((PyFunctionObject *)func));
             EXIT_IF(!PyStackRef_IsNull(null));
         }
 
@@ -4385,7 +4397,6 @@ dummy_func(
             // Public vectorcall replacement invalidates the function version,
             // not this type-version cache. Check before allocating an instance.
             DEOPT_IF(init_func == NULL || init_func->vectorcall != _PyFunction_Vectorcall);
-            DEOPT_IF(!_PySOAC_InterpreterFunctionFastReady(init_func));
             PyCodeObject *code = (PyCodeObject *)init_func->func_code;
             DEOPT_IF(!_PyThreadState_HasStackSpace(tstate, code->co_framesize + _Py_InitCleanup.co_framesize));
             STAT_INC(CALL, hit);
@@ -5011,7 +5022,6 @@ dummy_func(
             EXIT_IF(!PyFunction_Check(callable_o));
             PyFunctionObject *func = (PyFunctionObject *)callable_o;
             EXIT_IF(func->func_version != func_version);
-            EXIT_IF(!_PySOAC_InterpreterFunctionFastReady(func));
         }
 
         macro(CALL_KW_PY) =
@@ -5031,7 +5041,6 @@ dummy_func(
             PyObject *func = ((PyMethodObject *)callable_o)->im_func;
             EXIT_IF(!PyFunction_Check(func));
             EXIT_IF(((PyFunctionObject *)func)->func_version != func_version);
-            EXIT_IF(!_PySOAC_InterpreterFunctionFastReady((PyFunctionObject *)func));
             EXIT_IF(!PyStackRef_IsNull(null));
         }
 
@@ -6312,7 +6321,7 @@ dummy_func(
             frame->instr_ptr = prev_instr;
             opcode = next_instr->op.code;
             bool stop_tracing = (
-                frame->soac_source_authority ||
+                (_PyFrame_GetCode(frame)->co_flags & CO_FUTURE_STRICT) ||
                 opcode == WITH_EXCEPT_START ||
                 opcode == RERAISE ||
                 opcode == CLEANUP_THROW ||

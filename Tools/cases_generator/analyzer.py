@@ -573,7 +573,6 @@ NON_ESCAPING_FUNCTIONS = (
     "PyCFunction_GET_FUNCTION",
     "PyCFunction_GET_SELF",
     "_PySOAC_DataclassIsBridgeImplementation",
-    "_PySOAC_InterpreterFunctionFastReady",  # native metadata/liveness only; no effects
     "_PySOAC_InterpreterCallRelevant",  # immutable native instruction index; no effects
     "_PyFrame_HasSoacRelevantCall",  # source flag plus immutable native index; no effects
     "_PySOAC_TypeReadCacheReady",  # actual native metadata/liveness only; no effects

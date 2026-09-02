@@ -64,31 +64,15 @@ static inline PyCodeObject *_PyFrame_GetCode(_PyInterpreterFrame *f) {
     return (PyCodeObject *)executable;
 }
 
-/* All native entries, including specialized frame pushes and generator
-   throw, validate the actual function and module liveness guards. A metadata
-   activation exists only during a real construction event or namespace. */
+/* Ordinary function calls and generator resumes have no provenance checks.
+ * Only actual namespace/construction contexts participate in this boundary. */
 static inline int
 _PyFrame_CheckSoacExecution(_PyInterpreterFrame *frame)
 {
-    /* This is the full checker's no-work case, not cached authorization.
-     * Generated dataclass members can have an owner even with owner-state
-     * NONE, and an ordinary helper can inherit an active dataclass call. */
-    if (frame->soac_checked_activation == NULL &&
-        !frame->soac_source_authority &&
+    if (!frame->soac_namespace && frame->soac_checked_activation == NULL &&
         frame->soac_dataclass_invocation == NULL &&
-        (frame->previous == NULL ||
-         frame->previous->soac_dataclass_invocation == NULL) &&
-        !PyStackRef_IsNull(frame->f_funcobj)) {
-        PyObject *object = PyStackRef_AsPyObjectBorrow(frame->f_funcobj);
-        if (PyFunction_Check(object)) {
-            PyFunctionObject *function = (PyFunctionObject *)object;
-            if (function->func_soac_strict_owner_state == FUNC_SOAC_OWNER_NONE &&
-                function->func_soac_strict_owner == NULL &&
-                !(_PyFrame_GetCode(frame)->co_flags & CO_FUTURE_STRICT)) {
-                return 0;
-            }
-        }
-    }
+        (frame->previous == NULL || frame->previous->soac_dataclass_invocation == NULL))
+        return 0;
     return _PySOAC_CheckedFrameExecution(frame);
 }
 
@@ -98,7 +82,7 @@ static inline int
 _PyFrame_HasSoacRelevantCall(_PyInterpreterFrame *frame,
                              const _Py_CODEUNIT *instruction)
 {
-    return frame->soac_source_authority &&
+    return _PyFrame_GetCode(frame)->_co_soac_sites != NULL &&
         _PySOAC_InterpreterCallRelevant(frame, instruction);
 }
 
@@ -256,13 +240,13 @@ static inline void _PyFrame_Copy(_PyInterpreterFrame *src, _PyInterpreterFrame *
     dest->soac_checked_activation = src->soac_checked_activation;
     dest->soac_invocation_id = src->soac_invocation_id;
     dest->soac_source_authority = src->soac_source_authority;
-    dest->soac_owner_checked = src->soac_owner_checked;
+    dest->soac_namespace = src->soac_namespace;
     src->soac_dataclass_role = 0;
     src->soac_dataclass_invocation = NULL;
     src->soac_checked_activation = NULL;
     src->soac_invocation_id = 0;
     src->soac_source_authority = 0;
-    src->soac_owner_checked = 0;
+    src->soac_namespace = 0;
 #ifdef Py_GIL_DISABLED
     dest->tlbc_index = src->tlbc_index;
 #endif
@@ -328,7 +312,7 @@ _PyFrame_Initialize(
     frame->soac_checked_activation = NULL;
     frame->soac_invocation_id = 0;
     frame->soac_source_authority = 0;
-    frame->soac_owner_checked = 0;
+    frame->soac_namespace = (code->co_flags & (CO_FUTURE_STRICT | CO_OPTIMIZED)) == CO_FUTURE_STRICT;
 #ifdef Py_DEBUG
     frame->lltrace = 0;
 #endif
@@ -516,7 +500,7 @@ _PyFrame_PushTrampolineUnchecked(PyThreadState *tstate, PyCodeObject *code, int 
     frame->soac_checked_activation = NULL;
     frame->soac_invocation_id = 0;
     frame->soac_source_authority = 0;
-    frame->soac_owner_checked = 0;
+    frame->soac_namespace = 0;
 #ifdef Py_DEBUG
     frame->lltrace = 0;
 #endif

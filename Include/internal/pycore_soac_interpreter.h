@@ -122,7 +122,6 @@ PyAPI_FUNC(int) _PySOAC_InterpreterSelectCall(
     _PySoacInterpreterCallV1 *);
 PyAPI_FUNC(int) _PySOAC_InterpreterCallRelevant(
     _PyInterpreterFrame *, const _Py_CODEUNIT *);
-PyAPI_FUNC(int) _PySOAC_InterpreterFunctionFastReady(PyFunctionObject *);
 extern int _PySOAC_InterpreterGuardCreate(PyFunctionObject *);
 extern void _PySOAC_InterpreterGuardInvalidate(PyObject *);
 extern void _PySOAC_InterpreterFunctionInvalidate(PyFunctionObject *);

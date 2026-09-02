@@ -452,23 +452,6 @@ PySoac_InterpreterFunctionEnteredV1(PyObject *object)
     return guard == NULL ? -1 : guard->entered;
 }
 
-int
-_PySOAC_InterpreterFunctionFastReady(PyFunctionObject *function)
-{
-    if (function->func_soac_strict_owner_state != FUNC_SOAC_OWNER_INTERPRETER_ATTACHED)
-        return function->func_soac_strict_owner_state != FUNC_SOAC_OWNER_TERMINAL;
-    if (function->func_soac_interpreter_descriptor != NULL) {
-        return (function->func_soac_interpreter_flags &
-                (SOAC_FUNCTION_READY | SOAC_FUNCTION_TERMINAL)) == SOAC_FUNCTION_READY &&
-            soac_source_binding_live(soac_function_source_binding(function));
-    }
-    SoacInterpreterFunctionGuard *guard =
-        (SoacInterpreterFunctionGuard *)function->func_soac_interpreter_guard;
-    return guard != NULL && guard->ready && !guard->terminal &&
-        guard->execution != NULL && !guard->execution->terminal &&
-        guard->interpreter_id == _PyInterpreterState_GET()->id;
-}
-
 void
 _PySOAC_InterpreterFunctionInvalidate(PyFunctionObject *function)
 {
@@ -701,7 +684,6 @@ soac_interpreter_site(_PyInterpreterFrame *frame, const _Py_CODEUNIT *instructio
 int
 _PySOAC_InterpreterCallRelevant(_PyInterpreterFrame *frame, const _Py_CODEUNIT *instruction)
 {
-    if (!frame->soac_source_authority) return 0;
     PyCodeObject *code = _PyFrame_GetCode(frame);
     if (code->_co_soac_sites == NULL) return 0;
     Py_ssize_t offset = instruction - _PyFrame_GetBytecode(frame);
@@ -910,30 +892,6 @@ _PySOAC_CheckedFrameClear(_PyInterpreterFrame *frame, uint32_t reason)
     soac_interpreter_xdecref_preserving_error(object);
 }
 
-/* Copy only the pre-binding scalar decision. The actual function already
- * supports its one-shot owner; the ordinary frame subsequently captures code.
- * In particular a pre-seal code replacement must not erase birth provenance.
- * Explicit ROOT/CLASS entries are supplied only by their native C operation. */
-static const _PySoacInterpreterEntryV1 *
-soac_interpreter_capture_entry(
-    PyFunctionObject *function, const _PySoacInterpreterEntryV1 *explicit_entry,
-    _PySoacInterpreterEntryV1 *snapshot)
-{
-    if (explicit_entry != NULL) {
-        return explicit_entry;
-    }
-    if (function->func_soac_strict_owner_state != FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
-        return NULL;
-    }
-    *snapshot = (_PySoacInterpreterEntryV1) {
-        .kind = Py_SOAC_INTERPRETER_FUNCTION,
-        .subject_owner = function->func_soac_strict_owner,
-        .parent = NULL,
-        .namespace_state_out = NULL,
-    };
-    return snapshot;
-}
-
 static int
 soac_shared_function_authorize(_PyInterpreterFrame *frame, PyFunctionObject *function)
 {
@@ -954,10 +912,10 @@ soac_shared_function_authorize(_PyInterpreterFrame *frame, PyFunctionObject *fun
         return soac_interpreter_error("shared function has a dynamic source requirement");
     if (!original && ((code->co_flags & CO_FUTURE_STRICT) || code->_co_soac_strict_source_id != 0))
         return soac_interpreter_error("shared interpreter function captured unrelated strict code");
-    /* A CREATE callback may call an unselected function before its final birth
-     * instruction. The ordinary binding and closure representation checks
-     * still apply; the ready bit only selects the completed fast entry. */
+    /* This authorizes an actual definition event. Ordinary leaf calls do not
+     * need the descriptor; an incomplete closure is checked at its first read. */
     frame->soac_source_authority = original;
+    if (original) function->func_soac_interpreter_flags |= SOAC_FUNCTION_ENTERED;
     return 0;
 }
 
@@ -987,8 +945,8 @@ soac_interpreter_authorize(_PyInterpreterFrame *frame)
         return soac_interpreter_error("namespace source code requires its explicit native construction entry");
     if (!original && ((code->co_flags & CO_FUTURE_STRICT) || code->_co_soac_strict_source_id != 0))
         return soac_interpreter_error("interpreter function captured unrelated strict code");
-    /* Owner, interpreter, execution liveness and source checks above have
-     * no intervening callbacks. Only these FastReady terms remain unknown. */
+    /* Definition events authenticate pending births before using their
+     * metadata. Completed ordinary calls never enter this path. */
     if (!guard->ready || guard->execution == NULL) {
         const PySoacInterpreterCallbacksV4 *callbacks = soac_interpreter_callbacks();
         PySoacInterpreterFrameViewV1 view;
@@ -1008,6 +966,7 @@ soac_interpreter_authorize(_PyInterpreterFrame *frame)
     if (function->func_soac_strict_id != 0 && function->func_kwdefaults != NULL &&
         PyFunction_CheckSoacStrictDefaults((PyObject *)function) < 0) return -1;
     frame->soac_source_authority = original;
+    if (original) guard->entered = 1;
     return 0;
 }
 
@@ -1019,7 +978,7 @@ _PySOAC_InterpreterInitFrame(
         return 0;
     }
     if (entry->kind == Py_SOAC_INTERPRETER_FUNCTION) {
-        if (!frame->soac_owner_checked && soac_interpreter_authorize(frame) < 0) return -1;
+        if (soac_interpreter_authorize(frame) < 0) return -1;
         if (!entry->construction && entry->incoming_call == NULL) return 0;
     }
     const PySoacInterpreterCallbacksV4 *callbacks = soac_interpreter_callbacks();
@@ -1133,11 +1092,6 @@ int
 _PySOAC_CheckedFrameBound(_PyInterpreterFrame *frame)
 {
     PyObject *object = frame->soac_checked_activation;
-    PyFunctionObject *function = (PyFunctionObject *)PyStackRef_AsPyObjectBorrow(frame->f_funcobj);
-    if (function->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
-        if (soac_interpreter_closure_complete(frame) < 0) return -1;
-        frame->soac_owner_checked = 1;
-    }
     if (!_PySOAC_InterpreterIsActivation(object)) {
         return object == NULL ? 0
             : soac_interpreter_error("interpreter binding has unknown frame metadata");
@@ -1160,33 +1114,6 @@ int
 _PySOAC_CheckedFrameExecution(_PyInterpreterFrame *frame)
 {
     PyObject *object = frame->soac_checked_activation;
-    PyObject *function_object = PyStackRef_AsPyObjectBorrow(frame->f_funcobj);
-    if (PyFunction_Check(function_object) &&
-        ((PyFunctionObject *)function_object)->func_soac_strict_owner_state == FUNC_SOAC_OWNER_TERMINAL)
-        return soac_interpreter_error("interpreter function owner became terminal");
-    if (PyFunction_Check(function_object) &&
-        ((PyFunctionObject *)function_object)->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
-        PyFunctionObject *function = (PyFunctionObject *)function_object;
-        SoacInterpreterFunctionGuard *guard = (SoacInterpreterFunctionGuard *)function->func_soac_interpreter_guard;
-        int shared = function->func_soac_interpreter_descriptor != NULL;
-        if (!frame->soac_owner_checked) {
-            if (soac_interpreter_authorize(frame) < 0 || soac_interpreter_closure_complete(frame) < 0) return -1;
-            frame->soac_owner_checked = 1;
-        }
-        else if (function->func_soac_metadata != NULL ||
-                 (shared ?
-                    ((function->func_soac_interpreter_flags & SOAC_FUNCTION_TERMINAL) ||
-                     !soac_source_binding_live(soac_function_source_binding(function))) :
-                    (guard == NULL || guard->terminal ||
-                     (guard->execution != NULL && guard->execution->terminal)))) {
-            return soac_interpreter_error("interpreter function owner became terminal");
-        }
-        if (frame->soac_source_authority) {
-            if (shared) function->func_soac_interpreter_flags |= SOAC_FUNCTION_ENTERED;
-            else guard->entered = 1;
-        }
-        if (object == NULL) return 0;
-    }
     if (_PySOAC_InterpreterIsActivation(object)) {
         _PySoacInterpreterActivationV1 *activation = (_PySoacInterpreterActivationV1 *)object;
         if ((activation->phase != Py_SOAC_INTERPRETER_BOUND &&
@@ -1233,22 +1160,12 @@ _PySOAC_CheckedFrameExecution(_PyInterpreterFrame *frame)
         }
         return 0;
     }
-    if (_PyFrame_GetCode(frame)->co_flags & CO_FUTURE_STRICT) {
+    if (frame->soac_namespace) {
         return soac_interpreter_error(
-            "strict code execution requires an authenticated interpreter activation");
-    }
-    PyObject *function = PyStackRef_AsPyObjectBorrow(frame->f_funcobj);
-    if (function != NULL && PyFunction_Check(function) &&
-        ((PyFunctionObject *)function)->func_soac_strict_owner_state ==
-            FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
-        return soac_interpreter_error(
-            "interpreter-owned function needs its initialized native activation");
+            "strict namespace execution requires its authenticated construction entry");
     }
     if (object != NULL) {
         return soac_interpreter_error("interpreter frame has unknown metadata");
-    }
-    if (_PySOAC_DataclassCheckFrameConstruction(frame) < 0) {
-        return -1;
     }
     if (frame->soac_dataclass_invocation != NULL ||
         (frame->previous != NULL && frame->previous->soac_dataclass_invocation != NULL)) {
@@ -1257,20 +1174,15 @@ _PySOAC_CheckedFrameExecution(_PyInterpreterFrame *frame)
     return 0;
 }
 
-/* An arbitrary PEP 523 evaluator can consume the frame and manufacture a
- * result without any native RETURN_VALUE. Refuse that actual dispatch,
- * which would skip pending-definition completion and source ownership checks.
- * Generic VM CALL's already-committed default-evaluator choice bypasses this
- * dispatch exactly as ordinary CPython does. Tracing/monitoring are unchanged. */
+/* An external evaluator cannot consume an already-open construction context
+ * without its native completion/cleanup. Ordinary function frames may use
+ * PEP 523; they acquire source authority only at actual definition operations.
+ * Tracing and monitoring continue to use ordinary CPython machinery. */
 int
 _PySOAC_InterpreterCheckEvalHook(_PyInterpreterFrame *frame)
 {
-    PyObject *function = PyStackRef_AsPyObjectBorrow(frame->f_funcobj);
-    if (!(_PyFrame_GetCode(frame)->co_flags & CO_FUTURE_STRICT) &&
-        !_PySOAC_InterpreterIsActivation(frame->soac_checked_activation) &&
-        !(function != NULL && PyFunction_Check(function) &&
-          ((PyFunctionObject *)function)->func_soac_strict_owner_state ==
-              FUNC_SOAC_OWNER_INTERPRETER_ATTACHED)) {
+    if (!frame->soac_namespace && frame->soac_checked_activation == NULL &&
+        frame->soac_dataclass_invocation == NULL) {
         return 0;
     }
     soac_interpreter_error("external frame evaluators are unsupported for interpreter-owned code");
@@ -1287,10 +1199,13 @@ _PySOAC_InterpreterCheckEvalHook(_PyInterpreterFrame *frame)
     return -1;
 }
 
+static int soac_interpreter_authorize_definition(_PyInterpreterFrame *frame);
+
 static int
 soac_interpreter_ensure_context(_PyInterpreterFrame *frame)
 {
-    if (frame == NULL || !frame->soac_source_authority) return 0;
+    int authorized = soac_interpreter_authorize_definition(frame);
+    if (authorized <= 0) return authorized;
     if (_PySOAC_InterpreterIsActivation(frame->soac_checked_activation)) return 1;
     PyFunctionObject *function = (PyFunctionObject *)PyStackRef_AsPyObjectBorrow(frame->f_funcobj);
     _PySoacInterpreterEntryV1 entry = {
@@ -1355,14 +1270,44 @@ soac_source_parent_live(_PyInterpreterFrame *frame)
     return 0;
 }
 
+/* Authenticate when a real definition operation needs authority, including
+ * after callbacks or a suspension. Frame/source flags only route this work;
+ * copied code and a previously live binding cannot authorize a new birth. */
+static int
+soac_interpreter_authorize_definition(_PyInterpreterFrame *frame)
+{
+    if (frame == NULL) return 0;
+    PyObject *object = PyStackRef_AsPyObjectBorrow(frame->f_funcobj);
+    if (!PyFunction_Check(object))
+        return soac_interpreter_error("definition has no actual native function");
+    PyFunctionObject *function = (PyFunctionObject *)object;
+    if (_PySOAC_InterpreterIsActivation(frame->soac_checked_activation)) {
+        _PySoacInterpreterActivationV1 *activation =
+            (_PySoacInterpreterActivationV1 *)frame->soac_checked_activation;
+        if (!soac_source_binding_live((SoacInterpreterSourceBinding *)activation->source_binding))
+            return soac_interpreter_error("definition source binding is unavailable");
+        if (activation->kind == Py_SOAC_INTERPRETER_FUNCTION &&
+            soac_interpreter_authorize(frame) < 0) return -1;
+    }
+    else if ((_PyFrame_GetCode(frame)->co_flags & CO_FUTURE_STRICT) ||
+             function->func_soac_strict_owner_state == FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) {
+        if (soac_interpreter_authorize(frame) < 0) return -1;
+    }
+    else {
+        return 0;
+    }
+    if (!frame->soac_source_authority) return 0;
+    return soac_source_parent_live(frame) < 0 ? -1 : 1;
+}
+
 /* No allocation, Python callback or temporary construction activation. The
  * actual native MAKE_FUNCTION supplies the newly allocated function; code
  * correspondence only routes this already authenticated birth. */
 static int
 soac_shared_function_birth(_PyInterpreterFrame *parent, PyFunctionObject *function)
 {
-    if (parent == NULL || !parent->soac_source_authority) return 0;
-    if (soac_source_parent_live(parent) < 0) return -1;
+    int authorized = soac_interpreter_authorize_definition(parent);
+    if (authorized <= 0) return authorized;
     SoacInterpreterSourceBinding *binding = soac_frame_source_binding(parent);
     if (!soac_source_binding_live(binding))
         return soac_interpreter_error("function birth has no live source binding");
@@ -1394,7 +1339,8 @@ soac_shared_function_birth(_PyInterpreterFrame *parent, PyFunctionObject *functi
 static int
 soac_shared_function_parent(_PyInterpreterFrame *parent, PyFunctionObject *function)
 {
-    if (parent == NULL || soac_source_parent_live(parent) < 0) return -1;
+    if (soac_interpreter_authorize_definition(parent) <= 0)
+        return soac_interpreter_error("shared function has no authenticated definition parent");
     SoacInterpreterSourceBinding *binding = soac_function_source_binding(function);
     const PySoacInterpreterDescriptorV1 *descriptor = function->func_soac_interpreter_descriptor;
     if (parent == NULL || !parent->soac_source_authority ||
@@ -1537,8 +1483,10 @@ _PySOAC_InterpreterCompleteDefinition(
     _PyInterpreterFrame *frame, const _Py_CODEUNIT *this_instr,
     PyObject *value)
 {
+    int authorized = soac_interpreter_authorize_definition(frame);
+    if (authorized <= 0) return authorized;
     if (!_PySOAC_InterpreterIsActivation(frame->soac_checked_activation)) {
-        return 0;
+        return soac_interpreter_error("definition completion has no active construction");
     }
     _PySoacInterpreterActivationV1 *activation =
         (_PySoacInterpreterActivationV1 *)frame->soac_checked_activation;
@@ -1590,7 +1538,8 @@ int
 _PySOAC_InterpreterEndFunctionBirth(_PyInterpreterFrame *frame,
     const _Py_CODEUNIT *instruction, PyObject *function)
 {
-    if (!frame->soac_source_authority) return 0;
+    int authorized = soac_interpreter_authorize_definition(frame);
+    if (authorized <= 0) return authorized;
     if (function != NULL && PyFunction_Check(function) &&
         ((PyFunctionObject *)function)->func_soac_interpreter_descriptor != NULL) {
         PyFunctionObject *actual = (PyFunctionObject *)function;

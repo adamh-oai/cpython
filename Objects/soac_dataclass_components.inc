@@ -2,45 +2,6 @@
  * Included by soac_dataclass.inc; no argument or return type predicates. */
 
 static int
-soac_dataclass_closure_complete(PyFunctionObject *function, PyCodeObject *code)
-{
-    if ((code->co_nfreevars != 0 && function->func_closure == NULL) ||
-        (function->func_closure != NULL &&
-         (!PyTuple_CheckExact(function->func_closure) ||
-          PyTuple_GET_SIZE(function->func_closure) != code->co_nfreevars))) {
-        return soac_dataclass_error("generated function construction is incomplete");
-    }
-    for (int i = 0; i < code->co_nfreevars; i++) {
-        if (!PyCell_Check(PyTuple_GET_ITEM(function->func_closure, i))) {
-            return soac_dataclass_error("generated closure has an invalid cell");
-        }
-    }
-    return 0;
-}
-
-int
-_PySOAC_DataclassCheckFrameConstruction(_PyInterpreterFrame *frame)
-{
-    PyObject *object = PyStackRef_AsPyObjectBorrow(frame->f_funcobj);
-    if (object == NULL || !PyFunction_Check(object)) {
-        return 0;
-    }
-    PyFunctionObject *function = (PyFunctionObject *)object;
-    PyObject *owner = function->func_soac_strict_owner;
-    if (owner == NULL || !Py_IS_TYPE(owner, &SoacDataclassRecord_Type)) {
-        return 0;
-    }
-    if (soac_dataclass_record(function) == NULL) {
-        return -1;
-    }
-    /* MAKE_FUNCTION exposes CREATE before ordinary closure attributes arrive.
-     * This is a structural memory-safety check, not a type predicate or an
-     * execution capability. Expired unsealed birth provenance stays ordinary.
-     */
-    return soac_dataclass_closure_complete(function, _PyFrame_GetCode(frame));
-}
-
-static int
 soac_dataclass_component_valid(SoacDataclassInvocation *invocation,
                                 PyFunctionObject *method, SoacDataclassRecord *method_record,
                                 PyFunctionObject *component, SoacDataclassRecord *component_record,

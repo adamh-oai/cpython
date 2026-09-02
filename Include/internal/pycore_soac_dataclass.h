@@ -74,7 +74,6 @@ extern void _PySOAC_ClearDataclassSlotsHandle(PyObject *);
 
 /* Structural safety for a generated function exposed before its closure
  * attributes have been populated. No argument or return type predicates. */
-extern int _PySOAC_DataclassCheckFrameConstruction(_PyInterpreterFrame *frame);
 
 /* Begin consumes the exact fresh record before allocating the operation.
  * The returned opaque GC owner pins this operation's operands. Both the

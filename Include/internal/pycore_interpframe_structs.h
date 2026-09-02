@@ -59,7 +59,7 @@ struct _PyInterpreterFrame {
     /* Lazy simple-birth frame token, distinct from each selected context ID. */
     uint64_t soac_invocation_id;
     uint8_t soac_source_authority; /* Authenticated actual captured source code. */
-    uint8_t soac_owner_checked; /* Binding/closure checks completed for this frame. */
+    uint8_t soac_namespace; /* Captured code requires explicit namespace admission. */
 #if !defined(Py_GIL_DISABLED) && defined(Py_STACKREF_DEBUG)
     /* Diagnostic-only borrowed view of f_executable. Signal/watchdog dumps
      * cannot consult the mutable debug handle table or an attached tstate.

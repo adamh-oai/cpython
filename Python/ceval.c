@@ -1250,7 +1250,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int 
     entry.frame.soac_checked_activation = NULL;
     entry.frame.soac_invocation_id = 0;
     entry.frame.soac_source_authority = 0;
-    entry.frame.soac_owner_checked = 0;
+    entry.frame.soac_namespace = 0;
     entry.frame.return_offset = 0;
 #ifdef Py_DEBUG
     entry.frame.lltrace = 0;
@@ -2025,9 +2025,6 @@ eval_frame_push_and_init(PyThreadState *tstate, _PyStackRef func,
                         _PySoacInterpreterCallV1 *soac_call)
 {
     PyFunctionObject *func_obj = (PyFunctionObject *)PyStackRef_AsPyObjectBorrow(func);
-    _PySoacInterpreterEntryV1 interpreter_snapshot;
-    interpreter_entry = soac_interpreter_capture_entry(
-        func_obj, interpreter_entry, &interpreter_snapshot);
     PyCodeObject * code = (PyCodeObject *)func_obj->func_code;
     CALL_STAT_INC(frames_pushed);
     _PyInterpreterFrame *frame = _PyThreadState_PushFrame(tstate, code->co_framesize);
@@ -2108,10 +2105,6 @@ eval_frame_push_and_init_ex(PyThreadState *tstate, _PyStackRef func,
     _PyInterpreterFrame *previous, const _PySoacInterpreterEntryV1 *interpreter_entry,
     _PySoacInterpreterCallV1 *soac_call)
 {
-    _PySoacInterpreterEntryV1 interpreter_snapshot;
-    interpreter_entry = soac_interpreter_capture_entry(
-        (PyFunctionObject *)PyStackRef_AsPyObjectBorrow(func),
-        interpreter_entry, &interpreter_snapshot);
     bool has_dict = (kwargs != NULL && PyDict_GET_SIZE(kwargs) > 0);
     PyObject *kwnames = NULL;
     _PyStackRef *newargs;
@@ -2189,12 +2182,15 @@ static const _PySoacInterpreterEntryV1 *
 soac_call_entry(_PySoacInterpreterCallV1 *call, _PyStackRef function,
                 _PySoacInterpreterEntryV1 *snapshot)
 {
-    const _PySoacInterpreterEntryV1 *entry = soac_interpreter_capture_entry(
-        (PyFunctionObject *)PyStackRef_AsPyObjectBorrow(function), NULL, snapshot);
-    if (entry != NULL && call->selected &&
-        call->decision.kind == Py_SOAC_INTERPRETER_CALL_GENERIC_SCOPE)
-        snapshot->incoming_call = &call->incoming;
-    return entry;
+    if (!call->selected || call->decision.kind != Py_SOAC_INTERPRETER_CALL_GENERIC_SCOPE)
+        return NULL;
+    PyFunctionObject *actual = (PyFunctionObject *)PyStackRef_AsPyObjectBorrow(function);
+    *snapshot = (_PySoacInterpreterEntryV1) {
+        .kind = Py_SOAC_INTERPRETER_FUNCTION,
+        .subject_owner = actual->func_soac_strict_owner,
+        .incoming_call = &call->incoming,
+    };
+    return snapshot;
 }
 
 _PyInterpreterFrame *
@@ -2230,9 +2226,6 @@ eval_vector_with_dataclass(PyThreadState *tstate, PyFunctionObject *func,
                const _PySoacInterpreterEntryV1 *interpreter_entry,
                _PySoacInterpreterCallV1 *soac_call)
 {
-    _PySoacInterpreterEntryV1 interpreter_snapshot;
-    interpreter_entry = soac_interpreter_capture_entry(
-        func, interpreter_entry, &interpreter_snapshot);
     size_t total_args = argcount;
     if (kwnames) {
         total_args += PyTuple_GET_SIZE(kwnames);
