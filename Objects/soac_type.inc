@@ -2064,6 +2064,13 @@ _PySOAC_CheckInstanceWrite(PyObject *object, PyObject *name, PyObject *value)
 int
 _PySOAC_CheckClassAssignment(PyTypeObject *old_type, PyTypeObject *new_type)
 {
+    /* Native startup selection is immutable and inherited by subinterpreters.
+     * It covers ordinary objects too, before any extension is imported. */
+    if (_PyInterpreterState_GET()->soac.strict_config_bytes != NULL) {
+        PyErr_SetString(soac_type_mutation_error(),
+                        "cannot reassign __class__ while strict mode is enabled");
+        return -1;
+    }
     if (_PySOAC_CheckTypeAllocation(old_type) < 0 ||
         _PySOAC_CheckTypeAllocation(new_type) < 0) return -1;
     if (soac_type_has_contract_in_mro(old_type) ||
