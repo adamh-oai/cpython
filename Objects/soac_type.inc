@@ -1922,12 +1922,15 @@ _PySOAC_CheckInstanceWrite(PyObject *object, PyObject *name, PyObject *value)
     /* The receiver and its escaped dictionary have independent lifetimes.
      * Attribute writes require the receiver even when the dictionary's own
      * field policy remains live. Reads and direct dictionary writes do not. */
-    if (_PyObject_HasTypeStateSlot(object) &&
-        PyObject_GetTypeState(object) == NULL) {
+    int has_type_state = _PyObject_HasTypeStateSlot(object);
+    if (has_type_state && PyObject_GetTypeState(object) == NULL) {
         return -1;
     }
     SoacTypeContract *state = soac_type_contract(Py_TYPE(object));
     if (state == NULL) {
+        if (has_type_state) {
+            return 0;
+        }
         /* An ordinary child retains its base's receiver-write boundary even
          * when its independently live dictionary already owns the field rules. */
         state = soac_type_ordinary_dictionary_contract(Py_TYPE(object));
