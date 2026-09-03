@@ -8637,15 +8637,6 @@
                     JUMP_TO_PREDICTED(LOAD_ATTR);
                 }
             }
-            // _GUARD_NO_SOAC_TYPE
-            {
-                PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
-                if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
-                    UPDATE_MISS_STATS(LOAD_ATTR);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
-                    JUMP_TO_PREDICTED(LOAD_ATTR);
-                }
-            }
             // _CHECK_ATTR_CLASS
             {
                 uint32_t type_version = read_u32(&this_instr[4].cache);
@@ -8774,16 +8765,6 @@
                     JUMP_TO_PREDICTED(LOAD_ATTR);
                 }
             }
-            // _GUARD_SOAC_TYPE_READ
-            {
-                PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
-                if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) &&
-                    !_PySOAC_TypeReadCacheReady(tp)) {
-                    UPDATE_MISS_STATS(LOAD_ATTR);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
-                    JUMP_TO_PREDICTED(LOAD_ATTR);
-                }
-            }
             // _CHECK_MANAGED_OBJECT_HAS_VALUES
             {
                 PyObject *owner_o = PyStackRef_AsPyObjectBorrow(owner);
@@ -8869,16 +8850,6 @@
                     JUMP_TO_PREDICTED(LOAD_ATTR);
                 }
             }
-            // _GUARD_SOAC_TYPE_READ
-            {
-                PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
-                if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) &&
-                    !_PySOAC_TypeReadCacheReady(tp)) {
-                    UPDATE_MISS_STATS(LOAD_ATTR);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
-                    JUMP_TO_PREDICTED(LOAD_ATTR);
-                }
-            }
             // _CHECK_ATTR_METHOD_LAZY_DICT
             {
                 uint16_t dictoffset = read_u16(&this_instr[4].cache);
@@ -8935,16 +8906,6 @@
                     JUMP_TO_PREDICTED(LOAD_ATTR);
                 }
             }
-            // _GUARD_SOAC_TYPE_READ
-            {
-                PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
-                if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) &&
-                    !_PySOAC_TypeReadCacheReady(tp)) {
-                    UPDATE_MISS_STATS(LOAD_ATTR);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
-                    JUMP_TO_PREDICTED(LOAD_ATTR);
-                }
-            }
             /* Skip 2 cache entries */
             // _LOAD_ATTR_METHOD_NO_DICT
             {
@@ -8986,16 +8947,6 @@
                 PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
                 assert(type_version != 0);
                 if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
-                    UPDATE_MISS_STATS(LOAD_ATTR);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
-                    JUMP_TO_PREDICTED(LOAD_ATTR);
-                }
-            }
-            // _GUARD_SOAC_TYPE_READ
-            {
-                PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
-                if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) &&
-                    !_PySOAC_TypeReadCacheReady(tp)) {
                     UPDATE_MISS_STATS(LOAD_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                     JUMP_TO_PREDICTED(LOAD_ATTR);
@@ -9148,16 +9099,6 @@
                     JUMP_TO_PREDICTED(LOAD_ATTR);
                 }
             }
-            // _GUARD_SOAC_TYPE_READ
-            {
-                PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
-                if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) &&
-                    !_PySOAC_TypeReadCacheReady(tp)) {
-                    UPDATE_MISS_STATS(LOAD_ATTR);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
-                    JUMP_TO_PREDICTED(LOAD_ATTR);
-                }
-            }
             /* Skip 2 cache entries */
             // _LOAD_ATTR_NONDESCRIPTOR_NO_DICT
             {
@@ -9200,16 +9141,6 @@
                 PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
                 assert(type_version != 0);
                 if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
-                    UPDATE_MISS_STATS(LOAD_ATTR);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
-                    JUMP_TO_PREDICTED(LOAD_ATTR);
-                }
-            }
-            // _GUARD_SOAC_TYPE_READ
-            {
-                PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
-                if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) &&
-                    !_PySOAC_TypeReadCacheReady(tp)) {
                     UPDATE_MISS_STATS(LOAD_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                     JUMP_TO_PREDICTED(LOAD_ATTR);
@@ -9278,16 +9209,6 @@
                 PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
                 assert(type_version != 0);
                 if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
-                    UPDATE_MISS_STATS(LOAD_ATTR);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
-                    JUMP_TO_PREDICTED(LOAD_ATTR);
-                }
-            }
-            // _GUARD_SOAC_TYPE_READ
-            {
-                PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
-                if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) &&
-                    !_PySOAC_TypeReadCacheReady(tp)) {
                     UPDATE_MISS_STATS(LOAD_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                     JUMP_TO_PREDICTED(LOAD_ATTR);
@@ -9396,33 +9317,10 @@
                     JUMP_TO_PREDICTED(LOAD_ATTR);
                 }
             }
-            // _GUARD_SOAC_TYPE_READ
-            {
-                PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
-                if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) &&
-                    !_PySOAC_TypeReadCacheReady(tp)) {
-                    UPDATE_MISS_STATS(LOAD_ATTR);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
-                    JUMP_TO_PREDICTED(LOAD_ATTR);
-                }
-            }
             // _LOAD_ATTR_SLOT
             {
                 uint16_t index = read_u16(&this_instr[4].cache);
                 PyObject *owner_o = PyStackRef_AsPyObjectBorrow(owner);
-                if (index != offsetof(PyObject, ob_type)) {
-                    _PyFrame_SetStackPointer(frame, stack_pointer);
-                    int err = _PySOAC_CheckObjectSlotRead(owner_o);
-                    stack_pointer = _PyFrame_GetStackPointer(frame);
-                    if (err < 0) {
-                        stack_pointer += -1;
-                        ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
-                        _PyFrame_SetStackPointer(frame, stack_pointer);
-                        PyStackRef_CLOSE(owner);
-                        stack_pointer = _PyFrame_GetStackPointer(frame);
-                        JUMP_TO_LABEL(error);
-                    }
-                }
                 PyObject **addr = (PyObject **)((char *)owner_o + index);
                 PyObject *attr_o = FT_ATOMIC_LOAD_PTR(*addr);
                 if (attr_o == NULL) {
@@ -9488,16 +9386,6 @@
                 PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
                 assert(type_version != 0);
                 if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
-                    UPDATE_MISS_STATS(LOAD_ATTR);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
-                    JUMP_TO_PREDICTED(LOAD_ATTR);
-                }
-            }
-            // _GUARD_SOAC_TYPE_READ
-            {
-                PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
-                if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) &&
-                    !_PySOAC_TypeReadCacheReady(tp)) {
                     UPDATE_MISS_STATS(LOAD_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                     JUMP_TO_PREDICTED(LOAD_ATTR);
@@ -10007,105 +9895,7 @@
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
                     JUMP_TO_PREDICTED(LOAD_GLOBAL);
                 }
-                assert(keys->dk_kind == DICT_KEYS_UNICODE ||
-                   (keys->dk_kind == DICT_KEYS_INDEXED_UNICODE &&
-                    keys->dk_nentries == 0));
-            }
-            // _LOAD_GLOBAL_BUILTINS
-            {
-                uint16_t version = read_u16(&this_instr[3].cache);
-                uint16_t index = read_u16(&this_instr[4].cache);
-                PyDictObject *dict = (PyDictObject *)BUILTINS();
-                if (!PyDict_CheckExact(dict)) {
-                    UPDATE_MISS_STATS(LOAD_GLOBAL);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
-                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
-                }
-                PyDictKeysObject *keys = FT_ATOMIC_LOAD_PTR_ACQUIRE(dict->ma_keys);
-                if (FT_ATOMIC_LOAD_UINT32_RELAXED(keys->dk_version) != version) {
-                    UPDATE_MISS_STATS(LOAD_GLOBAL);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
-                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
-                }
                 assert(keys->dk_kind == DICT_KEYS_UNICODE);
-                PyDictUnicodeEntry *entries = DK_UNICODE_ENTRIES(keys);
-                PyObject *res_o = FT_ATOMIC_LOAD_PTR_RELAXED(entries[index].me_value);
-                if (res_o == NULL) {
-                    UPDATE_MISS_STATS(LOAD_GLOBAL);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
-                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
-                }
-                #if Py_GIL_DISABLED
-                int increfed = _Py_TryIncrefCompareStackRef(&entries[index].me_value, res_o, &res);
-                if (!increfed) {
-                    UPDATE_MISS_STATS(LOAD_GLOBAL);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
-                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
-                }
-                #else
-                res = PyStackRef_FromPyObjectNew(res_o);
-                #endif
-                STAT_INC(LOAD_GLOBAL, hit);
-            }
-            // _PUSH_NULL_CONDITIONAL
-            {
-                null = &stack_pointer[1];
-                if (oparg & 1) {
-                    null[0] = PyStackRef_NULL;
-                }
-            }
-            stack_pointer[0] = res;
-            stack_pointer += 1 + (oparg & 1);
-            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
-            DISPATCH();
-        }
-
-        TARGET(LOAD_GLOBAL_BUILTIN_INDEXED) {
-            #if _Py_TAIL_CALL_INTERP
-            int opcode = LOAD_GLOBAL_BUILTIN_INDEXED;
-            (void)(opcode);
-            #endif
-            _Py_CODEUNIT* const this_instr = next_instr;
-            (void)this_instr;
-            frame->instr_ptr = next_instr;
-            next_instr += 5;
-            INSTRUCTION_STATS(LOAD_GLOBAL_BUILTIN_INDEXED);
-            static_assert(INLINE_CACHE_ENTRIES_LOAD_GLOBAL == 4, "incorrect cache size");
-            _PyStackRef res;
-            _PyStackRef *null;
-            /* Skip 1 cache entry */
-            // _GUARD_INDEXED_GLOBALS_VERSION
-            {
-                uint16_t version = read_u16(&this_instr[2].cache);
-                #ifdef Py_GIL_DISABLED
-                if (Py_GIL_DISABLED) {
-                    UPDATE_MISS_STATS(LOAD_GLOBAL);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
-                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
-                }
-                #endif
-                PyDictObject *dict = (PyDictObject *)GLOBALS();
-                if (!PyDict_CheckExact(dict)) {
-                    UPDATE_MISS_STATS(LOAD_GLOBAL);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
-                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
-                }
-                PyDictKeysObject *keys = dict->ma_keys;
-                if (keys->dk_kind != DICT_KEYS_INDEXED_UNICODE) {
-                    UPDATE_MISS_STATS(LOAD_GLOBAL);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
-                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
-                }
-                if (keys->dk_version != version) {
-                    UPDATE_MISS_STATS(LOAD_GLOBAL);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
-                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
-                }
-                if (dict->ma_values == NULL) {
-                    UPDATE_MISS_STATS(LOAD_GLOBAL);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
-                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
-                }
             }
             // _LOAD_GLOBAL_BUILTINS
             {
@@ -10208,87 +9998,6 @@
                 #else
                 res = PyStackRef_FromPyObjectNew(res_o);
                 #endif
-                STAT_INC(LOAD_GLOBAL, hit);
-            }
-            // _PUSH_NULL_CONDITIONAL
-            {
-                null = &stack_pointer[1];
-                if (oparg & 1) {
-                    null[0] = PyStackRef_NULL;
-                }
-            }
-            stack_pointer[0] = res;
-            stack_pointer += 1 + (oparg & 1);
-            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
-            DISPATCH();
-        }
-
-        TARGET(LOAD_GLOBAL_MODULE_INDEXED) {
-            #if _Py_TAIL_CALL_INTERP
-            int opcode = LOAD_GLOBAL_MODULE_INDEXED;
-            (void)(opcode);
-            #endif
-            _Py_CODEUNIT* const this_instr = next_instr;
-            (void)this_instr;
-            frame->instr_ptr = next_instr;
-            next_instr += 5;
-            INSTRUCTION_STATS(LOAD_GLOBAL_MODULE_INDEXED);
-            static_assert(INLINE_CACHE_ENTRIES_LOAD_GLOBAL == 4, "incorrect cache size");
-            _PyStackRef res;
-            _PyStackRef *null;
-            /* Skip 1 cache entry */
-            // _LOAD_GLOBAL_MODULE_INDEXED
-            {
-                uint16_t version = read_u16(&this_instr[2].cache);
-                uint16_t index = read_u16(&this_instr[4].cache);
-                #ifdef Py_GIL_DISABLED
-                if (Py_GIL_DISABLED) {
-                    UPDATE_MISS_STATS(LOAD_GLOBAL);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
-                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
-                }
-                #endif
-                PyDictObject *dict = (PyDictObject *)GLOBALS();
-                if (!PyDict_CheckExact(dict)) {
-                    UPDATE_MISS_STATS(LOAD_GLOBAL);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
-                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
-                }
-                PyDictKeysObject *keys = dict->ma_keys;
-                if (keys->dk_kind != DICT_KEYS_INDEXED_UNICODE) {
-                    UPDATE_MISS_STATS(LOAD_GLOBAL);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
-                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
-                }
-                if (keys->dk_version != version) {
-                    UPDATE_MISS_STATS(LOAD_GLOBAL);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
-                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
-                }
-                PyDictIndexedValues *values = (PyDictIndexedValues *)dict->ma_values;
-                if (values == NULL) {
-                    UPDATE_MISS_STATS(LOAD_GLOBAL);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
-                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
-                }
-                if (index >= keys->dk_nentries || index >= values->capacity) {
-                    UPDATE_MISS_STATS(LOAD_GLOBAL);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
-                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
-                }
-                if (DK_UNICODE_ENTRIES(keys)[index].me_key == NULL) {
-                    UPDATE_MISS_STATS(LOAD_GLOBAL);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
-                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
-                }
-                PyObject *res_o = values->values[index];
-                if (res_o == NULL ||
-                    res_o == (PyObject *)&_PyDict_IndexedValueTombstone) {
-                    UPDATE_MISS_STATS(LOAD_GLOBAL);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_GLOBAL));
-                    JUMP_TO_PREDICTED(LOAD_GLOBAL);
-                }
-                res = PyStackRef_FromPyObjectNew(res_o);
                 STAT_INC(LOAD_GLOBAL, hit);
             }
             // _PUSH_NULL_CONDITIONAL
@@ -12767,15 +12476,6 @@
                 PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
                 assert(type_version != 0);
                 if (FT_ATOMIC_LOAD_UINT_RELAXED(tp->tp_version_tag) != type_version) {
-                    UPDATE_MISS_STATS(TO_BOOL);
-                    assert(_PyOpcode_Deopt[opcode] == (TO_BOOL));
-                    JUMP_TO_PREDICTED(TO_BOOL);
-                }
-            }
-            // _GUARD_NO_SOAC_TYPE
-            {
-                PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
-                if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
                     UPDATE_MISS_STATS(TO_BOOL);
                     assert(_PyOpcode_Deopt[opcode] == (TO_BOOL));
                     JUMP_TO_PREDICTED(TO_BOOL);

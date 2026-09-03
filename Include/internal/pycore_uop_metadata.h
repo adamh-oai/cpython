@@ -191,14 +191,13 @@ const uint32_t _PyUop_Flags[MAX_UOP_ID+1] = {
     [_LOAD_SUPER_ATTR_METHOD] = HAS_ARG_FLAG | HAS_NAME_FLAG | HAS_DEOPT_FLAG | HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG,
     [_LOAD_ATTR] = HAS_ARG_FLAG | HAS_NAME_FLAG | HAS_ERROR_FLAG | HAS_ESCAPES_FLAG,
     [_GUARD_NO_SOAC_TYPE] = HAS_EXIT_FLAG,
-    [_GUARD_SOAC_TYPE_READ] = HAS_EXIT_FLAG,
     [_GUARD_TYPE_VERSION] = HAS_EXIT_FLAG,
     [_GUARD_TYPE_VERSION_AND_LOCK] = HAS_EXIT_FLAG,
     [_CHECK_MANAGED_OBJECT_HAS_VALUES] = HAS_DEOPT_FLAG,
     [_LOAD_ATTR_INSTANCE_VALUE] = HAS_DEOPT_FLAG,
     [_LOAD_ATTR_MODULE] = HAS_DEOPT_FLAG,
     [_LOAD_ATTR_WITH_HINT] = HAS_ARG_FLAG | HAS_NAME_FLAG | HAS_DEOPT_FLAG,
-    [_LOAD_ATTR_SLOT] = HAS_DEOPT_FLAG | HAS_ERROR_FLAG | HAS_ESCAPES_FLAG,
+    [_LOAD_ATTR_SLOT] = HAS_DEOPT_FLAG,
     [_CHECK_ATTR_CLASS] = HAS_EXIT_FLAG,
     [_LOAD_ATTR_CLASS] = HAS_ESCAPES_FLAG,
     [_LOAD_ATTR_PROPERTY_FRAME] = HAS_ARG_FLAG | HAS_DEOPT_FLAG,
@@ -1811,15 +1810,6 @@ const _PyUopCachingInfo _PyUop_Caching[MAX_UOP_ID+1] = {
             { 3, 3, _GUARD_NO_SOAC_TYPE_r33 },
         },
     },
-    [_GUARD_SOAC_TYPE_READ] = {
-        .best = { 0, 1, 2, 3 },
-        .entries = {
-            { 1, 0, _GUARD_SOAC_TYPE_READ_r01 },
-            { 1, 1, _GUARD_SOAC_TYPE_READ_r11 },
-            { 2, 2, _GUARD_SOAC_TYPE_READ_r22 },
-            { 3, 3, _GUARD_SOAC_TYPE_READ_r33 },
-        },
-    },
     [_GUARD_TYPE_VERSION] = {
         .best = { 0, 1, 2, 3 },
         .entries = {
@@ -1875,11 +1865,11 @@ const _PyUopCachingInfo _PyUop_Caching[MAX_UOP_ID+1] = {
         },
     },
     [_LOAD_ATTR_SLOT] = {
-        .best = { 1, 1, 1, 1 },
+        .best = { 0, 1, 2, 2 },
         .entries = {
-            { -1, -1, -1 },
+            { 2, 0, _LOAD_ATTR_SLOT_r02 },
             { 2, 1, _LOAD_ATTR_SLOT_r12 },
-            { -1, -1, -1 },
+            { 3, 2, _LOAD_ATTR_SLOT_r23 },
             { -1, -1, -1 },
         },
     },
@@ -3894,10 +3884,6 @@ const uint16_t _PyUop_Uncached[MAX_UOP_REGS_ID+1] = {
     [_GUARD_NO_SOAC_TYPE_r11] = _GUARD_NO_SOAC_TYPE,
     [_GUARD_NO_SOAC_TYPE_r22] = _GUARD_NO_SOAC_TYPE,
     [_GUARD_NO_SOAC_TYPE_r33] = _GUARD_NO_SOAC_TYPE,
-    [_GUARD_SOAC_TYPE_READ_r01] = _GUARD_SOAC_TYPE_READ,
-    [_GUARD_SOAC_TYPE_READ_r11] = _GUARD_SOAC_TYPE_READ,
-    [_GUARD_SOAC_TYPE_READ_r22] = _GUARD_SOAC_TYPE_READ,
-    [_GUARD_SOAC_TYPE_READ_r33] = _GUARD_SOAC_TYPE_READ,
     [_GUARD_TYPE_VERSION_r01] = _GUARD_TYPE_VERSION,
     [_GUARD_TYPE_VERSION_r11] = _GUARD_TYPE_VERSION,
     [_GUARD_TYPE_VERSION_r22] = _GUARD_TYPE_VERSION,
@@ -3915,7 +3901,9 @@ const uint16_t _PyUop_Uncached[MAX_UOP_REGS_ID+1] = {
     [_LOAD_ATTR_INSTANCE_VALUE_r23] = _LOAD_ATTR_INSTANCE_VALUE,
     [_LOAD_ATTR_MODULE_r12] = _LOAD_ATTR_MODULE,
     [_LOAD_ATTR_WITH_HINT_r12] = _LOAD_ATTR_WITH_HINT,
+    [_LOAD_ATTR_SLOT_r02] = _LOAD_ATTR_SLOT,
     [_LOAD_ATTR_SLOT_r12] = _LOAD_ATTR_SLOT,
+    [_LOAD_ATTR_SLOT_r23] = _LOAD_ATTR_SLOT,
     [_CHECK_ATTR_CLASS_r01] = _CHECK_ATTR_CLASS,
     [_CHECK_ATTR_CLASS_r11] = _CHECK_ATTR_CLASS,
     [_CHECK_ATTR_CLASS_r22] = _CHECK_ATTR_CLASS,
@@ -4899,11 +4887,6 @@ const char *const _PyOpcode_uop_name[MAX_UOP_REGS_ID+1] = {
     [_GUARD_NO_SOAC_TYPE_r11] = "_GUARD_NO_SOAC_TYPE_r11",
     [_GUARD_NO_SOAC_TYPE_r22] = "_GUARD_NO_SOAC_TYPE_r22",
     [_GUARD_NO_SOAC_TYPE_r33] = "_GUARD_NO_SOAC_TYPE_r33",
-    [_GUARD_SOAC_TYPE_READ] = "_GUARD_SOAC_TYPE_READ",
-    [_GUARD_SOAC_TYPE_READ_r01] = "_GUARD_SOAC_TYPE_READ_r01",
-    [_GUARD_SOAC_TYPE_READ_r11] = "_GUARD_SOAC_TYPE_READ_r11",
-    [_GUARD_SOAC_TYPE_READ_r22] = "_GUARD_SOAC_TYPE_READ_r22",
-    [_GUARD_SOAC_TYPE_READ_r33] = "_GUARD_SOAC_TYPE_READ_r33",
     [_GUARD_THIRD_NULL] = "_GUARD_THIRD_NULL",
     [_GUARD_THIRD_NULL_r03] = "_GUARD_THIRD_NULL_r03",
     [_GUARD_THIRD_NULL_r13] = "_GUARD_THIRD_NULL_r13",
@@ -5067,7 +5050,9 @@ const char *const _PyOpcode_uop_name[MAX_UOP_REGS_ID+1] = {
     [_LOAD_ATTR_PROPERTY_FRAME] = "_LOAD_ATTR_PROPERTY_FRAME",
     [_LOAD_ATTR_PROPERTY_FRAME_r11] = "_LOAD_ATTR_PROPERTY_FRAME_r11",
     [_LOAD_ATTR_SLOT] = "_LOAD_ATTR_SLOT",
+    [_LOAD_ATTR_SLOT_r02] = "_LOAD_ATTR_SLOT_r02",
     [_LOAD_ATTR_SLOT_r12] = "_LOAD_ATTR_SLOT_r12",
+    [_LOAD_ATTR_SLOT_r23] = "_LOAD_ATTR_SLOT_r23",
     [_LOAD_ATTR_WITH_HINT] = "_LOAD_ATTR_WITH_HINT",
     [_LOAD_ATTR_WITH_HINT_r12] = "_LOAD_ATTR_WITH_HINT_r12",
     [_LOAD_BUILD_CLASS] = "_LOAD_BUILD_CLASS",
@@ -5832,8 +5817,6 @@ int _PyUop_num_popped(int opcode, int oparg)
         case _LOAD_ATTR:
             return 1;
         case _GUARD_NO_SOAC_TYPE:
-            return 0;
-        case _GUARD_SOAC_TYPE_READ:
             return 0;
         case _GUARD_TYPE_VERSION:
             return 0;

@@ -1845,10 +1845,6 @@
             break;
         }
 
-        case _GUARD_SOAC_TYPE_READ: {
-            break;
-        }
-
         case _GUARD_TYPE_VERSION: {
             JitOptRef owner;
             owner = stack_pointer[-1];
