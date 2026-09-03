@@ -9532,49 +9532,6 @@
             break;
         }
 
-        case _LOAD_ATTR_SLOT_r02: {
-            CHECK_CURRENT_CACHED_VALUES(0);
-            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
-            _PyStackRef owner;
-            _PyStackRef attr;
-            _PyStackRef o;
-            owner = stack_pointer[-1];
-            uint16_t index = (uint16_t)CURRENT_OPERAND0_16();
-            PyObject *owner_o = PyStackRef_AsPyObjectBorrow(owner);
-            if (_PyObject_HasTypeStateSlot(owner_o) ||
-                     _PySOAC_UsesObjectSlotPolicy(Py_TYPE(owner_o))) {
-                UOP_STAT_INC(uopcode, miss);
-                SET_CURRENT_CACHED_VALUES(0);
-                JUMP_TO_JUMP_TARGET();
-            }
-            PyObject **addr = (PyObject **)((char *)owner_o + index);
-            PyObject *attr_o = FT_ATOMIC_LOAD_PTR(*addr);
-            if (attr_o == NULL) {
-                UOP_STAT_INC(uopcode, miss);
-                SET_CURRENT_CACHED_VALUES(0);
-                JUMP_TO_JUMP_TARGET();
-            }
-            #ifdef Py_GIL_DISABLED
-            int increfed = _Py_TryIncrefCompareStackRef(addr, attr_o, &attr);
-            if (!increfed) {
-                UOP_STAT_INC(uopcode, miss);
-                SET_CURRENT_CACHED_VALUES(0);
-                JUMP_TO_JUMP_TARGET();
-            }
-            #else
-            attr = PyStackRef_FromPyObjectNew(attr_o);
-            #endif
-            STAT_INC(LOAD_ATTR, hit);
-            o = owner;
-            _tos_cache1 = o;
-            _tos_cache0 = attr;
-            SET_CURRENT_CACHED_VALUES(2);
-            stack_pointer += -1;
-            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
-            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
-            break;
-        }
-
         case _LOAD_ATTR_SLOT_r12: {
             CHECK_CURRENT_CACHED_VALUES(1);
             assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
@@ -9585,12 +9542,23 @@
             owner = _stack_item_0;
             uint16_t index = (uint16_t)CURRENT_OPERAND0_16();
             PyObject *owner_o = PyStackRef_AsPyObjectBorrow(owner);
-            if (_PyObject_HasTypeStateSlot(owner_o) ||
-                     _PySOAC_UsesObjectSlotPolicy(Py_TYPE(owner_o))) {
-                UOP_STAT_INC(uopcode, miss);
-                _tos_cache0 = owner;
-                SET_CURRENT_CACHED_VALUES(1);
-                JUMP_TO_JUMP_TARGET();
+            if (index != offsetof(PyObject, ob_type)) {
+                stack_pointer[0] = owner;
+                stack_pointer += 1;
+                ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+                _PyFrame_SetStackPointer(frame, stack_pointer);
+                int err = _PySOAC_CheckObjectSlotRead(owner_o);
+                stack_pointer = _PyFrame_GetStackPointer(frame);
+                if (err < 0) {
+                    stack_pointer += -1;
+                    ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+                    _PyFrame_SetStackPointer(frame, stack_pointer);
+                    PyStackRef_CLOSE(owner);
+                    stack_pointer = _PyFrame_GetStackPointer(frame);
+                    SET_CURRENT_CACHED_VALUES(0);
+                    JUMP_TO_ERROR();
+                }
+                stack_pointer += -1;
             }
             PyObject **addr = (PyObject **)((char *)owner_o + index);
             PyObject *attr_o = FT_ATOMIC_LOAD_PTR(*addr);
@@ -9615,57 +9583,8 @@
             o = owner;
             _tos_cache1 = o;
             _tos_cache0 = attr;
+            _tos_cache2 = PyStackRef_ZERO_BITS;
             SET_CURRENT_CACHED_VALUES(2);
-            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
-            break;
-        }
-
-        case _LOAD_ATTR_SLOT_r23: {
-            CHECK_CURRENT_CACHED_VALUES(2);
-            assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
-            _PyStackRef owner;
-            _PyStackRef attr;
-            _PyStackRef o;
-            _PyStackRef _stack_item_0 = _tos_cache0;
-            _PyStackRef _stack_item_1 = _tos_cache1;
-            owner = _stack_item_1;
-            uint16_t index = (uint16_t)CURRENT_OPERAND0_16();
-            PyObject *owner_o = PyStackRef_AsPyObjectBorrow(owner);
-            if (_PyObject_HasTypeStateSlot(owner_o) ||
-                     _PySOAC_UsesObjectSlotPolicy(Py_TYPE(owner_o))) {
-                UOP_STAT_INC(uopcode, miss);
-                _tos_cache1 = owner;
-                _tos_cache0 = _stack_item_0;
-                SET_CURRENT_CACHED_VALUES(2);
-                JUMP_TO_JUMP_TARGET();
-            }
-            PyObject **addr = (PyObject **)((char *)owner_o + index);
-            PyObject *attr_o = FT_ATOMIC_LOAD_PTR(*addr);
-            if (attr_o == NULL) {
-                UOP_STAT_INC(uopcode, miss);
-                _tos_cache1 = owner;
-                _tos_cache0 = _stack_item_0;
-                SET_CURRENT_CACHED_VALUES(2);
-                JUMP_TO_JUMP_TARGET();
-            }
-            #ifdef Py_GIL_DISABLED
-            int increfed = _Py_TryIncrefCompareStackRef(addr, attr_o, &attr);
-            if (!increfed) {
-                UOP_STAT_INC(uopcode, miss);
-                _tos_cache1 = owner;
-                _tos_cache0 = _stack_item_0;
-                SET_CURRENT_CACHED_VALUES(2);
-                JUMP_TO_JUMP_TARGET();
-            }
-            #else
-            attr = PyStackRef_FromPyObjectNew(attr_o);
-            #endif
-            STAT_INC(LOAD_ATTR, hit);
-            o = owner;
-            _tos_cache2 = o;
-            _tos_cache1 = attr;
-            _tos_cache0 = _stack_item_0;
-            SET_CURRENT_CACHED_VALUES(3);
             assert(WITHIN_STACK_BOUNDS_IGNORING_CACHE());
             break;
         }

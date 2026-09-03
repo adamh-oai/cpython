@@ -9397,10 +9397,11 @@
                     JUMP_TO_PREDICTED(LOAD_ATTR);
                 }
             }
-            // _GUARD_NO_SOAC_TYPE
+            // _GUARD_SOAC_TYPE_READ
             {
                 PyTypeObject *tp = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
-                if (tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
+                if ((tp->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) &&
+                    !_PySOAC_TypeReadCacheReady(tp)) {
                     UPDATE_MISS_STATS(LOAD_ATTR);
                     assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
                     JUMP_TO_PREDICTED(LOAD_ATTR);
@@ -9410,11 +9411,18 @@
             {
                 uint16_t index = read_u16(&this_instr[4].cache);
                 PyObject *owner_o = PyStackRef_AsPyObjectBorrow(owner);
-                if (_PyObject_HasTypeStateSlot(owner_o) ||
-                    _PySOAC_UsesObjectSlotPolicy(Py_TYPE(owner_o))) {
-                    UPDATE_MISS_STATS(LOAD_ATTR);
-                    assert(_PyOpcode_Deopt[opcode] == (LOAD_ATTR));
-                    JUMP_TO_PREDICTED(LOAD_ATTR);
+                if (index != offsetof(PyObject, ob_type)) {
+                    _PyFrame_SetStackPointer(frame, stack_pointer);
+                    int err = _PySOAC_CheckObjectSlotRead(owner_o);
+                    stack_pointer = _PyFrame_GetStackPointer(frame);
+                    if (err < 0) {
+                        stack_pointer += -1;
+                        ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+                        _PyFrame_SetStackPointer(frame, stack_pointer);
+                        PyStackRef_CLOSE(owner);
+                        stack_pointer = _PyFrame_GetStackPointer(frame);
+                        JUMP_TO_LABEL(error);
+                    }
                 }
                 PyObject **addr = (PyObject **)((char *)owner_o + index);
                 PyObject *attr_o = FT_ATOMIC_LOAD_PTR(*addr);
