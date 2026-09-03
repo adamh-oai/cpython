@@ -843,14 +843,16 @@ do_specialize_instance_load_attr(PyObject* owner, _Py_CODEUNIT* instr, PyObject*
         }
         case OBJECT_SLOT:
         {
-            if (_PyObject_HasTypeStateSlot(owner) ||
-                _PySOAC_UsesObjectSlotPolicy(Py_TYPE(owner))) {
-                SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_ATTR_OBJECT_SLOT);
-                return -1;
-            }
             PyMemberDescrObject *member = (PyMemberDescrObject *)descr;
             struct PyMemberDef *dmem = member->d_member;
             Py_ssize_t offset = dmem->offset;
+            /* This offset identifies the synthetic __class__ getset cache,
+             * whose reads do not consult member-storage metadata. Keep an
+             * actual native member alias on its ordinary checked path. */
+            if (offset == offsetof(PyObject, ob_type)) {
+                SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_ATTR_OBJECT_SLOT);
+                return -1;
+            }
             if (!PyObject_TypeCheck(owner, member->d_common.d_type)) {
                 SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_EXPECTED_ERROR);
                 return -1;
@@ -867,8 +869,23 @@ do_specialize_instance_load_attr(PyObject* owner, _Py_CODEUNIT* instr, PyObject*
                 SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_OUT_OF_RANGE);
                 return -1;
             }
+            /* Only fixed instance storage has the same representation for
+             * every receiver covered by the type-version guard. A native
+             * member beyond basicsize can overlap a per-instance trailer. */
+            if (offset > Py_TYPE(owner)->tp_basicsize - (Py_ssize_t)sizeof(PyObject *)) {
+                SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_ATTR_OBJECT_SLOT);
+                return -1;
+            }
             assert(dmem->type == Py_T_OBJECT_EX || dmem->type == _Py_T_OBJECT);
             assert(offset > 0);
+            /* Prove the actual member representation once. The type-version
+             * guard preserves this descriptor/layout decision; a cache hit
+             * only needs the independent native metadata-liveness check. */
+            if (_PySOAC_CheckObjectSlotAccess(owner, dmem) < 0) {
+                PyErr_Clear();
+                SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_ATTR_OBJECT_SLOT);
+                return -1;
+            }
             cache->index = (uint16_t)offset;
             write_u32(cache->version, tp_version);
             specialize(instr, LOAD_ATTR_SLOT);

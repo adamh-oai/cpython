@@ -2664,8 +2664,15 @@ dummy_func(
         op(_LOAD_ATTR_SLOT, (index/1, owner -- attr, o)) {
             PyObject *owner_o = PyStackRef_AsPyObjectBorrow(owner);
 
-            DEOPT_IF(_PyObject_HasTypeStateSlot(owner_o) ||
-                     _PySOAC_UsesObjectSlotPolicy(Py_TYPE(owner_o)));
+            /* The __class__ getset also uses this opcode, but does not read a
+             * member or consult instance storage metadata in generic lookup. */
+            if (index != offsetof(PyObject, ob_type)) {
+                int err = _PySOAC_CheckObjectSlotRead(owner_o);
+                if (err < 0) {
+                    PyStackRef_CLOSE(owner);
+                    ERROR_IF(true);
+                }
+            }
 
             PyObject **addr = (PyObject **)((char *)owner_o + index);
             PyObject *attr_o = FT_ATOMIC_LOAD_PTR(*addr);
@@ -2685,7 +2692,7 @@ dummy_func(
             unused/1 +
             _RECORD_TOS_TYPE +
             _GUARD_TYPE_VERSION +
-            _GUARD_NO_SOAC_TYPE +
+            _GUARD_SOAC_TYPE_READ +
             _LOAD_ATTR_SLOT +  // NOTE: This action may also deopt
             POP_TOP +
             unused/5 +

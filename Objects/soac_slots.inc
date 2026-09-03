@@ -402,6 +402,30 @@ unsafe_view:
 }
 
 int
+_PySOAC_CheckObjectSlotRead(PyObject *object)
+{
+    /* Specialization already validated the actual member view. Retain the
+     * generic path's metadata errors without repeating physical member checks.
+     * Direct storage owns the complete contract projection, including strict
+     * ancestors of an ordinary receiver; it needs no member or MRO lookup. */
+    if (_PyObject_HasTypeStateSlot(object)) {
+        return PyObject_GetTypeState(object) == NULL ? -1 : 0;
+    }
+    PyTypeObject *type = Py_TYPE(object);
+    soac_record_legacy_slot_lookup(type);
+    PyObject *mro = lookup_tp_mro(type);
+    Py_ssize_t size = mro == NULL ? 0 : PyTuple_GET_SIZE(mro);
+    for (Py_ssize_t i = -1; i < size; ++i) {
+        SoacTypeContract *state = soac_object_slot_contract_at(type, mro, i);
+        if (state != NULL && state->object_slot_count != 0 &&
+            soac_contract_live(state) < 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+int
 _PySOAC_CheckObjectSlotWrite(PyObject *object, Py_ssize_t offset, PyObject *value)
 {
     if (_PyObject_HasTypeStateSlot(object)) {

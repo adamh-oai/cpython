@@ -56,6 +56,7 @@ extern int _PySOAC_PrepareInstanceDictPolicy(
     PyObject *, PyObject *, const PySoacInstanceDictPolicy *, PySoacInstanceDictPolicy *);
 /* Also consumed by the generated _testinternalcapi executor. */
 PyAPI_FUNC(int) _PySOAC_UsesObjectSlotPolicy(PyTypeObject *);
+PyAPI_FUNC(int) _PySOAC_CheckObjectSlotRead(PyObject *);
 extern int _PySOAC_CheckObjectSlotAccess(PyObject *, const PyMemberDef *);
 extern int _PySOAC_CheckObjectSlotWrite(PyObject *, Py_ssize_t, PyObject *);
 extern int _PySOAC_PublishAnnotationCache(PyTypeObject *, PyObject *, PyObject *);
