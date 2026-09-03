@@ -101,6 +101,7 @@ static PyTypeObject SoacTypeContract_Type;
 static PyObject *type_new_impl(type_new_ctx *ctx);
 static int type_new_get_bases(type_new_ctx *ctx, PyObject **type);
 static int soac_final_override(PyTypeObject *, PyObject *);
+static SoacTypeContract *soac_type_ordinary_dictionary_contract(PyTypeObject *);
 
 /* Scalar retirement is safe even in callback-free teardown hooks. Keep the
  * storage shell owned until the ordinary release phase, but never leave a
@@ -1927,7 +1928,10 @@ _PySOAC_CheckInstanceWrite(PyObject *object, PyObject *name, PyObject *value)
     }
     SoacTypeContract *state = soac_type_contract(Py_TYPE(object));
     if (state == NULL) {
-        return 0;
+        /* An ordinary child retains its base's receiver-write boundary even
+         * when its independently live dictionary already owns the field rules. */
+        state = soac_type_ordinary_dictionary_contract(Py_TYPE(object));
+        return state != NULL ? soac_contract_live(state) : 0;
     }
     int protected = _PySOAC_ProtectedName(Py_TYPE(object), name);
     if (protected != 0) {
