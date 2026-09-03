@@ -177,7 +177,7 @@ soac_test_gc_newvar_alloc(PyTypeObject *type, Py_ssize_t nitems)
     if (instance != NULL && !_PySOAC_HasOrdinaryInstanceWrites(type)) {
         /* Stock NewVar leaves the caller-owned payload uninitialized. This
          * fixture owns the ordinary control's inherited dictionary slot. */
-        PyObject **dictptr = _PyObject_ComputedDictPointer(instance);
+        PyObject **dictptr = _PyObject_GetDictPtr(instance);
         if (dictptr != NULL) *dictptr = NULL;
     }
     return instance;
@@ -556,7 +556,7 @@ soac_test_type_state_trace(PyObject *object, PyRefTracerEvent event, void *data)
             PyTypeObject *type = Py_TYPE(object);
             PyObject **dictptr = type->tp_flags & Py_TPFLAGS_MANAGED_DICT
                 ? (PyObject **)&_PyObject_ManagedDictPointer(object)->dict
-                : _PyObject_ComputedDictPointer(object);
+                : _PyObject_GetDictPtr(object);
             if (dictptr == NULL || *dictptr == NULL ||
                 !PyDict_Check(*dictptr) || !_PyDict_HasSoacPolicy((PyDictObject *)*dictptr)) {
                 trace->incomplete = 1;

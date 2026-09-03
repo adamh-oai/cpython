@@ -2122,7 +2122,7 @@ soac_test_ordinary_invoke_hook(PyObject *owner, PyObject *instance, PyObject *ca
     if (hook == Py_None) return 0;
     PyObject **dictptr = Py_TYPE(instance)->tp_flags & Py_TPFLAGS_MANAGED_DICT
         ? (PyObject **)&_PyObject_ManagedDictPointer(instance)->dict
-        : _PyObject_ComputedDictPointer(instance);
+        : _PyObject_GetDictPtr(instance);
     if (dictptr != NULL && *dictptr == NULL && PyObject_GC_IsTracked(candidate)) {
         PyErr_SetString(PyExc_AssertionError, "private dictionary header became GC-visible");
         return -1;
