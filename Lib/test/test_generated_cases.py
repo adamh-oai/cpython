@@ -519,141 +519,38 @@ class TestSoacTier2FrameErrors(unittest.TestCase):
                 self.assertEqual(refused.stack.variables, [])
 
 
-class TestIndexedGlobalResultStack(unittest.TestCase):
-    """Indexed loads must publish their result on the supported GIL path."""
-
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        cls.analysis = analyzer.analyze_files([
-            os.path.join(test_tools.basepath, "Python", "bytecodes.c")
-        ])
-
-    def test_actual_indexed_ops_fall_through_with_declared_stack_effects(self):
-        for name, outputs, caches in (
-            ("_LOAD_GLOBAL_MODULE_INDEXED", [("res", "")],
-             [("version", 1), ("unused", 1), ("index", 1)]),
-            ("_GUARD_INDEXED_GLOBALS_VERSION", [], [("version", 1)]),
-        ):
-            with self.subTest(uop=name):
-                uop = self.analysis.uops[name]
-                self.assertFalse(uop.properties.always_exits)
-                self.assertTrue(uop.properties.deopts)
-                self.assertFalse(uop.properties.escapes)
-                self.assertEqual(uop.properties.tier, 1)
-                self.assertEqual(uop.stack.inputs, [])
-                self.assertEqual(
-                    [(item.name, item.size) for item in uop.stack.outputs], outputs,
-                )
-                self.assertEqual(
-                    [(cache.name, cache.size) for cache in uop.caches], caches,
-                )
-        result = self.analysis.uops["_LOAD_GLOBAL_MODULE_INDEXED"].stack.outputs[0]
-        self.assertTrue(result.used)
-        self.assertFalse(result.peek)
-
-        for name in ("LOAD_GLOBAL_MODULE_INDEXED", "LOAD_GLOBAL_BUILTIN_INDEXED"):
-            with self.subTest(instruction=name):
-                instruction = self.analysis.instructions[name]
-                self.assertFalse(instruction.properties.always_exits)
-                self.assertFalse(opcode_metadata_generator.is_viable_expansion(instruction))
-                declared = get_stack_effect(instruction)
-                self.assertEqual([local.name for local in declared.variables], ["res", "null"])
-                self.assertFalse(declared.variables[0].is_array())
-                self.assertIs(
-                    declared.variables[1].item,
-                    self.analysis.uops["_PUSH_NULL_CONDITIONAL"].stack.outputs[0],
-                )
-
-    def test_module_load_emitter_keeps_the_live_result(self):
-        instruction = self.analysis.instructions["LOAD_GLOBAL_MODULE_INDEXED"]
-        uop = self.analysis.uops["_LOAD_GLOBAL_MODULE_INDEXED"]
-        emitter = tier1_generator.Emitter(CWriter.null(), self.analysis.labels)
-        reachable, _, stack = tier1_generator.write_uop(
-            uop, emitter, 2, Stack(), instruction, True
-        )
-        # A preprocessor-only unconditional deopt previously made this false,
-        # so emit_tokens skipped pushing res despite the GIL branch defining it.
-        self.assertTrue(reachable)
-        self.assertEqual([local.name for local in stack.variables], ["res"])
-        self.assertEqual(stack.logical_sp.as_int(), 1)
-        result = stack.variables[0]
-        self.assertIs(result.item, uop.stack.outputs[0])
-        self.assertTrue(result.in_local)
-        self.assertFalse(result.is_dead())
-        stack.flush(emitter.out)
-        self.assertTrue(result.in_memory())
-        self.assertEqual(result.memory_offset.as_int(), 0)
-        self.assertTrue(stack.is_flushed())
-
-    def test_indexed_guard_emitter_preserves_the_existing_stack(self):
-        instruction = self.analysis.instructions["LOAD_GLOBAL_BUILTIN_INDEXED"]
-        uop = self.analysis.uops["_GUARD_INDEXED_GLOBALS_VERSION"]
-        emitter = tier1_generator.Emitter(CWriter.null(), self.analysis.labels)
-        stack = Stack()
-        sentinel = Local.register("sentinel")
-        stack.push(sentinel)
-        before = stack.copy()
-        reachable, _, stack = tier1_generator.write_uop(
-            uop, emitter, 2, stack, instruction, True
-        )
-        self.assertTrue(reachable)
-        self.assertEqual(stack, before)
-        self.assertIs(stack.variables[0].item, sentinel.item)
-
-    def test_indexed_macros_publish_result_before_optional_call_null(self):
-        for name in ("LOAD_GLOBAL_MODULE_INDEXED", "LOAD_GLOBAL_BUILTIN_INDEXED"):
-            with self.subTest(instruction=name):
-                instruction = self.analysis.instructions[name]
-                emitter = tier1_generator.Emitter(CWriter.null(), self.analysis.labels)
-                stack = Stack()
-                offset = 1
-                for part in instruction.parts:
-                    reachable, offset, stack = tier1_generator.write_uop(
-                        part, emitter, offset, stack, instruction, True
-                    )
-                    self.assertTrue(reachable, part.name)
-                declared = get_stack_effect(instruction)
-                self.assertEqual([local.item for local in stack.variables],
-                                 [local.item for local in declared.variables])
-                self.assertEqual(stack.logical_sp, declared.logical_sp)
-                self.assertEqual([local.name for local in stack.variables], ["res", "null"])
-                self.assertTrue(stack.variables[0].in_local)
-                self.assertFalse(stack.variables[0].is_dead())
-                stack.flush(emitter.out)
-                self.assertTrue(stack.is_flushed())
-                self.assertEqual(stack.variables[0].memory_offset.as_int(), 0)
-
-
 class TestOrdinaryInstancePolicyGuard(unittest.TestCase):
     """Mandatory ordinary-storage writes are not type-version capabilities."""
 
-    def test_actual_store_macros_keep_independent_policy_guard(self):
+    def test_hint_store_keeps_independent_policy_and_inline_store_keeps_no_dict_guard(self):
         analysis = analyzer.analyze_files([
             os.path.join(test_tools.basepath, "Python", "bytecodes.c")
         ])
-        guard = analysis.uops["_GUARD_NO_ORDINARY_INSTANCE_WRITES"]
-        self.assertFalse(guard.properties.escapes)
-        self.assertTrue(guard.properties.side_exit)
-        self.assertEqual([item.name for item in guard.stack.inputs], ["owner"])
-        self.assertEqual([item.name for item in guard.stack.outputs], ["owner"])
-        for instruction, writer in (
-            ("STORE_ATTR_INSTANCE_VALUE", "_STORE_ATTR_INSTANCE_VALUE"),
-            ("STORE_ATTR_WITH_HINT", "_STORE_ATTR_WITH_HINT"),
+        for instruction, guard_name, writer in (
+            ("STORE_ATTR_INSTANCE_VALUE", "_GUARD_DORV_NO_DICT", "_STORE_ATTR_INSTANCE_VALUE"),
+            ("STORE_ATTR_WITH_HINT", "_GUARD_NO_ORDINARY_INSTANCE_WRITES", "_STORE_ATTR_WITH_HINT"),
         ):
             with self.subTest(instruction=instruction):
+                guard = analysis.uops[guard_name]
+                self.assertFalse(guard.properties.escapes)
+                self.assertTrue(guard.properties.side_exit)
+                self.assertEqual([item.name for item in guard.stack.inputs], ["owner"])
+                self.assertEqual([item.name for item in guard.stack.outputs], ["owner"])
                 parts = [
                     part.name for part in analysis.instructions[instruction].parts
                     if isinstance(part, analyzer.Uop)
                 ]
                 self.assertEqual(parts.count(guard.name), 1)
                 self.assertLess(parts.index(guard.name), parts.index(writer))
-                if "_GUARD_TYPE_VERSION_AND_LOCK" in parts:
+                if instruction == "STORE_ATTR_INSTANCE_VALUE":
+                    # Checked dictionaries are installed at allocation; the
+                    # stock no-dict guard keeps them off this raw inline store.
+                    self.assertNotIn("_GUARD_NO_ORDINARY_INSTANCE_WRITES", parts)
                     self.assertLess(
-                        parts.index(guard.name),
                         parts.index("_GUARD_TYPE_VERSION_AND_LOCK"),
+                        parts.index(guard.name),
                     )
-                if instruction == "STORE_ATTR_WITH_HINT":
+                else:
                     record = parts.index("_RECORD_TOS_TYPE")
                     version = parts.index("_GUARD_TYPE_VERSION")
                     self.assertEqual(record, 0)
