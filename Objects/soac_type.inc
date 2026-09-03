@@ -1918,6 +1918,13 @@ _PySOAC_ProtectedName(PyTypeObject *type, PyObject *name)
 int
 _PySOAC_CheckInstanceWrite(PyObject *object, PyObject *name, PyObject *value)
 {
+    /* The receiver and its escaped dictionary have independent lifetimes.
+     * Attribute writes require the receiver even when the dictionary's own
+     * field policy remains live. Reads and direct dictionary writes do not. */
+    if (_PyObject_HasTypeStateSlot(object) &&
+        PyObject_GetTypeState(object) == NULL) {
+        return -1;
+    }
     SoacTypeContract *state = soac_type_contract(Py_TYPE(object));
     if (state == NULL) {
         return 0;
@@ -1967,6 +1974,10 @@ _PySOAC_CheckClassAssignment(PyTypeObject *old_type, PyTypeObject *new_type)
 int
 _PySOAC_CheckDictionaryReplacement(PyObject *object)
 {
+    if (_PyObject_HasTypeStateSlot(object) &&
+        PyObject_GetTypeState(object) == NULL) {
+        return -1;
+    }
     if (PyType_Check(object)) {
         PyTypeObject *type = (PyTypeObject *)object;
         SoacTypeContract *state = soac_type_state(type);

@@ -2314,10 +2314,45 @@ soac_test_ordinary_final_commit(PyObject *owner, PyObject *type,
     return 0;
 }
 
+/* Construct one explicit-offset dictionary layout before Ready. The
+ * ENFORCED constructor calls bind_type after ordinary descriptors exist;
+ * pending binding would run too early and type_new_descriptors would overwrite
+ * this layout. No instance can be allocated while this construction is open. */
+static int
+soac_test_explicit_dictionary_bind(PyObject *owner, PyObject *actual)
+{
+    PyTypeObject *type = (PyTypeObject *)actual;
+    PyObject *descriptor = PyDict_GetItemWithError(type->tp_dict, &_Py_ID(__dict__));
+    if (descriptor == NULL) {
+        if (!PyErr_Occurred()) PyErr_SetString(PyExc_TypeError, "explicit dictionary fixture requires the ordinary dictionary descriptor");
+        return -1;
+    }
+    if (PyType_GetSoacContractOwner(actual) != owner ||
+        (type->tp_flags & (Py_TPFLAGS_READY | Py_TPFLAGS_READYING)) ||
+        type->tp_base != &PyBaseObject_Type || Py_SIZE(type) != 0 ||
+        type->tp_basicsize != (Py_ssize_t)sizeof(PyObject) || type->tp_itemsize != 0 ||
+        (type->tp_flags & (Py_TPFLAGS_HEAPTYPE | Py_TPFLAGS_HAVE_GC |
+                           Py_TPFLAGS_MANAGED_DICT | Py_TPFLAGS_MANAGED_WEAKREF)) !=
+            (Py_TPFLAGS_HEAPTYPE | Py_TPFLAGS_HAVE_GC |
+             Py_TPFLAGS_MANAGED_DICT | Py_TPFLAGS_MANAGED_WEAKREF) ||
+        type->tp_dictoffset != -1 || type->tp_weaklistoffset != MANAGED_WEAKREF_OFFSET ||
+        !Py_IS_TYPE(descriptor, &PyGetSetDescr_Type) || PyDescr_TYPE(descriptor) != &PyBaseObject_Type) {
+        if (!PyErr_Occurred()) PyErr_SetString(PyExc_TypeError, "explicit dictionary fixture requires a fresh object-based layout with no custom slots");
+        return -1;
+    }
+    /* The generic descriptor computes the pointer from the actual type.
+     * subtype traverse/clear/dealloc own this new dictionary slot because
+     * object has none. Keep the separate managed weakref preheader unchanged. */
+    type->tp_dictoffset = sizeof(PyObject);
+    type->tp_basicsize = sizeof(PyObject) + sizeof(PyObject *);
+    type->tp_flags &= ~(Py_TPFLAGS_MANAGED_DICT | Py_TPFLAGS_INLINE_VALUES);
+    return 0;
+}
+
 #include "_testinternalcapi/soac_type_state.inc"
 
 static PyObject *
-dict_new_soac_ordinary_type_impl(PyObject *args, int direct)
+dict_new_soac_ordinary_type_impl(PyObject *args, int direct, int explicit_dict)
 {
     PyObject *name, *bases, *namespace, *fields, *namespace_function;
     PyObject *protected_names = NULL, *final_methods = NULL;
@@ -2354,18 +2389,6 @@ dict_new_soac_ordinary_type_impl(PyObject *args, int direct)
         Py_XDECREF(owner);
         return NULL;
     }
-    PySoacTypeConstructionSpec spec = {
-        .abi_version = Py_SOAC_TYPE_CONTRACT_ABI,
-        .struct_size = sizeof(spec),
-        .construction_mode = Py_SOAC_TYPE_CONSTRUCT_PENDING,
-        .owner = owner, .namespace_function = namespace_function,
-        .name = name, .bases = bases, .namespace_dict = namespace,
-        .keywords = keywords, .commit_final = soac_test_ordinary_final_commit,
-        .bind_type = direct ? soac_test_type_state_bind : NULL,
-    };
-    PyObject *handle = PyType_NewSoacConstructionHandle(&spec);
-    PyObject *type = handle == NULL ? NULL
-        : PyType_FromSoacConstructionHandle(handle, namespace_function);
     int checked = PyTuple_GET_SIZE(fields) != 0;
     PySoacTypeContractSpecV5 contract = {
         .dictionary_mode = checked ? Py_SOAC_INSTANCE_DICT_ORDINARY : Py_SOAC_INSTANCE_DICT_NONE,
@@ -2376,7 +2399,23 @@ dict_new_soac_ordinary_type_impl(PyObject *args, int direct)
         .check_instance_write = checked ? soac_test_ordinary_inline_write : NULL,
         .prepare_instance_dictionary_policy = checked ? soac_test_ordinary_prepare_dictionary : NULL,
     };
-    if (type != NULL &&
+    PySoacTypeConstructionSpec spec = {
+        .abi_version = Py_SOAC_TYPE_CONTRACT_ABI,
+        .struct_size = sizeof(spec),
+        .construction_mode = explicit_dict ? Py_SOAC_TYPE_CONSTRUCT_ENFORCED
+                                           : Py_SOAC_TYPE_CONSTRUCT_PENDING,
+        .owner = owner, .namespace_function = namespace_function,
+        .name = name, .bases = bases, .namespace_dict = namespace,
+        .keywords = keywords,
+        .commit_final = explicit_dict ? NULL : soac_test_ordinary_final_commit,
+        .bind_type = explicit_dict ? soac_test_explicit_dictionary_bind
+                                   : direct ? soac_test_type_state_bind : NULL,
+    };
+    if (explicit_dict) spec.contract = contract;
+    PyObject *handle = PyType_NewSoacConstructionHandle(&spec);
+    PyObject *type = handle == NULL ? NULL
+        : PyType_FromSoacConstructionHandle(handle, namespace_function);
+    if (!explicit_dict && type != NULL &&
         PyType_AdmitSoacPendingV1(type, owner, handle, &contract, sizeof(contract),
                                  soac_test_ordinary_final_commit) < 0) {
         Py_CLEAR(type);
@@ -2394,13 +2433,19 @@ dict_new_soac_ordinary_type_impl(PyObject *args, int direct)
 static PyObject *
 dict_new_soac_ordinary_type(PyObject *self, PyObject *args)
 {
-    return dict_new_soac_ordinary_type_impl(args, 0);
+    return dict_new_soac_ordinary_type_impl(args, 0, 0);
+}
+
+static PyObject *
+dict_new_soac_explicit_dict_type(PyObject *self, PyObject *args)
+{
+    return dict_new_soac_ordinary_type_impl(args, 0, 1);
 }
 
 static PyObject *
 dict_new_soac_type_state_type(PyObject *self, PyObject *args)
 {
-    return dict_new_soac_ordinary_type_impl(args, 1);
+    return dict_new_soac_ordinary_type_impl(args, 1, 0);
 }
 
 static PyObject *
@@ -3535,6 +3580,7 @@ static PyMethodDef module_functions[] = {
     {"dict_getitem_knownhash",  dict_getitem_knownhash,          METH_VARARGS},
     {"dict_setitem_and_delete_for_module", dict_setitem_and_delete_for_module, METH_VARARGS},
     {"dict_new_soac_ordinary_type", dict_new_soac_ordinary_type, METH_VARARGS},
+    {"dict_new_soac_explicit_dict_type", dict_new_soac_explicit_dict_type, METH_VARARGS},
     {"dict_new_soac_type_state_type", dict_new_soac_type_state_type, METH_VARARGS},
     {"slot_new_soac_type_state_type", slot_new_soac_type_state_type, METH_VARARGS},
     {"get_soac_type_state_info", get_soac_type_state_info, METH_O},

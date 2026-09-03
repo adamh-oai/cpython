@@ -171,8 +171,10 @@ soac_policy_installing(PyDictObject *dict, SoacDictPolicy *policy)
 static inline int
 soac_policy_mutating(PyDictObject *dict, SoacDictPolicy *policy)
 {
-    return policy->direct ? (dict->_ma_watcher_tag & SOAC_DIRECT_MUTATING) != 0
-                          : policy->mutating;
+    /* The attachment tag also scopes native lazy-cache writes. It excludes
+     * reentrant public writes without consulting or retaining the owner. */
+    return (dict->_ma_watcher_tag & SOAC_DIRECT_MUTATING) != 0 ||
+        (!policy->direct && policy->mutating);
 }
 
 static inline void
@@ -404,7 +406,14 @@ static void
 soac_commit_end(SoacDictCommitGuard *guard)
 {
     if (guard->acquired) {
-        soac_policy_set_mutating(guard->dictionary, guard->validated, 0);
+        if (guard->lazy_annotation) {
+            /* No policy pointer survives a cache watcher: it may retire the
+             * owner. Clear only the attachment tag acquired by this effect. */
+            guard->dictionary->_ma_watcher_tag &= ~SOAC_DIRECT_MUTATING;
+        }
+        else {
+            soac_policy_set_mutating(guard->dictionary, guard->validated, 0);
+        }
         guard->acquired = 0;
     }
 }
@@ -4056,6 +4065,14 @@ _PyDict_SetItemForLazyAnnotation(PyObject *op, PyObject *key, PyObject *value)
     int result;
     Py_BEGIN_CRITICAL_SECTION(op);
     PyDictObject *dict = (PyDictObject *)op;
+    SoacDictCommitGuard guard = {.dictionary = dict, .lazy_annotation = 1};
+    /* This is the actual cache write, not a read-policy/liveness check. Keep
+     * ordinary public mutations out of its resolved-entry commit interval.
+     * A nested cache effect never releases a preexisting attachment guard. */
+    if (!(dict->_ma_watcher_tag & SOAC_DIRECT_MUTATING)) {
+        dict->_ma_watcher_tag |= SOAC_DIRECT_MUTATING;
+        guard.acquired = 1;
+    }
     Py_hash_t hash = _PyObject_HashFast(key);
     PyObject *old_value = NULL;
     Py_ssize_t index = hash == -1 ? DKIX_ERROR : _Py_dict_lookup(dict, key, hash, &old_value);
@@ -4063,10 +4080,10 @@ _PyDict_SetItemForLazyAnnotation(PyObject *op, PyObject *key, PyObject *value)
         result = -1;
     }
     else {
-        SoacDictCommitGuard guard = {.dictionary = dict, .lazy_annotation = 1};
         result = soac_ordinary_commit_resolved_take2(
             dict, Py_NewRef(key), hash, Py_NewRef(value), index, old_value, &guard);
     }
+    soac_commit_end(&guard);
     Py_END_CRITICAL_SECTION();
     return result;
 }
@@ -9403,7 +9420,8 @@ _PyObject_SetManagedDict(PyObject *obj, PyObject *new_dict)
     PyDictObject *previous = _PyObject_GetManagedDict(obj);
     SoacInstanceDictInstall install;
     if (soac_prepare_instance_install(obj, new_dict, &install) < 0) return -1;
-    if (Py_TYPE(obj) != prepared_type || _PyObject_GetManagedDict(obj) != previous) {
+    if (Py_TYPE(obj) != prepared_type || _PyObject_GetManagedDict(obj) != previous ||
+        _PySOAC_CheckDictionaryReplacement(obj) < 0) {
         soac_instance_dictionary_busy();
         soac_abort_instance_install(&install);
         return -1;
@@ -9522,7 +9540,7 @@ _PyObject_SetInstanceDictionary(PyObject *obj, PyObject *new_dict)
     SoacInstanceDictInstall install;
     if (soac_prepare_instance_install(obj, new_dict, &install) < 0) return -1;
     if (Py_TYPE(obj) != type || _PyObject_ComputedDictPointer(obj) != dictptr ||
-        *dictptr != previous) {
+        *dictptr != previous || _PySOAC_CheckDictionaryReplacement(obj) < 0) {
         soac_instance_dictionary_busy();
         soac_abort_instance_install(&install);
         return -1;
