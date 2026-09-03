@@ -158,6 +158,86 @@ slot_new_soac_type_state_type(PyObject *self, PyObject *args)
 }
 
 static PyObject *
+soac_test_gc_new_alloc(PyTypeObject *type, Py_ssize_t nitems)
+{
+    if (nitems != 0 || type->tp_itemsize != 0) {
+        PyErr_SetString(PyExc_TypeError, "fixed native fixture requires a fixed-size allocation");
+        return NULL;
+    }
+    PyObject *instance = PyObject_GC_New(PyObject, type);
+    if (instance != NULL) PyObject_GC_Track(instance);
+    return instance;
+}
+
+static PyObject *
+soac_test_gc_newvar_alloc(PyTypeObject *type, Py_ssize_t nitems)
+{
+    /* The tuple constructor initializes its actual elements before tracking. */
+    PyObject *instance = (PyObject *)PyObject_GC_NewVar(PyVarObject, type, nitems);
+    if (instance != NULL && !_PySOAC_HasOrdinaryInstanceWrites(type)) {
+        /* Stock NewVar leaves the caller-owned payload uninitialized. This
+         * fixture owns the ordinary control's inherited dictionary slot. */
+        PyObject **dictptr = _PyObject_ComputedDictPointer(instance);
+        if (dictptr != NULL) *dictptr = NULL;
+    }
+    return instance;
+}
+
+static PyObject *
+soac_test_gc_extra_alloc(PyTypeObject *type, Py_ssize_t nitems)
+{
+    if (nitems != 0 || type->tp_itemsize != 0) {
+        PyErr_SetString(PyExc_TypeError, "extra-data fixture requires a fixed-size allocation");
+        return NULL;
+    }
+    PyObject *instance = PyUnstable_Object_GC_NewWithExtraData(type, 64);
+    if (instance == NULL) return NULL;
+    const char zero[64] = {0};
+    if (memcmp((char *)instance + type->tp_basicsize, zero, sizeof(zero)) != 0) {
+        Py_DECREF(instance);
+        PyErr_SetString(PyExc_AssertionError, "extra-data allocation changed its caller-owned zeroed tail");
+        return NULL;
+    }
+    PyObject_GC_Track(instance);
+    return instance;
+}
+
+static PyObject *
+soac_native_allocator_subclass(PyObject *self, PyObject *args)
+{
+    PyObject *base;
+    int mode = 0;
+    if (!PyArg_ParseTuple(args, "O|i:soac_native_allocator_subclass", &base, &mode)) return NULL;
+    if (!PyType_Check(base)) {
+        PyErr_SetString(PyExc_TypeError, "native allocator fixture requires a type");
+        return NULL;
+    }
+    PyTypeObject *parent = (PyTypeObject *)base;
+    if (mode < 0 || mode > 2 || !PyType_HasFeature(parent, Py_TPFLAGS_HAVE_GC) ||
+        parent->tp_traverse == NULL || parent->tp_itemsize > INT_MAX ||
+        (mode == 1 ? !PyType_IsSubtype(parent, &PyTuple_Type) :
+         parent->tp_itemsize != 0 || parent->tp_basicsize != sizeof(PyObject))) {
+        PyErr_SetString(PyExc_TypeError, "native allocator fixture requires an ordinary managed layout or tuple subclass");
+        return NULL;
+    }
+    PyType_Slot slots[] = {
+        {Py_tp_alloc, mode == 1 ? (void *)soac_test_gc_newvar_alloc :
+                      mode == 2 ? (void *)soac_test_gc_extra_alloc :
+                                  (void *)soac_test_gc_new_alloc},
+        {Py_tp_traverse, (void *)parent->tp_traverse},
+        {0, NULL},
+    };
+    PyType_Spec spec = {
+        .name = "_testinternalcapi.NativeAllocatorSubclass",
+        .basicsize = 0,
+        .itemsize = (int)parent->tp_itemsize,
+        .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC,
+        .slots = slots,
+    };
+    return PyType_FromSpecWithBases(&spec, base);
+}
+
+static PyObject *
 get_soac_type_state_info(PyObject *self, PyObject *object)
 {
     int has_slot = _PyObject_HasTypeStateSlot(object);

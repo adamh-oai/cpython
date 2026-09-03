@@ -3540,6 +3540,7 @@ static PyMethodDef module_functions[] = {
     {"get_soac_type_state_info", get_soac_type_state_info, METH_O},
     {"capture_soac_type_state_allocation", capture_soac_type_state_allocation, METH_VARARGS},
     {"soac_instance_dict_clear_probe", soac_instance_dict_clear_probe, METH_VARARGS},
+    {"soac_native_allocator_subclass", soac_native_allocator_subclass, METH_VARARGS},
     {"soac_type_state_alloc_pending_error", soac_type_state_alloc_pending_error, METH_VARARGS},
     {"check_soac_type_state_reftracer", check_soac_type_state_reftracer, METH_O},
     {"probe_soac_type_state_lookups", probe_soac_type_state_lookups, METH_VARARGS},

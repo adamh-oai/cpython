@@ -3,13 +3,14 @@
 //  See InternalDocs/garbage_collector.md for more infromation.
 
 #include "Python.h"
-#include "pycore_soac_type.h"  // pending allocation barrier
+#include "pycore_soac_type.h"  // allocation barrier and destination write policy
 #include "pycore_type_state.h"  // preserve optional allocation extent
 #include "pycore_ceval.h"         // _Py_set_eval_breaker_bit()
 #include "pycore_dict.h"          // _PyInlineValuesSize()
 #include "pycore_initconfig.h"    // _PyStatus_OK()
 #include "pycore_interp.h"        // PyInterpreterState.gc
 #include "pycore_interpframe.h"   // _PyFrame_GetLocalsArray()
+#include "pycore_object.h"        // _PyType_AllocNoTrackWithFree()
 #include "pycore_object_alloc.h"  // _PyObject_MallocWithType()
 #include "pycore_pystate.h"       // _PyThreadState_GET()
 #include "pycore_tuple.h"         // _PyTuple_MaybeUntrack()
@@ -2367,6 +2368,12 @@ PyObject *
 _PyObject_GC_New(PyTypeObject *tp)
 {
     if (_PySOAC_CheckTypeAllocation(tp) < 0) return NULL;
+    if (_PySOAC_HasOrdinaryInstanceWrites(tp)) {
+        /* A supported custom tp_alloc may use this allocator directly. Finish
+         * its dictionary write policy before CREATE or a public getter can
+         * expose the storage. The shared allocator does not call tp_alloc. */
+        return _PyType_AllocNoTrackWithFree(tp, 0, PyObject_GC_Del);
+    }
     size_t presize = _PyType_PreHeaderSize(tp);
     size_t size = _PyObject_SIZE(tp);
     if (_PyType_HasFeature(tp, Py_TPFLAGS_INLINE_VALUES)) {
@@ -2393,6 +2400,9 @@ _PyObject_GC_NewVar(PyTypeObject *tp, Py_ssize_t nitems)
         PyErr_BadInternalCall();
         return NULL;
     }
+    if (_PySOAC_HasOrdinaryInstanceWrites(tp)) {
+        return (PyVarObject *)_PyType_AllocNoTrackWithFree(tp, nitems, PyObject_GC_Del);
+    }
     size_t presize = _PyType_PreHeaderSize(tp);
     size_t size = _PyObject_VAR_SIZE(tp, nitems);
     op = (PyVarObject *)gc_alloc(tp, size, presize);
@@ -2407,14 +2417,35 @@ PyObject *
 PyUnstable_Object_GC_NewWithExtraData(PyTypeObject *tp, size_t extra_size)
 {
     if (_PySOAC_CheckTypeAllocation(tp) < 0) return NULL;
+    int write_policy = _PySOAC_HasOrdinaryInstanceWrites(tp);
     size_t presize = _PyType_PreHeaderSize(tp);
-    size_t size = _PyObject_SIZE(tp) + extra_size;
+    size_t ordinary_size = _PyObject_SIZE(tp);
+    size_t allocated_extra = extra_size;
+    if (write_policy && (tp->tp_flags & Py_TPFLAGS_INLINE_VALUES) &&
+        allocated_extra < sizeof(PyDictValues)) {
+        /* This API's extra bytes begin at tp_basicsize and remain zeroed.
+         * Do not overlay them with a live inline table or move their offset.
+         * A zeroed, invalid header selects ordinary detached dictionary values. */
+        allocated_extra = sizeof(PyDictValues);
+    }
+    if (write_policy && allocated_extra > (size_t)PY_SSIZE_T_MAX - ordinary_size) {
+        return PyErr_NoMemory();
+    }
+    size_t size = ordinary_size + allocated_extra;
     PyObject *op = gc_alloc(tp, size, presize);
     if (op == NULL) {
         return NULL;
     }
     memset((char *)op + sizeof(PyObject), 0, size - sizeof(PyObject));
-    _PyObject_Init(op, tp);
+    if (write_policy) {
+        /* Extra-data allocations have their own literal tail layout. Keep the
+         * existing ordinary policy projection rather than adding a state tail. */
+        if (_PyObject_InitWithInstanceWritePolicy(
+                op, tp, 0, NULL, PyObject_GC_Del) < 0) return NULL;
+    }
+    else {
+        _PyObject_Init(op, tp);
+    }
     return op;
 }
 

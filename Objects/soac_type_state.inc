@@ -302,7 +302,8 @@ _PyObject_InitWithTypeState(PyObject *object, PyTypeObject *type, PyTypeState *s
  * dictionary can enforce writes. No ordinary read installs metadata. */
 int
 _PyObject_InitWithInstanceWritePolicy(PyObject *object, PyTypeObject *type,
-                                     Py_ssize_t nitems, PyTypeState *state)
+                                     Py_ssize_t nitems, PyTypeState *state,
+                                     freefunc free_allocation)
 {
     PyObject *previous_error = PyErr_GetRaisedException();
     Py_SET_TYPE(object, type);
@@ -338,7 +339,7 @@ _PyObject_InitWithInstanceWritePolicy(PyObject *object, PyTypeObject *type,
         _Py_ForgetReference(object);
 #endif
         _PyObject_ClearTypeState(object);
-        type->tp_free(object);
+        free_allocation(object);
         _Py_DECREF_TYPE(type);
         Py_XDECREF(previous_error);
         PyErr_SetRaisedException(error);

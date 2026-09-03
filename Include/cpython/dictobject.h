@@ -18,7 +18,7 @@ typedef struct {
      * Bits 0-7 are for dict watchers.
      * Bits 8-11 are for the watched mutation counter (used by tier2 optimization)
      * Bit 12 marks a permanently owned SOAC dictionary policy.
-     * Bit 13 records a noncanonical lookup alias in stable-prefix storage.
+     * Bit 13 is currently unused.
      * Bit 14 blocks first policy installation during an in-place split clear.
      * Bits 15-17 hold attachment-local mutation/terminal/installing state for optional
      * direct type-state dictionaries; the immutable state can be shared.

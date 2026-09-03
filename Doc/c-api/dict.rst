@@ -697,6 +697,10 @@ metadata. Participating instance allocation installs an ordinary dictionary
 with its write policy before CREATE observers can see the instance.
 Replacement and deletion prepare the next dictionary at the mutation boundary;
 failed preparation preserves the old binding and exception.
+Supported GC allocation APIs also install inherited dictionary policies when
+called by custom allocators. ``PyObject_Init`` and ``PyObject_InitVar`` remain
+header-only initializers of caller-owned memory; raw payload initialization or
+reset by that caller remains outside destination setter enforcement.
 
 For subtype-owned dictionary storage, live instance cleanup prepares an empty
 terminal protected dictionary before clearing slots or releasing the old

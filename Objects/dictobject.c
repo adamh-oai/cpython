@@ -9734,11 +9734,14 @@ _PyDict_InitInstanceWritePolicy(PyObject *obj, PyTypeState *state)
         ? CACHED_KEYS(type) : NULL;
     PyDictValues *values = NULL;
     int owned_values = 0;
-    if (type->tp_flags & Py_TPFLAGS_INLINE_VALUES) {
+    if ((type->tp_flags & Py_TPFLAGS_INLINE_VALUES) &&
+        _PyObject_InlineValues(obj)->valid) {
         values = _PyObject_InlineValues(obj);
         assert(values->valid == 1 && values->size == 0);
     }
     else if (keys != NULL) {
+        /* Explicit extra-data allocation leaves its literal tail zeroed.
+         * Invalid inline storage uses a separate ordinary split value array. */
         size_t size = shared_keys_usable_size(keys);
         values = new_values(size);
         if (values == NULL) {

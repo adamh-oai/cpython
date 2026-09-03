@@ -2539,6 +2539,15 @@ _PyType_NewManagedObject(PyTypeObject *type)
 PyObject *
 _PyType_AllocNoTrack(PyTypeObject *type, Py_ssize_t nitems)
 {
+    return _PyType_AllocNoTrackWithFree(type, nitems, type->tp_free);
+}
+
+/* Low-level allocation APIs share private write-policy initialization but
+ * retain the matching allocator's rollback free, even with custom tp_free. */
+PyObject *
+_PyType_AllocNoTrackWithFree(PyTypeObject *type, Py_ssize_t nitems,
+                            freefunc free_allocation)
+{
     if (_PySOAC_CheckTypeAllocation(type) < 0) return NULL;
     /* Generic allocation also runs with an existing C error indicator during
      * cleanup. NULL state means ordinary/legacy storage, not failure. Keep
@@ -2606,7 +2615,8 @@ _PyType_AllocNoTrack(PyTypeObject *type, Py_ssize_t nitems)
             }
 #endif
         }
-        if (_PyObject_InitWithInstanceWritePolicy(obj, type, nitems, storage) < 0) {
+        if (_PyObject_InitWithInstanceWritePolicy(
+                obj, type, nitems, storage, free_allocation) < 0) {
             return NULL;  /* initialization retired the unpublished allocation */
         }
         return obj;
@@ -9611,11 +9621,10 @@ type_ready_managed_dict(PyTypeObject *type)
 static int
 type_ready_post_checks(PyTypeObject *type)
 {
-    /* Inherited physical contracts apply to ordinary subclasses too. An
-     * unverified custom allocator cannot bypass pre-publication initialization
-     * or supply a different allocation/free pair. Reject before callbacks. */
-    if ((_PySOAC_HasOrdinaryInstanceWrites(type) ||
-         _PySOAC_UsesObjectSlotPolicy(type)) &&
+    /* Native slot layouts require the existing verified allocation family.
+     * Ordinary dictionary contracts also support custom allocators through
+     * the public allocation APIs, which install their write policies. */
+    if (_PySOAC_UsesObjectSlotPolicy(type) &&
         (type->tp_alloc != PyType_GenericAlloc ||
          type->tp_free != (_PyType_IS_GC(type) ? PyObject_GC_Del : PyObject_Free))) {
         PyErr_SetString(soac_type_mutation_error(),

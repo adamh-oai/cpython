@@ -86,7 +86,7 @@ extern int _PyObject_TypeStateTraverse(PyObject *, visitproc, void *);
 extern void _PyObject_ClearTypeState(PyObject *);
 extern void _PyObject_InitWithTypeState(PyObject *, PyTypeObject *, PyTypeState *);
 extern int _PyObject_InitWithInstanceWritePolicy(
-    PyObject *, PyTypeObject *, Py_ssize_t, PyTypeState *);
+    PyObject *, PyTypeObject *, Py_ssize_t, PyTypeState *, freefunc);
 extern int _PyTypeState_AllocationSize(PyTypeObject *, size_t, size_t *);
 extern int _PyTypeState_BindSpec(PyTypeObject *, const PyTypeStateSpecV1 *, PyTypeState *);
 extern int _PyTypeState_CheckInstanceContracts(PyTypeState *);
