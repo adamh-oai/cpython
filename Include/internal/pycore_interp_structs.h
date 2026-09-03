@@ -888,8 +888,6 @@ struct _is {
         uint64_t descriptor_birth_counter;  /* Reserved once; never reused. */
         PyObject *mutation_error;
         PyObject *runtime_unavailable_error;
-        PySoacAnnotationReplayResolver annotation_replay_resolver;
-        int annotation_replay_closed;
         PySoacInterpreterCallbacksV4 interpreter_callbacks;
         uint64_t interpreter_activation_counter;  /* Reserved once; never reused. */
         int interpreter_closed;

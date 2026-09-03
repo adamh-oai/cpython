@@ -44,8 +44,8 @@ typedef struct {
  * this dictionary.  SET means a currently absent binding; SET_EXISTING means
  * an existing binding or an earlier write in the same staged bulk input.
  * VALIDATE_INITIAL checks existing contents before installation succeeds.
- * provenance is NULL for mapping writes.  Private CACHE_INSERT/CACHE_REPLACE
- * carry their provider; ATTRIBUTE_SET/ATTRIBUTE_SET_EXISTING carry the original
+ * provenance is NULL for mapping writes. ATTRIBUTE_SET/ATTRIBUTE_SET_EXISTING
+ * carry the original
  * Unicode attribute name, separately from the once-resolved canonical key.
  * CLASS_MEMBER_INSERT/CLASS_MEMBER_REPLACE carry one opaque native dataclass
  * member operation. They are never emitted by mapping or attribute writes;
@@ -63,8 +63,6 @@ enum {
     PyDict_SOAC_CLEAR = 3,
     PyDict_SOAC_TERMINAL_TEARDOWN = 4,
     PyDict_SOAC_SET_EXISTING = 5,
-    PyDict_SOAC_CACHE_INSERT = 6,
-    PyDict_SOAC_CACHE_REPLACE = 7,
     PyDict_SOAC_ATTRIBUTE_SET = 8,
     PyDict_SOAC_ATTRIBUTE_SET_EXISTING = 9,
     PyDict_SOAC_CLASS_MEMBER_INSERT = 10,

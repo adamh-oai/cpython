@@ -19,7 +19,7 @@
 #include "pycore_opcode_utils.h"  // RESUME_AT_FUNC_START
 #include "pycore_pylifecycle.h"   // _PyOS_URandomNonblock()
 #include "pycore_runtime.h"       // _Py_ID()
-#include "pycore_soac_type.h"    // physical slot write/read policy
+#include "pycore_soac_type.h"    // physical slot write policy
 #include "pycore_type_state.h"   // actual allocated storage-state marker
 #include "pycore_unicodeobject.h" // _PyUnicodeASCIIIter_Type
 
@@ -623,15 +623,6 @@ specialize_dict_access_inline(
     }
     assert(index >= 0);
     assert(_PyObject_InlineValues(owner)->valid);
-    if (base_op == LOAD_ATTR &&
-        (type->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) &&
-        FT_ATOMIC_LOAD_PTR_ACQUIRE(
-            _PyObject_InlineValues(owner)->values[index]) == NULL) {
-        /* A shared key alone cannot make this instance-value cache hit.
-         * Keep ordinary backoff until this receiver has an actual value. */
-        SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_ATTR_NOT_IN_DICT);
-        return 0;
-    }
     char *value_addr = (char *)&_PyObject_InlineValues(owner)->values[index];
     Py_ssize_t offset = value_addr - (char *)owner;
     if (offset != (uint16_t)offset) {
@@ -846,13 +837,6 @@ do_specialize_instance_load_attr(PyObject* owner, _Py_CODEUNIT* instr, PyObject*
             PyMemberDescrObject *member = (PyMemberDescrObject *)descr;
             struct PyMemberDef *dmem = member->d_member;
             Py_ssize_t offset = dmem->offset;
-            /* This offset identifies the synthetic __class__ getset cache,
-             * whose reads do not consult member-storage metadata. Keep an
-             * actual native member alias on its ordinary checked path. */
-            if (offset == offsetof(PyObject, ob_type)) {
-                SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_ATTR_OBJECT_SLOT);
-                return -1;
-            }
             if (!PyObject_TypeCheck(owner, member->d_common.d_type)) {
                 SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_EXPECTED_ERROR);
                 return -1;
@@ -869,23 +853,8 @@ do_specialize_instance_load_attr(PyObject* owner, _Py_CODEUNIT* instr, PyObject*
                 SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_OUT_OF_RANGE);
                 return -1;
             }
-            /* Only fixed instance storage has the same representation for
-             * every receiver covered by the type-version guard. A native
-             * member beyond basicsize can overlap a per-instance trailer. */
-            if (offset > Py_TYPE(owner)->tp_basicsize - (Py_ssize_t)sizeof(PyObject *)) {
-                SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_ATTR_OBJECT_SLOT);
-                return -1;
-            }
             assert(dmem->type == Py_T_OBJECT_EX || dmem->type == _Py_T_OBJECT);
             assert(offset > 0);
-            /* Prove the actual member representation once. The type-version
-             * guard preserves this descriptor/layout decision; a cache hit
-             * only needs the independent native metadata-liveness check. */
-            if (_PySOAC_CheckObjectSlotAccess(owner, dmem) < 0) {
-                PyErr_Clear();
-                SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_ATTR_OBJECT_SLOT);
-                return -1;
-            }
             cache->index = (uint16_t)offset;
             write_u32(cache->version, tp_version);
             specialize(instr, LOAD_ATTR_SLOT);
@@ -987,23 +956,6 @@ specialize_instance_load_attr(PyObject* owner, _Py_CODEUNIT* instr, PyObject* na
     PyObject *descr = NULL;
     unsigned int tp_version = 0;
     PyTypeObject *type = Py_TYPE(owner);
-    if (type->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) {
-        /* Generic checked lookup ignores instance shadows of protected
-         * methods/defaults. Never select an instance-value cache for one.
-         * Keep the stock absent-key proof for class-descriptor caches. */
-        if (!PyUnicode_CheckExact(name) || !_PySOAC_TypeReadCacheReady(type)) {
-            SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_OVERRIDDEN);
-            return -1;
-        }
-        if (shadow) {
-            int protected = _PySOAC_ProtectedName(type, name);
-            if (protected != 0) {
-                if (protected < 0) PyErr_Clear();
-                SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_OVERRIDDEN);
-                return -1;
-            }
-        }
-    }
     DescriptorClassification kind = analyze_descriptor_load(type, name, &descr, &tp_version);
     int result = do_specialize_instance_load_attr(owner, instr, name, shadow, shared_keys_version, kind, descr, tp_version);
     Py_XDECREF(descr);
@@ -1019,13 +971,7 @@ _Py_Specialize_LoadAttr(_PyStackRef owner_st, _Py_CODEUNIT *instr, PyObject *nam
     assert(_PyOpcode_Caches[LOAD_ATTR] == INLINE_CACHE_ENTRIES_LOAD_ATTR);
     PyTypeObject *type = Py_TYPE(owner);
     bool fail;
-    if ((type->tp_flags & Py_TPFLAGS_SOAC_CONTRACT) &&
-        (type->tp_getattro != PyObject_GenericGetAttr || PyType_Check(owner) ||
-         !_PySOAC_TypeReadCacheReady(type))) {
-        SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_OVERRIDDEN);
-        fail = true;
-    }
-    else if (!_PyType_IsReady(type)) {
+    if (!_PyType_IsReady(type)) {
         // We *might* not really need this check, but we inherited it from
         // PyObject_GenericGetAttr and friends... and this way we still do the
         // right thing if someone forgets to call PyType_Ready(type):
@@ -1383,12 +1329,7 @@ specialize_load_global_lock_held(
         goto fail;
     }
     PyDictKeysObject * globals_keys = ((PyDictObject *)globals)->ma_keys;
-    bool indexed_globals = false;
-#ifndef Py_GIL_DISABLED
-    indexed_globals = globals_keys->dk_kind == DICT_KEYS_INDEXED_UNICODE &&
-        ((PyDictObject *)globals)->ma_values != NULL;
-#endif
-    if (globals_keys->dk_kind != DICT_KEYS_UNICODE && !indexed_globals) {
+    if (globals_keys->dk_kind != DICT_KEYS_UNICODE) {
         SPECIALIZATION_FAIL(LOAD_GLOBAL, SPEC_FAIL_LOAD_GLOBAL_NON_STRING_OR_SPLIT);
         goto fail;
     }
@@ -1423,8 +1364,7 @@ specialize_load_global_lock_held(
 #endif
         cache->index = (uint16_t)index;
         cache->module_keys_version = (uint16_t)keys_version;
-        specialize(instr, indexed_globals ? LOAD_GLOBAL_MODULE_INDEXED
-                                          : LOAD_GLOBAL_MODULE);
+        specialize(instr, LOAD_GLOBAL_MODULE);
         return;
     }
     if (!PyDict_CheckExact(builtins)) {
@@ -1468,8 +1408,7 @@ specialize_load_global_lock_held(
     cache->index = (uint16_t)index;
     cache->module_keys_version = (uint16_t)globals_version;
     cache->builtin_keys_version = (uint16_t)builtins_version;
-    specialize(instr, indexed_globals ? LOAD_GLOBAL_BUILTIN_INDEXED
-                                      : LOAD_GLOBAL_BUILTIN);
+    specialize(instr, LOAD_GLOBAL_BUILTIN);
     return;
 fail:
     unspecialize(instr);

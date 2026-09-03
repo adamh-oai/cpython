@@ -696,8 +696,8 @@ class TestOrdinaryInstancePolicyGuard(unittest.TestCase):
             """))
 
 
-class TestSoacTypeReadPolicyGuard(unittest.TestCase):
-    """Native policy remains checked when the optimizer proves a type version."""
+class TestSoacWritePolicyGuards(unittest.TestCase):
+    """Write policy survives type facts without changing native read macros."""
 
     @classmethod
     def setUpClass(cls):
@@ -709,27 +709,21 @@ class TestSoacTypeReadPolicyGuard(unittest.TestCase):
             os.path.join(test_tools.basepath, "Python", "optimizer_bytecodes.c")
         ])
 
-    def test_actual_type_version_macros_keep_their_policy_guard(self):
-        read_guard = "_GUARD_SOAC_TYPE_READ"
+    def test_native_reads_have_no_soac_policy_guard(self):
+        for instruction in self.analysis.instructions.values():
+            if not instruction.name.startswith(("LOAD_", "TO_BOOL")):
+                continue
+            with self.subTest(instruction=instruction.name):
+                self.assertFalse(any(
+                    "SOAC" in part.name
+                    for part in instruction.parts if isinstance(part, analyzer.Uop)
+                ))
+
+    def test_type_version_store_macros_keep_their_policy_guard(self):
         deny_guard = "_GUARD_NO_SOAC_TYPE"
         expected = {
-            "LOAD_ATTR_INSTANCE_VALUE": (read_guard, "_LOAD_ATTR_INSTANCE_VALUE"),
-            "LOAD_ATTR_WITH_HINT": (read_guard, "_LOAD_ATTR_WITH_HINT"),
-            "LOAD_ATTR_PROPERTY": (read_guard, "_LOAD_ATTR_PROPERTY_FRAME"),
-            "LOAD_ATTR_METHOD_WITH_VALUES": (read_guard, "_LOAD_ATTR_METHOD_WITH_VALUES"),
-            "LOAD_ATTR_METHOD_NO_DICT": (read_guard, "_LOAD_ATTR_METHOD_NO_DICT"),
-            "LOAD_ATTR_NONDESCRIPTOR_WITH_VALUES": (
-                read_guard, "_LOAD_ATTR_NONDESCRIPTOR_WITH_VALUES",
-            ),
-            "LOAD_ATTR_NONDESCRIPTOR_NO_DICT": (
-                read_guard, "_LOAD_ATTR_NONDESCRIPTOR_NO_DICT",
-            ),
-            "LOAD_ATTR_METHOD_LAZY_DICT": (read_guard, "_LOAD_ATTR_METHOD_LAZY_DICT"),
-            "TO_BOOL_ALWAYS_TRUE": (deny_guard, "_REPLACE_WITH_TRUE"),
-            "LOAD_ATTR_SLOT": (deny_guard, "_LOAD_ATTR_SLOT"),
-            "LOAD_ATTR_CLASS_WITH_METACLASS_CHECK": (deny_guard, "_CHECK_ATTR_CLASS"),
-            "STORE_ATTR_WITH_HINT": (deny_guard, "_STORE_ATTR_WITH_HINT"),
-            "STORE_ATTR_SLOT": (deny_guard, "_STORE_ATTR_SLOT"),
+            "STORE_ATTR_WITH_HINT": "_STORE_ATTR_WITH_HINT",
+            "STORE_ATTR_SLOT": "_STORE_ATTR_SLOT",
         }
         actual = set()
         for instruction in self.analysis.instructions.values():
@@ -738,14 +732,12 @@ class TestSoacTypeReadPolicyGuard(unittest.TestCase):
                 for part in instruction.parts if isinstance(part, analyzer.Uop)
             ]
             names = [part.name for part in parts]
-            if not {read_guard, deny_guard, "_GUARD_TYPE_VERSION"}.intersection(names):
+            if deny_guard not in names:
                 continue
             with self.subTest(instruction=instruction.name):
-                self.assertIn(instruction.name, expected, "new cache needs a policy audit")
-                guard, consumer = expected[instruction.name]
-                other_guard = deny_guard if guard == read_guard else read_guard
-                self.assertEqual(names.count(guard), 1)
-                self.assertNotIn(other_guard, names)
+                self.assertIn(instruction.name, expected, "new write cache needs a policy audit")
+                consumer = expected[instruction.name]
+                self.assertEqual(names.count(deny_guard), 1)
                 self.assertEqual(names.count("_RECORD_TOS_TYPE"), 1)
                 self.assertEqual(names.count("_GUARD_TYPE_VERSION"), 1)
                 self.assertEqual(names.count(consumer), 1)
@@ -755,17 +747,17 @@ class TestSoacTypeReadPolicyGuard(unittest.TestCase):
                 # type-version model reads its immediately preceding record.
                 self.assertEqual(record, 0)
                 self.assertEqual(version, record + 1)
-                self.assertLess(version, names.index(guard))
-                self.assertLess(names.index(guard), names.index(consumer))
+                self.assertLess(version, names.index(deny_guard))
+                self.assertLess(names.index(deny_guard), names.index(consumer))
                 # The foldable type fact precedes policy, but nothing may
                 # call Python or consume the owner before the actual check.
                 for part in parts[:names.index(consumer)]:
                     self.assertFalse(part.properties.escapes, part.name)
                 actual.add(instruction.name)
-        self.assertEqual(actual, set(expected), "exercise every existing type-version barrier")
+        self.assertEqual(actual, set(expected), "exercise every guarded type-version store")
 
     def test_native_policy_guards_preserve_owner_and_only_side_exit(self):
-        for name in ("_GUARD_SOAC_TYPE_READ", "_GUARD_NO_SOAC_TYPE"):
+        for name in ("_GUARD_NO_SOAC_TYPE",):
             with self.subTest(guard=name):
                 guard = self.analysis.uops[name]
                 self.assertTrue(guard.properties.side_exit)
@@ -780,7 +772,7 @@ class TestSoacTypeReadPolicyGuard(unittest.TestCase):
                 self.assertTrue(guard.stack.outputs[0].peek)
 
     def test_optimizer_retains_native_policy_guards_without_replacing_owner(self):
-        for name in ("_GUARD_SOAC_TYPE_READ", "_GUARD_NO_SOAC_TYPE"):
+        for name in ("_GUARD_NO_SOAC_TYPE",):
             with self.subTest(guard=name):
                 self.assertIn(name, self.abstract.uops)
                 model = self.abstract.uops[name]

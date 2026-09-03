@@ -2134,7 +2134,8 @@ type_get_annotate(PyObject *tp, void *Py_UNUSED(closure))
     }
     else {
         annotate = Py_None;
-        int result = _PySOAC_PublishAnnotationCache(type, &_Py_ID(__annotate_func__), annotate);
+        int result = _PyDict_SetItemForLazyAnnotation(
+            dict, &_Py_ID(__annotate_func__), annotate);
         if (result < 0) {
             Py_DECREF(dict);
             return NULL;
@@ -2244,8 +2245,8 @@ type_get_annotations(PyObject *tp, void *Py_UNUSED(closure))
         }
         Py_DECREF(annotate);
         if (annotations) {
-            int result = _PySOAC_PublishAnnotationCache(
-                    type, &_Py_ID(__annotations_cache__), annotations);
+            int result = _PyDict_SetItemForLazyAnnotation(
+                    dict, &_Py_ID(__annotations_cache__), annotations);
             if (result) {
                 Py_CLEAR(annotations);
             } else {
@@ -2592,18 +2593,22 @@ _PyType_AllocNoTrack(PyTypeObject *type, Py_ssize_t nitems)
     // initialized by _PyObject_Init[Var]().
     memset((char *)obj + sizeof(PyObject), 0, size - sizeof(PyObject));
 
-    if (storage != NULL) {
-        /* Complete inline payload and its frozen extent before reference
-         * creation can notify a tracer or expose a stateful participant. */
+    if (storage != NULL || _PySOAC_HasOrdinaryInstanceWrites(type)) {
+        /* Complete inline payload, frozen extent, and write policy before
+         * reference creation can expose the participant or its dictionary. */
         Py_SET_TYPE(obj, type);
         if (type->tp_flags & Py_TPFLAGS_INLINE_VALUES) {
             _PyObject_InitInlineValues(obj, type);
 #if _Py_TYPE_STATE_SUPPORTED
-            assert(inline_capacity > 0 && inline_capacity <= SHARED_KEYS_MAX_SIZE);
-            _PyObject_InlineValues(obj)->soac_allocated_capacity = (uint8_t)inline_capacity;
+            if (storage != NULL) {
+                assert(inline_capacity > 0 && inline_capacity <= SHARED_KEYS_MAX_SIZE);
+                _PyObject_InlineValues(obj)->soac_allocated_capacity = (uint8_t)inline_capacity;
+            }
 #endif
         }
-        _PyObject_InitWithTypeState(obj, type, storage);
+        if (_PyObject_InitWithInstanceWritePolicy(obj, type, nitems, storage) < 0) {
+            return NULL;  /* initialization retired the unpublished allocation */
+        }
         return obj;
     }
     if (type->tp_itemsize == 0) {
@@ -2635,21 +2640,6 @@ PyType_GenericAlloc(PyTypeObject *type, Py_ssize_t nitems)
         return NULL;
     }
 
-    /* An owned instance dictionary is installed before any publication or
-     * user callback. The helper also records the ordinary instance's split
-     * allocation capacity, so explicit dict.clear() keeps stock release order.
-     * It leaves the zeroed object untouched on failure. */
-    if (_PyDict_InitSoacInstanceStorage(obj) < 0) {
-        assert(_PySOAC_UsesInstanceDictionaryPolicy(type));
-        assert(Py_REFCNT(obj) == 1);
-        /* Ready-time admission restricts tp_free to a native allocation mate.
-         * Do not invoke tp_dealloc: __del__ must not see a failed allocation.
-         * The specialized decref preserves debug/reftracer bookkeeping. */
-        _PyObject_ClearTypeState(obj);
-        _Py_DECREF_SPECIALIZED(obj, (destructor)type->tp_free);
-        _Py_DECREF_TYPE(type);
-        return NULL;
-    }
     if (_PyType_IS_GC(type)) {
         _PyObject_GC_TRACK(obj);
     }
@@ -2773,10 +2763,26 @@ subtype_clear(PyObject *self)
 {
     PyTypeObject *type, *base;
     inquiry baseclear;
+    PyObject *empty_dictionary = NULL;
+
+    /* Prepare a protected empty dictionary before any slot destructor runs.
+       Allocation failure must not partially clear this receiver. */
+    type = Py_TYPE(self);
+    base = type;
+    while ((baseclear = base->tp_clear) == subtype_clear) {
+        base = base->tp_base;
+        assert(base);
+    }
+    int owns_dictionary = type->tp_flags & Py_TPFLAGS_MANAGED_DICT
+        ? !(base->tp_flags & Py_TPFLAGS_MANAGED_DICT)
+        : type->tp_dictoffset != base->tp_dictoffset;
+    if (owns_dictionary &&
+        _PyObject_PrepareInstanceDictClear(self, &empty_dictionary) < 0) {
+        return -1;
+    }
 
     /* Find the nearest base with a different tp_clear
        and clear slots while we're at it */
-    type = Py_TYPE(self);
     base = type;
     while ((baseclear = base->tp_clear) == subtype_clear) {
         if (Py_SIZE(base))
@@ -2787,9 +2793,12 @@ subtype_clear(PyObject *self)
 
     /* Clear the instance dict (if any), to break cycles involving only
        __dict__ slots (as in the case 'self.__dict__ is self'). */
-    if (type->tp_flags & Py_TPFLAGS_MANAGED_DICT) {
+    if (empty_dictionary != NULL) {
+        _PyObject_CommitInstanceDictClear(self, empty_dictionary);
+    }
+    else if (type->tp_flags & Py_TPFLAGS_MANAGED_DICT) {
         if ((base->tp_flags & Py_TPFLAGS_MANAGED_DICT) == 0) {
-            PyObject_ClearManagedDict(self);
+            _PyObject_ClearManagedDictForDealloc(self);
         }
         else {
             assert((base->tp_flags & Py_TPFLAGS_INLINE_VALUES) ==
@@ -2937,7 +2946,7 @@ subtype_dealloc(PyObject *self)
 
     /* If we added a dict, DECREF it, or free inline values. */
     if (type->tp_flags & Py_TPFLAGS_MANAGED_DICT) {
-        PyObject_ClearManagedDict(self);
+        _PyObject_ClearManagedDictForDealloc(self);
     }
     else if (type->tp_dictoffset && !base->tp_dictoffset) {
         PyObject **dictptr = _PyObject_ComputedDictPointer(self);
@@ -9593,7 +9602,7 @@ type_ready_managed_dict(PyTypeObject *type)
             return -1;
         }
     }
-    if (type->tp_itemsize == 0 && !_PySOAC_UsesInstanceDictionaryPolicy(type)) {
+    if (type->tp_itemsize == 0) {
         type_add_flags(type, Py_TPFLAGS_INLINE_VALUES);
     }
     return 0;
@@ -9605,7 +9614,7 @@ type_ready_post_checks(PyTypeObject *type)
     /* Inherited physical contracts apply to ordinary subclasses too. An
      * unverified custom allocator cannot bypass pre-publication initialization
      * or supply a different allocation/free pair. Reject before callbacks. */
-    if ((_PySOAC_UsesInstanceDictionaryPolicy(type) ||
+    if ((_PySOAC_HasOrdinaryInstanceWrites(type) ||
          _PySOAC_UsesObjectSlotPolicy(type)) &&
         (type->tp_alloc != PyType_GenericAlloc ||
          type->tp_free != (_PyType_IS_GC(type) ? PyObject_GC_Del : PyObject_Free))) {

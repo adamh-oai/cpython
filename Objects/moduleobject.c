@@ -1503,10 +1503,6 @@ static PyMethodDef module_methods[] = {
 static PyObject *
 module_get_dict(PyModuleObject *m)
 {
-    if (_PyDict_HasSoacBindingPolicy(m->md_dict)) {
-        /* A Python-visible descriptor is never namespace authority. */
-        return Py_NewRef(m->md_dict);
-    }
     PyObject *dict = PyObject_GetAttr((PyObject *)m, &_Py_ID(__dict__));
     if (dict == NULL) {
         return NULL;
@@ -1517,6 +1513,29 @@ module_get_dict(PyModuleObject *m)
         return NULL;
     }
     return dict;
+}
+
+static PyObject *
+module_get_dict_for_write(PyModuleObject *m)
+{
+    if (_PyDict_HasSoacBindingPolicy(m->md_dict)) {
+        /* External setters must protect the actual namespace even when an
+         * ordinary __dict__ descriptor returns another dictionary. */
+        return Py_NewRef(m->md_dict);
+    }
+    return module_get_dict(m);
+}
+
+static int
+module_set_lazy_annotation(PyModuleObject *m, PyObject *dict,
+                           PyObject *key, PyObject *value)
+{
+    /* A custom __dict__ descriptor may select an unrelated protected
+     * dictionary. Only the actual module namespace owns these lazy caches. */
+    if (dict == m->md_dict) {
+        return _PyDict_SetItemForLazyAnnotation(dict, key, value);
+    }
+    return PyDict_SetItem(dict, key, value);
 }
 
 static PyObject *
@@ -1532,7 +1551,7 @@ module_get_annotate(PyObject *self, void *Py_UNUSED(ignored))
     PyObject *annotate;
     if (PyDict_GetItemRef(dict, &_Py_ID(__annotate__), &annotate) == 0) {
         annotate = Py_None;
-        if (PyDict_SetItem(dict, &_Py_ID(__annotate__), annotate) == -1) {
+        if (module_set_lazy_annotation(m, dict, &_Py_ID(__annotate__), annotate) == -1) {
             Py_CLEAR(annotate);
         }
     }
@@ -1549,7 +1568,7 @@ module_set_annotate(PyObject *self, PyObject *value, void *Py_UNUSED(ignored))
         return -1;
     }
 
-    PyObject *dict = module_get_dict(m);
+    PyObject *dict = module_get_dict_for_write(m);
     if (dict == NULL) {
         return -1;
     }
@@ -1641,8 +1660,8 @@ module_get_annotations(PyObject *self, void *Py_UNUSED(ignored))
         Py_XDECREF(annotate);
         // Do not cache annotations if the module is still initializing
         if (annotations && !is_initializing) {
-            int result = PyDict_SetItem(
-                    dict, &_Py_ID(__annotations__), annotations);
+            int result = module_set_lazy_annotation(
+                    m, dict, &_Py_ID(__annotations__), annotations);
             if (result) {
                 Py_CLEAR(annotations);
             }
@@ -1657,7 +1676,7 @@ module_set_annotations(PyObject *self, PyObject *value, void *Py_UNUSED(ignored)
 {
     PyModuleObject *m = _PyModule_CAST(self);
 
-    PyObject *dict = module_get_dict(m);
+    PyObject *dict = module_get_dict_for_write(m);
     if (dict == NULL) {
         return -1;
     }

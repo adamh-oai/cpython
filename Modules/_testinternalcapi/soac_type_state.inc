@@ -2,97 +2,6 @@
  * or grant strict module/function authority. Included after the ordinary field
  * fixture so both representations use exactly its predicates and admission. */
 
-typedef struct {
-    PyObject *recipient;       /* wrapper-owned arguments, no candidate escape */
-    PyObject *sibling;
-    PyObject *primary;
-    int attempts;
-    int rejected;
-} SoacTestTypeStateEscape;
-
-static int
-soac_test_type_state_private_write(PyObject *owner, PyObject *dictionary,
-                                   PyObject *value, int operation)
-{
-    if (!_PyObject_HasTypeStateSlot(dictionary) ||
-        !(((PyDictObject *)dictionary)->_ma_watcher_tag & _Py_DICT_TYPE_STATE_INSTALLING) ||
-        (operation != PyDict_SOAC_ATTRIBUTE_SET && operation != PyDict_SOAC_ATTRIBUTE_SET_EXISTING)) {
-        return 0;
-    }
-    PyObject *observers = soac_test_ordinary_observers(owner);
-    if (observers == NULL) return -1;
-    PyObject *capsule = PyList_GET_ITEM(observers, 1);
-    if (!PyCapsule_IsValid(capsule, "test.soac.type_state.private_escape")) return 0;
-    SoacTestTypeStateEscape *probe = PyCapsule_GetPointer(capsule, "test.soac.type_state.private_escape");
-    if (probe == NULL) return -1;
-    if (probe->attempts != 0) return 0;  /* one explicit probe, not a validator-count contract */
-    ++probe->attempts;
-    /* Exercise the actual callback's C dictionary argument, without exposing
-     * or retaining the private header in Python. Even an ordinary recipient
-     * must reject this while the original private write is suspended. */
-    int status = PyObject_GenericSetDict(probe->recipient, dictionary, NULL);
-    if (status != -1 || !PyErr_ExceptionMatches(PyExc_TypeError)) {
-        PyErr_SetString(PyExc_AssertionError, "private direct dictionary escaped its installation");
-        return -1;
-    }
-    PyErr_Clear();
-    ++probe->rejected;
-    PyObject *name = PyTuple_GET_ITEM(PyTuple_GET_ITEM(owner, 0), 0);
-    if (PyDict_SetItem(probe->sibling, name, value) < 0) return -1;
-    if (probe->primary != Py_None) {
-        PyErr_SetRaisedException(Py_NewRef(probe->primary));
-        return -1;
-    }
-    return 0;
-}
-
-static PyObject *
-probe_soac_type_state_private_escape(PyObject *self, PyObject *args)
-{
-    PyObject *instance, *recipient, *sibling, *name, *value, *primary;
-    if (!PyArg_ParseTuple(args, "OOOOOO:probe_soac_type_state_private_escape",
-                         &instance, &recipient, &sibling, &name, &value, &primary)) return NULL;
-    if (!_PyObject_HasTypeStateSlot(instance) || !PyDict_CheckExact(sibling) ||
-        !PyUnicode_Check(name) || PyUnicode_CheckExact(name) || !PyLong_CheckExact(value) ||
-        (primary != Py_None && !PyExceptionInstance_Check(primary))) {
-        PyErr_SetString(PyExc_TypeError, "private escape probe requires stateful storage, a subclass name, and native operands");
-        return NULL;
-    }
-    PyObject *owner = soac_test_ordinary_owner((PyObject *)Py_TYPE(instance));
-    if (owner == NULL) return NULL;
-    PyObject *observers = PyTuple_GET_ITEM(owner, 2);
-    if (PyList_GET_ITEM(observers, 1) != Py_None) {
-        PyErr_SetString(PyExc_TypeError, "private escape probe is already armed");
-        return NULL;
-    }
-    PyObject *original = PyObject_GenericGetDict(recipient, NULL);
-    if (original == NULL) return NULL;
-    SoacTestTypeStateEscape probe = {.recipient = recipient, .sibling = sibling, .primary = primary};
-    PyObject *capsule = PyCapsule_New(&probe, "test.soac.type_state.private_escape", NULL);
-    if (capsule == NULL) {
-        Py_DECREF(original);
-        return NULL;
-    }
-    PyObject *old = PyList_GET_ITEM(observers, 1);
-    PyList_SET_ITEM(observers, 1, capsule);
-    Py_DECREF(old);
-    int status = PyObject_GenericSetAttr(instance, name, value);
-    PyObject *error = PyErr_GetRaisedException();
-    PyList_SET_ITEM(observers, 1, Py_NewRef(Py_None));
-    Py_DECREF(capsule);
-    PyObject *after = PyObject_GenericGetDict(recipient, NULL);
-    int unchanged = after == original;
-    Py_XDECREF(after);
-    Py_DECREF(original);
-    if (probe.attempts != 1 || probe.rejected != 1 || !unchanged ||
-        (status == 0) != (error == NULL) || PyErr_Occurred()) {
-        Py_XDECREF(error);
-        PyErr_SetString(PyExc_AssertionError, "private dictionary callback did not exercise one rejected escape");
-        return NULL;
-    }
-    return error == NULL ? Py_NewRef(Py_None) : error;
-}
-
 static int
 soac_test_type_state_factory(PyObject *owner, PyObject *actual_type,
                              PyTypeState **out)
@@ -113,12 +22,13 @@ soac_test_type_state_factory(PyObject *owner, PyObject *actual_type,
             return -1;
         }
     }
+    int checked = PyTuple_GET_SIZE(PyTuple_GET_ITEM(owner, 0)) != 0;
     PyTypeStateSpecV1 spec = {
         .abi_version = Py_TYPE_STATE_ABI_V1,
         .struct_size = sizeof(spec),
-        .dictionary_owner = owner,
-        .validate_dictionary = soac_test_ordinary_instance_policy,
-        .validate_inline = soac_test_ordinary_field,
+        .dictionary_owner = checked ? owner : NULL,
+        .validate_dictionary = checked ? soac_test_ordinary_instance_policy : NULL,
+        .validate_inline = checked ? soac_test_ordinary_field : NULL,
     };
     *out = PyTypeState_NewV1(actual_type, &spec, sizeof(spec));
     return *out == NULL ? -1 : 0;
@@ -179,7 +89,7 @@ soac_test_slot_state_bind(PyObject *owner, PyObject *actual_type)
 }
 
 static int
-soac_test_slot_state_final(PyObject *owner, PyObject *type, const PySoacTypeContractSpecV4 *contract)
+soac_test_slot_state_final(PyObject *owner, PyObject *type, const PySoacTypeContractSpecV5 *contract)
 {
     PySoacTypeConstructionInfoV1 info;
     if (PyType_GetSoacConstructionInfoV1(type, &info, sizeof(info)) != 1 ||
@@ -190,7 +100,7 @@ soac_test_slot_state_final(PyObject *owner, PyObject *type, const PySoacTypeCont
         contract->final_methods != PyTuple_GET_ITEM(owner, 1) ||
         contract->object_slot_fields != PyTuple_GET_ITEM(owner, 0) ||
         contract->check_instance_write != soac_test_ordinary_inline_write ||
-        contract->new_instance_dict != NULL || contract->prepare_instance_dictionary_policy != NULL) {
+        contract->prepare_instance_dictionary_policy != NULL) {
         if (!PyErr_Occurred()) PyErr_SetString(PyExc_TypeError, "slot fixture final policy identity changed");
         return -1;
     }
@@ -232,7 +142,7 @@ slot_new_soac_type_state_type(PyObject *self, PyObject *args)
     };
     PyObject *handle = PyType_NewSoacConstructionHandle(&construction);
     PyObject *type = handle == NULL ? NULL : PyType_FromSoacConstructionHandle(handle, namespace_function);
-    PySoacTypeContractSpecV4 contract = {
+    PySoacTypeContractSpecV5 contract = {
         .dictionary_mode = Py_SOAC_INSTANCE_DICT_NONE,
         .fields = empty, .protected_names = empty, .final_methods = empty,
         .object_slot_fields = fields, .check_instance_write = soac_test_ordinary_inline_write,
@@ -310,16 +220,24 @@ typedef struct {
     Py_ssize_t used;
     Py_ssize_t requests;
     Py_ssize_t fail_at;
+    int memory_domain;
     int armed;
     int overflow;
 } SoacTestAllocationCapture;
+
+static PyMemAllocatorDomain
+soac_test_allocation_domain(SoacTestAllocationCapture *capture)
+{
+    return capture->memory_domain == 0 ? PYMEM_DOMAIN_OBJ :
+           capture->memory_domain == 1 ? PYMEM_DOMAIN_MEM : PYMEM_DOMAIN_RAW;
+}
 
 static void
 soac_test_allocation_restore(SoacTestAllocationCapture *capture)
 {
     if (capture->armed) {
         capture->armed = 0;
-        PyMem_SetAllocator(PYMEM_DOMAIN_OBJ, &capture->previous);
+        PyMem_SetAllocator(soac_test_allocation_domain(capture), &capture->previous);
     }
 }
 
@@ -446,6 +364,57 @@ capture_soac_type_state_allocation(PyObject *self, PyObject *args)
 }
 
 static PyObject *
+soac_instance_dict_clear_probe(PyObject *self, PyObject *args)
+{
+#if !_Py_TYPE_STATE_SUPPORTED
+    PyErr_SetString(PyExc_NotImplementedError, "clear probe requires the supported GIL layout");
+    return NULL;
+#else
+    PyObject *instance, *primary = Py_None;
+    int managed_api = 0, memory_domain = 0;
+    Py_ssize_t fail_at = 0;
+    if (!PyArg_ParseTuple(args, "O|pOni:soac_instance_dict_clear_probe",
+                          &instance, &managed_api, &primary, &fail_at,
+                          &memory_domain)) return NULL;
+    inquiry clear = Py_TYPE(instance)->tp_clear;
+    if ((!managed_api && clear == NULL) ||
+        (managed_api && !(Py_TYPE(instance)->tp_flags & Py_TPFLAGS_MANAGED_DICT)) ||
+        (primary != Py_None && !PyExceptionInstance_Check(primary)) || fail_at < 0 ||
+        memory_domain < 0 || memory_domain > 2) {
+        PyErr_SetString(PyExc_TypeError, "clear probe requires matching native storage, exception or None, and a nonnegative fault index");
+        return NULL;
+    }
+    SoacTestAllocationCapture capture = {
+        .fail_at = fail_at, .memory_domain = memory_domain, .armed = 1,
+    };
+    PyMemAllocatorDomain domain = soac_test_allocation_domain(&capture);
+    PyMem_GetAllocator(domain, &capture.previous);
+    PyMemAllocatorEx allocator = {
+        .ctx = &capture, .malloc = soac_test_allocation_malloc,
+        .calloc = soac_test_allocation_calloc, .realloc = soac_test_allocation_realloc,
+        .free = soac_test_allocation_free,
+    };
+    PyMem_SetAllocator(domain, &allocator);
+    if (primary != Py_None) PyErr_SetRaisedException(Py_NewRef(primary));
+    int result = 0;
+    if (managed_api) PyObject_ClearManagedDict(instance);
+    else result = clear(instance);
+    soac_test_allocation_restore(&capture);
+    /* Observe the actual C error indicator before invoking any Python code.
+     * In particular, void ClearManagedDict must preserve an existing primary. */
+    PyObject *error = PyErr_GetRaisedException();
+    if (capture.overflow) {
+        Py_XDECREF(error);
+        PyErr_SetString(PyExc_AssertionError, "clear probe exceeded its bounded allocation capture");
+        return NULL;
+    }
+    return Py_BuildValue("(iNn)", result,
+                         error == NULL ? Py_NewRef(Py_None) : error,
+                         capture.requests);
+#endif
+}
+
+static PyObject *
 soac_type_state_alloc_pending_error(PyObject *self, PyObject *args)
 {
 #if !_Py_TYPE_STATE_SUPPORTED
@@ -496,9 +465,24 @@ static int
 soac_test_type_state_trace(PyObject *object, PyRefTracerEvent event, void *data)
 {
     SoacTestTypeStateTrace *trace = data;
-    if (object == NULL || !_PyObject_HasTypeStateSlot(object)) return 0;
+    if (object == NULL) return 0;
+    int has_state = _PyObject_HasTypeStateSlot(object);
+    int dictionary_instance = !PyDict_CheckExact(object) &&
+        _PySOAC_HasOrdinaryInstanceWrites(Py_TYPE(object));
+    if (!has_state && !dictionary_instance) return 0;
     if (event == PyRefTracer_CREATE) {
         ++trace->created;
+        if (dictionary_instance) {
+            PyTypeObject *type = Py_TYPE(object);
+            PyObject **dictptr = type->tp_flags & Py_TPFLAGS_MANAGED_DICT
+                ? (PyObject **)&_PyObject_ManagedDictPointer(object)->dict
+                : _PyObject_ComputedDictPointer(object);
+            if (dictptr == NULL || *dictptr == NULL ||
+                !PyDict_Check(*dictptr) || !_PyDict_HasSoacPolicy((PyDictObject *)*dictptr)) {
+                trace->incomplete = 1;
+            }
+        }
+        if (!has_state) return 0;
         /* Reject an incomplete allocation before calling the checked helper:
          * reftracers must neither allocate nor change the exception state. */
         PyTypeObject *type = Py_TYPE(object);

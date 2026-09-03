@@ -190,11 +190,6 @@ dummy_func(void) {
         // Native policy is independent of the foldable type-version fact.
     }
 
-    op(_GUARD_SOAC_TYPE_READ, (owner -- owner)) {
-        // Metadata retirement need not change a type's version. Always keep
-        // the actual native liveness check, including for an inferred type.
-    }
-
     op(_GUARD_TYPE_VERSION, (type_version/2, owner -- owner)) {
         assert(type_version);
         assert(this_instr[-1].opcode == _RECORD_TOS_TYPE);

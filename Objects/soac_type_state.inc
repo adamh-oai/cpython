@@ -297,6 +297,58 @@ _PyObject_InitWithTypeState(PyObject *object, PyTypeObject *type, PyTypeState *s
 #endif
 }
 
+/* Allocation consumes state, initializes the actual owner before trusted
+ * dictionary-policy callbacks, and publishes CREATE only after its escaped
+ * dictionary can enforce writes. No ordinary read installs metadata. */
+int
+_PyObject_InitWithInstanceWritePolicy(PyObject *object, PyTypeObject *type,
+                                     Py_ssize_t nitems, PyTypeState *state)
+{
+    PyObject *previous_error = PyErr_GetRaisedException();
+    Py_SET_TYPE(object, type);
+    uint16_t flags = 0;
+    if (state != NULL) {
+#if _Py_TYPE_STATE_SUPPORTED
+        flags = _Py_HAS_TYPE_STATE_SLOT_FLAG;
+        object->ob_flags = flags;
+        PyTypeState **slot = _PyObject_TypeStateSlot(object);
+        assert(slot != NULL);
+        *slot = state;
+#else
+        Py_FatalError("unsupported optional type-state allocation");
+#endif
+    }
+    if (type->tp_itemsize != 0) Py_SET_SIZE((PyVarObject *)object, nitems);
+    _Py_INCREF_TYPE(type);
+#ifdef Py_REF_DEBUG
+    _Py_IncRefTotal(_PyThreadState_GET());
+#endif
+    init_reference(object, flags);
+    if (_PyDict_InitInstanceWritePolicy(object, state) < 0) {
+        PyObject *error = PyErr_GetRaisedException();
+        assert(Py_REFCNT(object) == 1);
+        /* This allocation never published CREATE. Retire its private reference
+         * bookkeeping without DESTROY or a user tp_dealloc/__del__ callback. */
+        _Py_DECREF_STAT_INC();
+#ifdef Py_REF_DEBUG
+        _Py_DecRefTotal(_PyThreadState_GET());
+#endif
+        Py_SET_REFCNT(object, 0);
+#ifdef Py_TRACE_REFS
+        _Py_ForgetReference(object);
+#endif
+        _PyObject_ClearTypeState(object);
+        type->tp_free(object);
+        _Py_DECREF_TYPE(type);
+        Py_XDECREF(previous_error);
+        PyErr_SetRaisedException(error);
+        return -1;
+    }
+    _PyReftracerTrack(object, PyRefTracer_CREATE);
+    PyErr_SetRaisedException(previous_error);
+    return 0;
+}
+
 int
 _PyObject_TypeStateTraverse(PyObject *object, visitproc visit, void *arg)
 {

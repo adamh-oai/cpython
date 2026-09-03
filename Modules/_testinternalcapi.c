@@ -1921,69 +1921,6 @@ dict_getitem_knownhash(PyObject *self, PyObject *args)
 }
 
 static PyObject *
-dict_new_indexed(PyObject *self, PyObject *keys_obj)
-{
-    PyDictKeysObject *keys = _PyDict_NewIndexedKeySet(keys_obj);
-    if (keys == NULL) {
-        return NULL;
-    }
-    PyObject *dict = _PyDict_NewWithIndexedKeySet(keys);
-    _PyDictKeys_DecRef(keys);
-    return dict;
-}
-
-static PyObject *
-dict_has_indexed_keys(PyObject *self, PyObject *dict)
-{
-    if (!PyDict_Check(dict)) {
-        PyErr_SetString(PyExc_TypeError, "expected a dictionary");
-        return NULL;
-    }
-    return PyBool_FromLong(
-        _PyDict_HasIndexedTable((PyDictObject *)dict));
-}
-
-static PyObject *
-dict_indexed_key_index(PyObject *self, PyObject *args)
-{
-    PyObject *dict;
-    PyObject *key;
-    if (!PyArg_ParseTuple(
-            args, "OO:dict_indexed_key_index", &dict, &key))
-    {
-        return NULL;
-    }
-    Py_ssize_t index = _PyDict_IndexedKeyIndex(dict, key);
-    if (index < 0 && PyErr_Occurred()) {
-        return NULL;
-    }
-    return PyLong_FromSsize_t(index);
-}
-
-static PyObject *
-dict_has_no_lookup_aliases(PyObject *self, PyObject *dict)
-{
-    return PyBool_FromLong(_PyDict_HasNoLookupAliases(dict));
-}
-
-static PyObject *
-dict_reserve_soac_namespace_keys(PyObject *self, PyObject *args)
-{
-    PyObject *dict, *owner, *names;
-    if (!PyArg_ParseTuple(args, "OOO", &dict, &owner, &names)) {
-        return NULL;
-    }
-    return _PyDict_ReserveSoacNamespaceKeys(dict, owner, names) < 0
-        ? NULL : Py_NewRef(Py_None);
-}
-
-static PyObject *
-dict_new_from_indexed_schema(PyObject *self, PyObject *template)
-{
-    return _PyDict_NewFromIndexedSchema(template);
-}
-
-static PyObject *
 dict_setitem_knownhash(PyObject *self, PyObject *args)
 {
     PyObject *dict, *key, *value;
@@ -2019,154 +1956,6 @@ dict_setitem_and_delete_for_module(PyObject *self, PyObject *args)
     return result < 0 ? NULL : PyLong_FromLong(result);
 }
 
-typedef struct {
-    PyDictKeysObject *keys;
-    int failure_mode;
-} SoacTestIndexedLayout;
-
-static void
-soac_test_layout_destroy(PyObject *owner)
-{
-    SoacTestIndexedLayout *layout = PyCapsule_GetPointer(owner, "test.soac.indexed_layout");
-    assert(layout != NULL);
-    _PyDictKeys_DecRef(layout->keys);
-    PyMem_Free(layout);
-}
-
-static int
-soac_test_instance_policy(PyObject *owner, PyObject *dict, PyObject *key,
-                          PyObject *value, int operation, PyObject *provenance)
-{
-    if (operation == PyDict_SOAC_TERMINAL_TEARDOWN ||
-        operation == PyDict_SOAC_DELETE || operation == PyDict_SOAC_CLEAR) {
-        return 0;
-    }
-    int attribute = operation == PyDict_SOAC_ATTRIBUTE_SET ||
-                    operation == PyDict_SOAC_ATTRIBUTE_SET_EXISTING;
-    if (!attribute && provenance != NULL) {
-        PyErr_SetString(PyExc_TypeError, "test instance has no runtime cache provider");
-        return -1;
-    }
-    int checked = PyUnicode_CheckExact(key) && _PyDict_IndexedKeyIndex(dict, key) >= 0;
-    if (attribute) {
-        assert(provenance != NULL && PyUnicode_Check(provenance));
-        /* Copy the Unicode payload, never call str(), hash(), or equality on
-           the original subclass a second time during policy validation. */
-        PyObject *name = PyUnicode_FromObject(provenance);
-        if (name == NULL) {
-            return -1;
-        }
-        checked |= _PyDict_IndexedKeyIndex(dict, name) >= 0;
-        Py_DECREF(name);
-    }
-    if (checked && !PyLong_CheckExact(value)) {
-        PyErr_SetString(PyExc_TypeError, "test declared field requires an exact int");
-        return -1;
-    }
-    return 0;
-}
-
-static PyObject *
-soac_test_instance_factory(PyObject *owner, PyObject *instance)
-{
-    assert(!(Py_TYPE(instance)->tp_flags & Py_TPFLAGS_INLINE_VALUES));
-    SoacTestIndexedLayout *layout = PyCapsule_GetPointer(owner, "test.soac.indexed_layout");
-    if (layout == NULL) {
-        return NULL;
-    }
-    if (layout->failure_mode == 1) {
-        PyErr_SetString(PyExc_MemoryError, "test instance factory allocation failed");
-        return NULL;
-    }
-    PyObject *dict = _PyDict_NewWithIndexedKeySet(layout->keys);
-    if (dict != NULL && PyDict_SetSoacPolicy(dict, owner, soac_test_instance_policy,
-                                            PyDict_SOAC_ALLOW_NONSTRING_KEYS) < 0) {
-        Py_CLEAR(dict);
-    }
-    if (dict != NULL && layout->failure_mode == 2) {
-        /* Deliberately malformed factory result: allocation cleanup must drop
-           this partial edge before freeing the unpublished instance, without
-           invoking its __del__ or losing the original boundary error. */
-        if (PyDict_SetItemString(dict, "partial_instance", instance) < 0) {
-            Py_CLEAR(dict);
-        }
-    }
-    return dict;
-}
-
-static PyObject *
-dict_new_soac_type(PyObject *self, PyObject *args)
-{
-    PyObject *name, *bases, *namespace, *fields, *namespace_function;
-    PyObject *protected_names = NULL, *final_methods = NULL;
-    int failure_mode = 0;
-    if (!PyArg_ParseTuple(args, "OOOOO|iOO", &name, &bases, &namespace,
-                          &fields, &namespace_function, &failure_mode,
-                          &protected_names, &final_methods)) {
-        return NULL;
-    }
-    if (failure_mode < 0 || failure_mode > 2) {
-        PyErr_SetString(PyExc_ValueError, "invalid test instance factory failure mode");
-        return NULL;
-    }
-    PyDictKeysObject *keys = _PyDict_NewIndexedKeySet(fields);
-    if (keys == NULL) {
-        return NULL;
-    }
-    SoacTestIndexedLayout *layout = PyMem_Malloc(sizeof(*layout));
-    if (layout == NULL) {
-        _PyDictKeys_DecRef(keys);
-        return PyErr_NoMemory();
-    }
-    layout->keys = keys;
-    layout->failure_mode = failure_mode;
-    PyObject *owner = PyCapsule_New(layout, "test.soac.indexed_layout", soac_test_layout_destroy);
-    if (owner == NULL) {
-        _PyDictKeys_DecRef(keys);
-        PyMem_Free(layout);
-        return NULL;
-    }
-    PyObject *empty = PyTuple_New(0), *keywords = PyDict_New();
-    if (empty == NULL || keywords == NULL) {
-        Py_XDECREF(empty);
-        Py_XDECREF(keywords);
-        Py_DECREF(owner);
-        return NULL;
-    }
-    PySoacTypeConstructionSpec spec = {
-        .abi_version = Py_SOAC_TYPE_CONTRACT_ABI,
-        .struct_size = sizeof(PySoacTypeConstructionSpec),
-        .construction_mode = Py_SOAC_TYPE_CONSTRUCT_ENFORCED,
-        .owner = owner,
-        .namespace_function = namespace_function,
-        .name = name,
-        .bases = bases,
-        .namespace_dict = namespace,
-        .keywords = keywords,
-        .bind_type = NULL,
-        .contract = {
-            .flags = 0,
-            .fields = fields,
-            .protected_names = protected_names == NULL ? empty : protected_names,
-            .final_methods = final_methods == NULL ? empty : final_methods,
-            .new_instance_dict = soac_test_instance_factory,
-            .dictionary_mode = Py_SOAC_INSTANCE_DICT_INDEXED,
-        },
-    };
-    PyObject *handle = PyType_NewSoacConstructionHandle(&spec);
-    PyObject *type = handle == NULL ? NULL
-        : PyType_FromSoacConstructionHandle(handle, namespace_function);
-    if (type != NULL && PyType_SealSoacContract(type, owner) < 0) {
-        Py_CLEAR(type);
-    }
-    Py_XDECREF(handle);
-    Py_DECREF(empty);
-    Py_DECREF(keywords);
-    Py_DECREF(owner);
-    return type;
-}
-
-
 /* Ordinary-storage field fixture. This is native policy authority only; it
  * never constructs a source/function/checker execution record. The actual
  * pending constructor keeps its ordinary Ready layout until final admission. */
@@ -2195,7 +1984,7 @@ soac_test_ordinary_field(PyObject *owner, PyObject *name, PyObject *value)
 static PyObject *
 soac_test_ordinary_observers(PyObject *owner)
 {
-    if (!PyTuple_CheckExact(owner) || PyTuple_GET_SIZE(owner) != 3 ||
+    if (!PyTuple_CheckExact(owner) || PyTuple_GET_SIZE(owner) != 5 ||
         !PyList_CheckExact(PyTuple_GET_ITEM(owner, 2)) ||
         PyList_GET_SIZE(PyTuple_GET_ITEM(owner, 2)) != 2) {
         PyErr_SetString(PyExc_TypeError, "expected the ordinary dictionary test owner");
@@ -2331,10 +2120,10 @@ soac_test_ordinary_invoke_hook(PyObject *owner, PyObject *instance, PyObject *ca
     if (observers == NULL) return -1;
     PyObject *hook = PyList_GET_ITEM(observers, 0);
     if (hook == Py_None) return 0;
-    if ((Py_TYPE(instance)->tp_flags & Py_TPFLAGS_INLINE_VALUES) &&
-        _PyObject_GetManagedDict(instance) == NULL &&
-        _PyObject_InlineValues(instance)->valid == 2 &&
-        PyObject_GC_IsTracked(candidate)) {
+    PyObject **dictptr = Py_TYPE(instance)->tp_flags & Py_TPFLAGS_MANAGED_DICT
+        ? (PyObject **)&_PyObject_ManagedDictPointer(instance)->dict
+        : _PyObject_ComputedDictPointer(instance);
+    if (dictptr != NULL && *dictptr == NULL && PyObject_GC_IsTracked(candidate)) {
         PyErr_SetString(PyExc_AssertionError, "private dictionary header became GC-visible");
         return -1;
     }
@@ -2378,41 +2167,6 @@ dict_ordinary_inline_state(PyObject *self, PyObject *instance)
     }
     return Py_BuildValue("(iO)", (int)_PyObject_InlineValues(instance)->valid,
                          _PyObject_GetManagedDict(instance) == NULL ? Py_False : Py_True);
-}
-
-static PyObject *
-dict_ordinary_clear_managed_probe(PyObject *self, PyObject *args)
-{
-    PyObject *instance, *primary;
-    if (!PyArg_ParseTuple(args, "OO:dict_ordinary_clear_managed_probe", &instance, &primary)) return NULL;
-    if (!(Py_TYPE(instance)->tp_flags & Py_TPFLAGS_INLINE_VALUES) ||
-        (primary != Py_None && !PyExceptionInstance_Check(primary))) {
-        PyErr_SetString(PyExc_TypeError, "clear probe requires inline receiver and exception or None");
-        return NULL;
-    }
-    PyDictValues *values = _PyObject_InlineValues(instance);
-    int preparing = values->valid == 2;
-    PyDictObject *dictionary = _PyObject_GetManagedDict(instance);
-    PyObject *saved[SHARED_KEYS_MAX_SIZE];
-    unsigned char size = values->size, capacity = values->capacity;
-    if (preparing) {
-        assert(capacity <= SHARED_KEYS_MAX_SIZE);
-        memcpy(saved, values->values, capacity * sizeof(PyObject *));
-    }
-    if (primary != Py_None) PyErr_SetRaisedException(Py_NewRef(primary));
-    PyObject_ClearManagedDict(instance);
-    /* Void is NOT a success signal: inspect the exact pending exception
-     * immediately, before returning through any other C/Python operation. */
-    PyObject *error = PyErr_GetRaisedException();
-    if (preparing &&
-        (error == NULL || values->valid != 2 || values->size != size ||
-         _PyObject_GetManagedDict(instance) != dictionary ||
-         memcmp(saved, values->values, capacity * sizeof(PyObject *)) != 0)) {
-        Py_XDECREF(error);
-        PyErr_SetString(PyExc_AssertionError, "busy clear changed live inline storage or lost its error");
-        return NULL;
-    }
-    return error == NULL ? Py_NewRef(Py_None) : error;
 }
 
 static PyObject *
@@ -2481,7 +2235,6 @@ dict_ordinary_replace_detach_oom(PyObject *self, PyObject *args)
     return NULL;
 }
 
-static int soac_test_type_state_private_write(PyObject *, PyObject *, PyObject *, int);
 
 static int
 soac_test_ordinary_instance_policy(PyObject *owner, PyObject *dict, PyObject *key,
@@ -2505,7 +2258,6 @@ soac_test_ordinary_instance_policy(PyObject *owner, PyObject *dict, PyObject *ke
     /* The original incoming attribute name is not the canonical stored key.
      * Inspect Unicode data, never repeat arbitrary hash/equality or str(). */
     if (attribute && soac_test_ordinary_field(owner, provenance, value) < 0) return -1;
-    if (soac_test_type_state_private_write(owner, dict, value, operation) < 0) return -1;
     return operation == PyDict_SOAC_VALIDATE_INITIAL
         ? soac_test_ordinary_after_initial(owner, dict) : 0;
 }
@@ -2539,19 +2291,21 @@ soac_test_ordinary_prepare_dictionary(PyObject *owner, PyObject *instance,
 
 static int
 soac_test_ordinary_final_commit(PyObject *owner, PyObject *type,
-                                const PySoacTypeContractSpecV4 *contract)
+                                const PySoacTypeContractSpecV5 *contract)
 {
     PySoacTypeConstructionInfoV1 info;
+    int checked = PyTuple_GET_SIZE(PyTuple_GET_ITEM(owner, 0)) != 0;
     if (PyType_GetSoacConstructionInfoV1(type, &info, sizeof(info)) != 1 ||
         info.phase != Py_SOAC_TYPE_STATE_ADMITTING || info.owner != owner ||
-        contract->dictionary_mode != Py_SOAC_INSTANCE_DICT_ORDINARY ||
+        contract->dictionary_mode != (checked ? Py_SOAC_INSTANCE_DICT_ORDINARY
+                                              : Py_SOAC_INSTANCE_DICT_NONE) ||
         contract->fields != PyTuple_GET_ITEM(owner, 0) ||
-        contract->protected_names != PyTuple_GET_ITEM(owner, 1) ||
-        contract->final_methods != PyTuple_GET_ITEM(owner, 1) ||
+        contract->protected_names != PyTuple_GET_ITEM(owner, 3) ||
+        contract->final_methods != PyTuple_GET_ITEM(owner, 4) ||
         contract->object_slot_fields != PyTuple_GET_ITEM(owner, 1) ||
-        contract->check_instance_write != soac_test_ordinary_inline_write ||
-        contract->new_instance_dict != NULL ||
-        contract->prepare_instance_dictionary_policy != soac_test_ordinary_prepare_dictionary) {
+        contract->check_instance_write != (checked ? soac_test_ordinary_inline_write : NULL) ||
+        contract->prepare_instance_dictionary_policy !=
+            (checked ? soac_test_ordinary_prepare_dictionary : NULL)) {
         if (!PyErr_Occurred()) {
             PyErr_SetString(PyExc_TypeError, "ordinary fixture final policy identity changed");
         }
@@ -2566,8 +2320,10 @@ static PyObject *
 dict_new_soac_ordinary_type_impl(PyObject *args, int direct)
 {
     PyObject *name, *bases, *namespace, *fields, *namespace_function;
-    if (!PyArg_ParseTuple(args, "OOOOO:dict_new_soac_ordinary_type",
-                          &name, &bases, &namespace, &fields, &namespace_function)) {
+    PyObject *protected_names = NULL, *final_methods = NULL;
+    if (!PyArg_ParseTuple(args, "OOOOO|OO:dict_new_soac_ordinary_type",
+                          &name, &bases, &namespace, &fields, &namespace_function,
+                          &protected_names, &final_methods)) {
         return NULL;
     }
     if (!PyTuple_CheckExact(fields)) {
@@ -2588,7 +2344,9 @@ dict_new_soac_ordinary_type_impl(PyObject *args, int direct)
         PyList_SET_ITEM(observers, 1, Py_NewRef(Py_None));
     }
     PyObject *owner = empty == NULL || observers == NULL
-        ? NULL : PyTuple_Pack(3, fields, empty, observers);
+        ? NULL : PyTuple_Pack(5, fields, empty, observers,
+                             protected_names == NULL ? empty : protected_names,
+                             final_methods == NULL ? empty : final_methods);
     Py_XDECREF(observers);
     if (empty == NULL || keywords == NULL || owner == NULL) {
         Py_XDECREF(empty);
@@ -2608,12 +2366,15 @@ dict_new_soac_ordinary_type_impl(PyObject *args, int direct)
     PyObject *handle = PyType_NewSoacConstructionHandle(&spec);
     PyObject *type = handle == NULL ? NULL
         : PyType_FromSoacConstructionHandle(handle, namespace_function);
-    PySoacTypeContractSpecV4 contract = {
-        .dictionary_mode = Py_SOAC_INSTANCE_DICT_ORDINARY,
-        .fields = fields, .protected_names = empty, .final_methods = empty,
+    int checked = PyTuple_GET_SIZE(fields) != 0;
+    PySoacTypeContractSpecV5 contract = {
+        .dictionary_mode = checked ? Py_SOAC_INSTANCE_DICT_ORDINARY : Py_SOAC_INSTANCE_DICT_NONE,
+        .fields = fields,
+        .protected_names = PyTuple_GET_ITEM(owner, 3),
+        .final_methods = PyTuple_GET_ITEM(owner, 4),
         .object_slot_fields = empty,
-        .check_instance_write = soac_test_ordinary_inline_write,
-        .prepare_instance_dictionary_policy = soac_test_ordinary_prepare_dictionary,
+        .check_instance_write = checked ? soac_test_ordinary_inline_write : NULL,
+        .prepare_instance_dictionary_policy = checked ? soac_test_ordinary_prepare_dictionary : NULL,
     };
     if (type != NULL &&
         PyType_AdmitSoacPendingV1(type, owner, handle, &contract, sizeof(contract),
@@ -2640,45 +2401,6 @@ static PyObject *
 dict_new_soac_type_state_type(PyObject *self, PyObject *args)
 {
     return dict_new_soac_ordinary_type_impl(args, 1);
-}
-
-static PyObject *
-dict_get_indexed_item(PyObject *self, PyObject *args)
-{
-    PyObject *dict;
-    Py_ssize_t index;
-    if (!PyArg_ParseTuple(
-            args, "On:dict_get_indexed_item", &dict, &index))
-    {
-        return NULL;
-    }
-    PyObject *result = NULL;
-    int found = _PyDict_GetIndexedItem(dict, index, &result);
-    if (found < 0) {
-        return NULL;
-    }
-    if (found == 0) {
-        PyErr_SetString(PyExc_KeyError, "indexed dictionary slot is empty");
-        return NULL;
-    }
-    return result;
-}
-
-static PyObject *
-dict_set_indexed_item(PyObject *self, PyObject *args)
-{
-    PyObject *dict;
-    PyObject *value;
-    Py_ssize_t index;
-    if (!PyArg_ParseTuple(
-            args, "OnO:dict_set_indexed_item", &dict, &index, &value))
-    {
-        return NULL;
-    }
-    if (_PyDict_SetIndexedItem(dict, index, value) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
 }
 
 static PyObject *
@@ -3549,101 +3271,6 @@ set_vectorcall_nop(PyObject *self, PyObject *func)
     Py_RETURN_NONE;
 }
 
-/* Trusted C fixtures for the replay mechanism, not the production Rust
- * artifact/role/closure authentication boundary. No hidden Python globals. */
-static PyObject *
-soac_test_annotation_replay_resolver(PyObject *provider, PyObject *owner, int format)
-{
-    if (!PyFunction_Check(provider)) {
-        PyErr_SetString(PyExc_TypeError, "annotation replay fixture needs a function");
-        return NULL;
-    }
-    return PySoac_CloneAnnotationReplayCode(provider, Py_None,
-                                          PyFunction_GET_CODE(provider));
-}
-
-static PyObject *
-soac_test_other_replay_resolver(PyObject *provider, PyObject *owner, int format)
-{
-    PyErr_SetString(PyExc_AssertionError, "replacement replay resolver was called");
-    return NULL;
-}
-
-static PyObject *
-soac_install_annotation_replay_resolver(PyObject *self, PyObject *alternate)
-{
-    PySoacAnnotationReplayResolver resolver;
-    if (alternate == Py_False) {
-        resolver = soac_test_annotation_replay_resolver;
-    }
-    else if (alternate == Py_True) {
-        resolver = soac_test_other_replay_resolver;
-    }
-    else if (alternate == Py_None) {
-        resolver = NULL;
-    }
-    else {
-        PyErr_SetString(PyExc_TypeError, "expected bool or None");
-        return NULL;
-    }
-    if (PySoac_SetAnnotationReplayResolver(resolver) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
-}
-
-static PyObject *
-soac_test_annotation_vectorcall(PyObject *provider, PyObject *const *args,
-                               size_t nargsf, PyObject *kwnames)
-{
-    PyObject *code = PySoac_CloneAnnotationReplayCode(
-        provider, Py_None, PyFunction_GET_CODE(provider));
-    if (code == NULL) {
-        return NULL;
-    }
-    PyObject *plain = PyFunction_New(code, PyFunction_GET_GLOBALS(provider));
-    Py_DECREF(code);
-    if (plain == NULL) {
-        return NULL;
-    }
-    PyFunctionObject *original = (PyFunctionObject *)provider;
-    Py_SETREF(((PyFunctionObject *)plain)->func_builtins,
-              Py_NewRef(original->func_builtins));
-    if ((original->func_closure != NULL &&
-         PyFunction_SetClosure(plain, original->func_closure) < 0) ||
-        (original->func_defaults != NULL &&
-         PyFunction_SetDefaults(plain, original->func_defaults) < 0) ||
-        (original->func_kwdefaults != NULL &&
-         PyFunction_SetKwDefaults(plain, original->func_kwdefaults) < 0)) {
-        Py_DECREF(plain);
-        return NULL;
-    }
-    PyObject *result = PyObject_Vectorcall(plain, args, nargsf, kwnames);
-    Py_DECREF(plain);
-    return result;
-}
-
-static PyObject *
-soac_prepare_annotation_replay_fixture(PyObject *self, PyObject *provider)
-{
-    if (!PyFunction_Check(provider)) {
-        PyErr_SetString(PyExc_TypeError, "annotation replay fixture needs an exact function");
-        return NULL;
-    }
-    PyObject *code = PyFunction_GET_CODE(provider);
-    if (code == NULL || !PyCode_Check(code) ||
-        ((PyCodeObject *)code)->_co_soac_strict_source_id == 0 ||
-        !(((PyCodeObject *)code)->co_flags & CO_FUTURE_STRICT)) {
-        PyErr_SetString(PyExc_ValueError, "annotation replay fixture needs verified strict code");
-        return NULL;
-    }
-    if (PyFunction_SetSoacStrictOwner(provider, Py_None) < 0) {
-        return NULL;
-    }
-    PyFunction_SetVectorcall((PyFunctionObject *)provider, soac_test_annotation_vectorcall);
-    Py_RETURN_NONE;
-}
-
 static PyObject *
 module_get_gc_hooks(PyObject *self, PyObject *arg)
 {
@@ -3906,27 +3533,21 @@ static PyMethodDef module_functions[] = {
     {"get_object_dict_values", get_object_dict_values, METH_O},
     {"hamt", new_hamt, METH_NOARGS},
     {"dict_getitem_knownhash",  dict_getitem_knownhash,          METH_VARARGS},
-    {"dict_new_indexed", dict_new_indexed, METH_O},
-    {"dict_has_indexed_keys", dict_has_indexed_keys, METH_O},
-    {"dict_has_no_lookup_aliases", dict_has_no_lookup_aliases, METH_O},
-    {"dict_reserve_soac_namespace_keys", dict_reserve_soac_namespace_keys, METH_VARARGS},
     {"dict_setitem_and_delete_for_module", dict_setitem_and_delete_for_module, METH_VARARGS},
-    {"dict_new_soac_type", dict_new_soac_type, METH_VARARGS},
     {"dict_new_soac_ordinary_type", dict_new_soac_ordinary_type, METH_VARARGS},
     {"dict_new_soac_type_state_type", dict_new_soac_type_state_type, METH_VARARGS},
     {"slot_new_soac_type_state_type", slot_new_soac_type_state_type, METH_VARARGS},
     {"get_soac_type_state_info", get_soac_type_state_info, METH_O},
     {"capture_soac_type_state_allocation", capture_soac_type_state_allocation, METH_VARARGS},
+    {"soac_instance_dict_clear_probe", soac_instance_dict_clear_probe, METH_VARARGS},
     {"soac_type_state_alloc_pending_error", soac_type_state_alloc_pending_error, METH_VARARGS},
     {"check_soac_type_state_reftracer", check_soac_type_state_reftracer, METH_O},
     {"probe_soac_type_state_lookups", probe_soac_type_state_lookups, METH_VARARGS},
-    {"probe_soac_type_state_private_escape", probe_soac_type_state_private_escape, METH_VARARGS},
     {"soac_type_state_clear", soac_type_state_clear, METH_O},
     {"soac_type_state_negative_refcount", soac_type_state_negative_refcount, METH_O},
     {"soac_type_state_write_member", soac_type_state_write_member, METH_VARARGS},
     {"dict_arm_soac_ordinary_hook", dict_arm_soac_ordinary_hook, METH_VARARGS},
     {"dict_ordinary_inline_state", dict_ordinary_inline_state, METH_O},
-    {"dict_ordinary_clear_managed_probe", dict_ordinary_clear_managed_probe, METH_VARARGS},
     {"dict_ordinary_replace_detach_oom", dict_ordinary_replace_detach_oom, METH_VARARGS},
     {"soac_function_create_watch", soac_function_create_watch, METH_VARARGS},
     {"soac_function_create_unwatch", soac_function_create_unwatch, METH_O},
@@ -3934,12 +3555,8 @@ static PyMethodDef module_functions[] = {
     {"soac_interpreter_eval", soac_interpreter_eval, METH_VARARGS},
     {"soac_interpreter_events", soac_interpreter_events, METH_O},
     {"soac_interpreter_forward_entry", soac_interpreter_forward_entry, METH_O},
-    {"dict_new_from_indexed_schema", dict_new_from_indexed_schema, METH_O},
     {"dict_setitem_knownhash", dict_setitem_knownhash, METH_VARARGS},
     {"dict_delitem_knownhash", dict_delitem_knownhash, METH_VARARGS},
-    {"dict_indexed_key_index", dict_indexed_key_index, METH_VARARGS},
-    {"dict_get_indexed_item", dict_get_indexed_item, METH_VARARGS},
-    {"dict_set_indexed_item", dict_set_indexed_item, METH_VARARGS},
     {"dict_watch_split_keys_for_type", dict_watch_split_keys_for_type, METH_O},
     {"dict_get_key_layout_events", dict_get_key_layout_events, METH_NOARGS},
     {"create_interpreter", _PyCFunction_CAST(create_interpreter),
@@ -3994,8 +3611,6 @@ static PyMethodDef module_functions[] = {
 #endif
     {"simple_pending_call", simple_pending_call, METH_O},
     {"set_vectorcall_nop", set_vectorcall_nop, METH_O},
-    {"soac_prepare_annotation_replay_fixture", soac_prepare_annotation_replay_fixture, METH_O},
-    {"soac_install_annotation_replay_resolver", soac_install_annotation_replay_resolver, METH_O},
     {"module_get_gc_hooks", module_get_gc_hooks, METH_O},
     {"test_threadstate_set_stack_protection",
      test_threadstate_set_stack_protection, METH_NOARGS},

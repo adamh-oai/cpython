@@ -1688,14 +1688,6 @@ _PyObject_GetMethod(PyObject *obj, PyObject *name, PyObject **method)
             }
         }
     }
-    int soac_protected = _PySOAC_ProtectedName(tp, name);
-    if (soac_protected < 0) {
-        Py_XDECREF(descr);
-        return 0;
-    }
-    if (soac_protected) {
-        goto soac_class_member;
-    }
     PyObject *dict, *attr;
     if ((tp->tp_flags & Py_TPFLAGS_INLINE_VALUES) &&
          _PyObject_TryGetInstanceAttribute(obj, name, &attr)) {
@@ -1730,7 +1722,6 @@ _PyObject_GetMethod(PyObject *obj, PyObject *name, PyObject **method)
         Py_DECREF(dict);
     }
 
-  soac_class_member:
     if (meth_found) {
         *method = descr;
         return 1;
@@ -1797,14 +1788,6 @@ _PyObject_GetMethodStackRef(PyThreadState *ts, PyObject *obj,
             }
         }
     }
-    int soac_protected = _PySOAC_ProtectedName(tp, name);
-    if (soac_protected < 0) {
-        PyStackRef_CLEAR(*method);
-        return -1;
-    }
-    if (soac_protected) {
-        goto soac_class_member;
-    }
     PyObject *dict, *attr;
     if ((tp->tp_flags & Py_TPFLAGS_INLINE_VALUES) &&
          _PyObject_TryGetInstanceAttribute(obj, name, &attr)) {
@@ -1839,7 +1822,6 @@ _PyObject_GetMethodStackRef(PyThreadState *ts, PyObject *obj,
         }
     }
 
-  soac_class_member:
     if (meth_found) {
         assert(!PyStackRef_IsNull(*method));
         return 1;
@@ -1919,13 +1901,6 @@ _PyObject_GenericGetAttrWithDict(PyObject *obj, PyObject *name,
             goto done;
         }
     }
-    int soac_protected = _PySOAC_ProtectedName(tp, name);
-    if (soac_protected < 0) {
-        goto done;
-    }
-    if (soac_protected) {
-        goto soac_class_member;
-    }
     if (dict == NULL) {
         if ((tp->tp_flags & Py_TPFLAGS_INLINE_VALUES)) {
             if (PyUnicode_CheckExact(name) &&
@@ -1973,7 +1948,6 @@ _PyObject_GenericGetAttrWithDict(PyObject *obj, PyObject *name,
         }
     }
 
-  soac_class_member:
     if (f != NULL) {
         res = f(descr, obj, (PyObject *)Py_TYPE(obj));
         if (res == NULL && suppress &&
@@ -2710,7 +2684,7 @@ _PyTypes_FiniTypes(PyInterpreterState *interp)
 
 
 static inline void
-new_reference(PyObject *op, uint16_t layout_flags)
+init_reference(PyObject *op, uint16_t layout_flags)
 {
     // Skip the immortal object check in Py_SET_REFCNT; always set refcnt to 1
 #if !defined(Py_GIL_DISABLED)
@@ -2742,6 +2716,12 @@ new_reference(PyObject *op, uint16_t layout_flags)
 #ifdef Py_TRACE_REFS
     _Py_AddToAllObjects(op);
 #endif
+}
+
+static inline void
+new_reference(PyObject *op, uint16_t layout_flags)
+{
+    init_reference(op, layout_flags);
     _PyReftracerTrack(op, PyRefTracer_CREATE);
 }
 

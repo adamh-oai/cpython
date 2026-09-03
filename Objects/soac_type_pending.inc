@@ -85,7 +85,7 @@ soac_validate_final_slot_views(SoacTypeContract *state, PyTypeObject *type)
 }
 
 static void
-soac_release_contract_inputs(PySoacTypeContractSpecV4 *spec)
+soac_release_contract_inputs(PySoacTypeContractSpecV5 *spec)
 {
     Py_DECREF(spec->fields);
     Py_DECREF(spec->protected_names);
@@ -95,8 +95,8 @@ soac_release_contract_inputs(PySoacTypeContractSpecV4 *spec)
 
 int
 PyType_AdmitSoacPendingV1(PyObject *object, PyObject *owner, PyObject *expected_root,
-                         const PySoacTypeContractSpecV4 *spec, size_t size,
-                         PySoacTypeFinalCommitV4 expected_commit_final)
+                         const PySoacTypeContractSpecV5 *spec, size_t size,
+                         PySoacTypeFinalCommitV5 expected_commit_final)
 {
     /* Invalid/foreign requests do not terminalize a valid unrelated type.
      * A real admission starts only after callback-free exact preflight. */
@@ -125,7 +125,7 @@ PyType_AdmitSoacPendingV1(PyObject *object, PyObject *owner, PyObject *expected_
         !(type->tp_flags & Py_TPFLAGS_READY) || (type->tp_flags & Py_TPFLAGS_READYING)) {
         return soac_type_state_error("pending final lineage is unavailable or still constructing");
     }
-    PySoacTypeContractSpecV4 inputs = *spec;
+    PySoacTypeContractSpecV5 inputs = *spec;
     Py_INCREF(inputs.fields);
     Py_INCREF(inputs.protected_names);
     Py_INCREF(inputs.final_methods);
@@ -133,14 +133,6 @@ PyType_AdmitSoacPendingV1(PyObject *object, PyObject *owner, PyObject *expected_
     root->lineage_phase = SOAC_LINEAGE_ADMITTING;
     state->phase = Py_SOAC_TYPE_STATE_ADMITTING;
     SoacTypeContract *prepared = NULL;
-    PyObject *seal_provider = NULL;  /* future state edge, not another owner */
-    /* An ordinary layout is never changed late to fit an indexed factory.
-     * The separately reviewed ordinary-storage mode supplies its own join. */
-    if (inputs.dictionary_mode == Py_SOAC_INSTANCE_DICT_INDEXED &&
-        (type->tp_flags & Py_TPFLAGS_INLINE_VALUES)) {
-        soac_type_state_error("final indexed policy cannot change an existing inline-values layout");
-        goto failed;
-    }
     if (_PySOAC_CheckPendingBases(type->tp_bases) < 0) goto failed;
     prepared = soac_prepare_type_contract(type, owner, &inputs);
     if (prepared == NULL || soac_admission_live(type, state, root, owner) < 0) goto failed;
@@ -158,17 +150,16 @@ PyType_AdmitSoacPendingV1(PyObject *object, PyObject *owner, PyObject *expected_
     if (PyErr_Occurred() || soac_admission_live(type, state, root, owner) < 0 ||
         soac_validate_final_slot_views(state, type) < 0) goto failed;
 
-    if (soac_prepare_type_seal(type, &seal_provider) < 0 ||
+    if (soac_prepare_type_seal(type) < 0 ||
         soac_admission_live(type, state, root, owner) < 0) goto failed;
 
-    /* All allocations, cache notifications, namespace sealing and provider
+    /* All allocations, cache notifications, namespace sealing and contract
      * preparation precede this final hook. Success must be allocation/Python/
      * release-free. No later caller seal can stand in for this publication. */
     int status = state->commit_final(owner, object, &inputs);
     if (status != 0 || PyErr_Occurred() ||
         soac_admission_live(type, state, root, owner) < 0) goto failed;
-    soac_commit_type_seal(state, seal_provider);
-    seal_provider = NULL;  /* MOVE committed before opening allocation */
+    soac_commit_type_seal(state);
     root->selected = state;  /* comparison-only; no strong type backedge */
     root->lineage_phase = SOAC_LINEAGE_RESOLVED;
     state->phase = Py_SOAC_TYPE_STATE_ENFORCED;
@@ -184,7 +175,6 @@ failed:
     PyObject *error = PyErr_GetRaisedException();
     soac_clear_empty_write_policy(state);
     Py_XDECREF(prepared);
-    Py_XDECREF(seal_provider);
     soac_release_contract_inputs(&inputs);
     PyErr_SetRaisedException(error);
     return -1;

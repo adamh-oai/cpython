@@ -744,23 +744,6 @@ PySoac_GetInterpreterPrefix(void)
     return prefix != NULL && prefix[0] != L'\0' ? prefix : NULL;
 }
 
-int
-PySoac_SetAnnotationReplayResolver(PySoacAnnotationReplayResolver resolver)
-{
-    PyInterpreterState *interp = _PyInterpreterState_GET();
-    if (resolver == NULL || interp->soac.annotation_replay_closed ||
-        (interp->soac.annotation_replay_resolver != NULL &&
-         interp->soac.annotation_replay_resolver != resolver)) {
-        PyObject *exception = PySoac_GetStrictRuntimeUnavailableError();
-        if (exception != NULL) {
-            PyErr_SetString(exception, "strict annotation replay resolver cannot be replaced");
-        }
-        return -1;
-    }
-    interp->soac.annotation_replay_resolver = resolver;
-    return 0;
-}
-
 static PyObject *
 soac_new_frozen_exception(const char *name, PyObject *base)
 {

@@ -34,7 +34,6 @@ extern int _PySOAC_ProtectedName(PyTypeObject *, PyObject *);
 /* A cache-routing predicate for an own, permanently sealed native contract.
  * False defers to generic lookup; it never raises or grants field/call facts.
  * The generated _testinternalcapi executor also consumes this guard. */
-PyAPI_FUNC(int) _PySOAC_TypeReadCacheReady(PyTypeObject *);
 extern int _PySOAC_CheckInstanceWrite(PyObject *, PyObject *, PyObject *);
 extern int _PySOAC_CheckClassWrite(PyTypeObject *, PyObject *, PyObject *);
 extern int _PySOAC_CheckTypeBases(PyTypeObject *, PyObject *);
@@ -46,8 +45,6 @@ extern int _PySOAC_TypeContractTraverse(PyTypeObject *, visitproc, void *);
 extern void _PySOAC_TypeContractBeginTeardown(PyTypeObject *);
 extern void _PySOAC_TypeContractClear(PyTypeObject *);
 extern void _PySOAC_TypeContractDealloc(PyTypeObject *);
-extern PyObject *_PySOAC_NewInstanceDictionary(PyObject *);
-extern int _PySOAC_UsesInstanceDictionaryPolicy(PyTypeObject *);
 /* Actual generated _testinternalcapi executor consumes these guard/check
  * helpers; export only these private implementation symbols. */
 PyAPI_FUNC(int) _PySOAC_HasOrdinaryInstanceWrites(PyTypeObject *);
@@ -56,10 +53,8 @@ extern int _PySOAC_PrepareInstanceDictPolicy(
     PyObject *, PyObject *, const PySoacInstanceDictPolicy *, PySoacInstanceDictPolicy *);
 /* Also consumed by the generated _testinternalcapi executor. */
 PyAPI_FUNC(int) _PySOAC_UsesObjectSlotPolicy(PyTypeObject *);
-PyAPI_FUNC(int) _PySOAC_CheckObjectSlotRead(PyObject *);
 extern int _PySOAC_CheckObjectSlotAccess(PyObject *, const PyMemberDef *);
 extern int _PySOAC_CheckObjectSlotWrite(PyObject *, Py_ssize_t, PyObject *);
-extern int _PySOAC_PublishAnnotationCache(PyTypeObject *, PyObject *, PyObject *);
 extern int _PySOAC_MatchesClassNamespacePolicy(
     PyObject *policy_owner, PyDict_SoacPolicyCallback validate,
     PyObject *dict, PyObject *expected_owner);

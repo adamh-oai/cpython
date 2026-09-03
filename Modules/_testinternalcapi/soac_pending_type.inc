@@ -67,7 +67,7 @@ soac_pending_test_bind(PyObject *owner, PyObject *actual)
 
 static int
 soac_pending_test_commit(PyObject *owner, PyObject *actual,
-                         const PySoacTypeContractSpecV4 *contract)
+                         const PySoacTypeContractSpecV5 *contract)
 {
     PySoacTypeConstructionInfoV1 info;
     if (soac_pending_test_owner(owner) < 0 ||
@@ -86,7 +86,6 @@ soac_pending_test_commit(PyObject *owner, PyObject *actual,
         info.permanent_contract_published ? Py_True : Py_False));
     if (contract->dictionary_mode != Py_SOAC_INSTANCE_DICT_NONE ||
         contract->check_instance_write != soac_pending_test_write ||
-        contract->new_instance_dict != NULL ||
         contract->prepare_instance_dictionary_policy != NULL) {
         PyErr_SetString(PyExc_AssertionError, "pending fixture contract mode/callback mismatch");
         return -1;
@@ -169,7 +168,7 @@ soac_pending_type_admit(PyObject *module, PyObject *args)
         soac_pending_test_owner(owner) < 0) {
         return NULL;
     }
-    PySoacTypeContractSpecV4 spec = {
+    PySoacTypeContractSpecV5 spec = {
         .flags = flags, .fields = fields, .protected_names = protected,
         .final_methods = final, .object_slot_fields = slots == Py_None ? NULL : slots,
         .check_instance_write = soac_pending_test_write,
@@ -209,7 +208,7 @@ soac_pending_type_admit_and_retire(PyObject *module, PyObject *args)
  * at construction. The equality preflight must reject without invoking it. */
 static int
 soac_pending_test_noop(PyObject *owner, PyObject *actual,
-                       const PySoacTypeContractSpecV4 *contract)
+                       const PySoacTypeContractSpecV5 *contract)
 {
     PyList_SetItem(PyTuple_GET_ITEM(owner, 0), 1, Py_NewRef(Py_True));
     return 0;
@@ -224,7 +223,7 @@ soac_pending_type_try_weaker_admission(PyObject *module, PyObject *args)
         soac_pending_test_owner(owner) < 0) return NULL;
     PyObject *empty = PyTuple_New(0);
     if (empty == NULL) return NULL;
-    PySoacTypeContractSpecV4 spec = {
+    PySoacTypeContractSpecV5 spec = {
         .fields = empty, .protected_names = empty, .final_methods = empty,
         .check_instance_write = soac_pending_test_write,
     };

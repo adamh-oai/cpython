@@ -309,7 +309,7 @@ PyAPI_FUNC(uint64_t) PyType_GetSoacFunctionId(PyObject *);
 
 /* The C-only caller must authenticate the source plan. Ordinary Python cannot
  * construct these interpreter-owned handles or install type capabilities. */
-#define Py_SOAC_TYPE_CONTRACT_ABI 4
+#define Py_SOAC_TYPE_CONTRACT_ABI 5
 #define Py_SOAC_TYPE_FINAL 1u
 
 enum {
@@ -373,7 +373,6 @@ PyAPI_FUNC(int) PyType_SetSoacEmptyInstanceWritePolicyV1(
 PyAPI_FUNC(PyTypeState *) PyObject_GetTypeState(PyObject *object);
 enum {
     Py_SOAC_INSTANCE_DICT_NONE = 0,
-    Py_SOAC_INSTANCE_DICT_INDEXED = 1,
     Py_SOAC_INSTANCE_DICT_ORDINARY = 2,
 };
 
@@ -382,30 +381,29 @@ enum {
  * Names are exact immutable canonical tuples. No execution/source grant. */
 typedef struct {
     uint32_t flags;               /* existing FINAL; all other bits rejected */
-    uint32_t dictionary_mode;     /* explicit NONE / INDEXED / ORDINARY */
+    uint32_t dictionary_mode;     /* explicit NONE / ORDINARY */
     PyObject *fields;
     PyObject *protected_names;
     PyObject *final_methods;
     PyObject *object_slot_fields;
     int (*check_instance_write)(PyObject *, PyObject *, PyObject *, PyObject *);
-    PyObject *(*new_instance_dict)(PyObject *, PyObject *);
     /* ORDINARY returns one metadata owner, not a new dictionary or receiver
      * pin. actual_dict is a callback-scoped read-only borrow: do not retain or
-     * expose it. A materialization candidate can be a private untracked header;
-     * its actual instance still supports/traverses all values until commit.
+     * expose it. Allocation and replacement candidates can be private untracked
+     * headers; the actual instance supports its old values until commit.
      * Native owns provisional policy validation/commit/abort. The view
      * definition follows PyDict_SoacPolicyCallback in cpython/dictobject.h. */
     int (*prepare_instance_dictionary_policy)(
         PyObject *, PyObject *, PyObject *,
         const PySoacInstanceDictPolicy *, PySoacInstanceDictPolicy *);
-} PySoacTypeContractSpecV4;
+} PySoacTypeContractSpecV5;
 
 /* Captured by the original PENDING construction, never chosen by admission.
  * actual_contract is the stable, native-pinned input view. Success compares it
  * with the owner's immutable prepared requirements without Python/allocation. */
-typedef int (*PySoacTypeFinalCommitV4)(
+typedef int (*PySoacTypeFinalCommitV5)(
     PyObject *owner, PyObject *actual_type,
-    const PySoacTypeContractSpecV4 *actual_contract);
+    const PySoacTypeContractSpecV5 *actual_contract);
 
 typedef struct {
     uint32_t abi_version;
@@ -426,10 +424,10 @@ typedef struct {
      * revalidated on return. Final admission uses the separate strict commit. */
     int (*bind_type)(PyObject *, PyObject *);
     /* PENDING requires this trusted final hook; ENFORCED requires NULL. */
-    PySoacTypeFinalCommitV4 commit_final;
+    PySoacTypeFinalCommitV5 commit_final;
     /* ENFORCED: existing complete contract. PENDING: all-zero, no own
      * instance/namespace contract or inferred replacement field layout. */
-    PySoacTypeContractSpecV4 contract;
+    PySoacTypeContractSpecV5 contract;
 } PySoacTypeConstructionSpec;
 
 /* Existing functions, same roles. Pending mode is a distinct native state,
@@ -485,9 +483,9 @@ PyAPI_FUNC(int) PyType_AdmitSoacPendingV1(
     PyObject *actual_final_type,
     PyObject *expected_owner,
     PyObject *expected_root_construction,
-    const PySoacTypeContractSpecV4 *contract,
+    const PySoacTypeContractSpecV5 *contract,
     size_t contract_size,
-    PySoacTypeFinalCommitV4 expected_commit_final);
+    PySoacTypeFinalCommitV5 expected_commit_final);
 
 /* Exact canonical, consumed pending construction HANDLE required. Scalar
  * terminalization of its unresolved lineage, before callback-capable cleanup.

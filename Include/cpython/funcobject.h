@@ -280,12 +280,6 @@ PyAPI_FUNC(PyObject *) PySoac_DataclassFrameCellValue(
     const PySoacDataclassFrameView *, Py_ssize_t);
 PyAPI_FUNC(unsigned int) PySoac_DataclassFrameRole(const PySoacDataclassFrameView *);
 PyAPI_FUNC(Py_ssize_t) PySoac_DataclassFrameInstruction(const PySoacDataclassFrameView *);
-/* The trusted caller must authenticate the provider's source role, logical
- * owner, and complete capture layout. This checks the actual native function
- * owner/code identity and recursively clones ordinary code with no SOAC IDs.
- * Neither the original code nor any native execution guard is modified. */
-PyAPI_FUNC(PyObject *) PySoac_CloneAnnotationReplayCode(
-    PyObject *provider, PyObject *expected_owner, PyObject *verified_code);
 PyAPI_FUNC(PyObject *) PyFunction_GetKwDefaults(PyObject *);
 PyAPI_FUNC(int) PyFunction_SetKwDefaults(PyObject *, PyObject *);
 PyAPI_FUNC(PyObject *) PyFunction_GetClosure(PyObject *);

@@ -60,7 +60,6 @@ struct SoacTypeContract {
      * type clears this address before its deallocation callbacks or reference
      * release; terminal contracts never dereference it. */
     PyTypeObject *type;
-    PyObject *annotation_provider;
     /* Comparison-only during initial dictionary validation. The explicit
      * replacement call independently pins the original class, whose installed
      * frozen hooks cannot change. Cleared before Ready or any failure release. */
@@ -80,7 +79,7 @@ struct SoacTypeContract {
     SoacConstructionHandle *construction; /* owned metadata, not a type pin */
     PyObject *inherited_final_names;  /* immutable inherited-only dict policy */
     int class_dictionary_policy_installed;
-    PySoacTypeFinalCommitV4 commit_final; /* immutable construction authority */
+    PySoacTypeFinalCommitV5 commit_final; /* immutable construction authority */
     PySoacStorageStateFactoryV1 storage_state_factory;
     int binding_storage_factory;
     int empty_write_policy_ready; /* immutable shape, published only at seal */
@@ -92,7 +91,6 @@ struct SoacTypeContract {
     PyObject *empty_write_storage_owner;
     const PySoacOwnerLivenessV1 *empty_write_storage_record;
     int (*check_instance_write)(PyObject *, PyObject *, PyObject *, PyObject *);
-    PyObject *(*new_instance_dict)(PyObject *, PyObject *);
     int (*prepare_instance_dictionary_policy)(
         PyObject *, PyObject *, PyObject *,
         const PySoacInstanceDictPolicy *, PySoacInstanceDictPolicy *);
@@ -366,41 +364,9 @@ soac_mro_contains_type(PyObject *mro, PyTypeObject *type)
     return 0;
 }
 
-/* Ordinary subclasses do not acquire a strict dispatch capability. They do
- * retain inherited physical dictionary invariants. The trusted factory sees
- * the actual instance and can compose the policies of its actual MRO. */
-static SoacTypeContract *
-soac_type_dictionary_contract(PyTypeObject *type)
-{
-    SoacTypeContract *own = soac_type_contract(type);
-    if (own != NULL && own->dictionary_mode == Py_SOAC_INSTANCE_DICT_INDEXED) {
-        return own;
-    }
-    PyObject *mro = type->tp_mro;
-    for (Py_ssize_t i = 1; mro != NULL && i < PyTuple_GET_SIZE(mro); ++i) {
-        SoacTypeContract *base = soac_type_contract((PyTypeObject *)PyTuple_GET_ITEM(mro, i));
-        if (base != NULL && base->dictionary_mode == Py_SOAC_INSTANCE_DICT_INDEXED) {
-            /* A factory is installed on every actual strict class, including
-             * method-only classes with no physical field prefix. Its presence
-             * alone must not turn an ordinary subclass into a policy-bearing
-             * receiver or forbid ordinary __dict__ replacement. Continue the
-             * actual MRO search so a later nonempty prefix is still enforced.
-             * Unknown/terminal state stays fail-closed, not silently ordinary. */
-            if (!base->terminal && base->interpreter == _PyInterpreterState_GET() &&
-                base->fields != NULL && PyTuple_GET_SIZE(base->fields) == 0) {
-                continue;
-            }
-            return base;
-        }
-    }
-    return NULL;
-}
 
-int
-_PySOAC_UsesInstanceDictionaryPolicy(PyTypeObject *type)
-{
-    return soac_type_dictionary_contract(type) != NULL;
-}
+
+
 
 static int
 soac_owner_liveness_error(const char *message)
@@ -550,8 +516,7 @@ _PyTypeState_ForAllocation(PyTypeObject *type)
          * legacy/native family keeps every existing policy and no tail. The
          * factory authenticates every declaring owner, including method-only
          * native bases that contribute no physical storage rows. */
-        if (contract->dictionary_mode == Py_SOAC_INSTANCE_DICT_INDEXED ||
-            contract->storage_state_factory == NULL ||
+        if (contract->storage_state_factory == NULL ||
             (factory != NULL && contract->storage_state_factory != factory)) {
             return NULL;
         }
@@ -725,7 +690,6 @@ soac_state_traverse(SoacTypeContract *state, visitproc visit, void *arg)
     Py_VISIT(state->object_slot_fields);
     Py_VISIT(state->protected_names);
     Py_VISIT(state->final_methods);
-    Py_VISIT(state->annotation_provider);
     Py_VISIT(state->construction);
     Py_VISIT(state->inherited_final_names);
     Py_VISIT(state->empty_write_storage_owner);
@@ -750,7 +714,6 @@ soac_state_clear(SoacTypeContract *state)
     state->pending_frozen_delattr_birth = 0;
     soac_clear_empty_write_policy(state);
     Py_CLEAR(state->owner);
-    Py_CLEAR(state->annotation_provider);
     Py_CLEAR(state->fields);
     Py_CLEAR(state->object_slot_fields);
     Py_CLEAR(state->protected_names);
@@ -814,18 +777,13 @@ soac_valid_names(PyObject *names)
 }
 
 static int
-soac_valid_dictionary_spec(const PySoacTypeContractSpecV4 *spec)
+soac_valid_dictionary_spec(const PySoacTypeContractSpecV5 *spec)
 {
     switch (spec->dictionary_mode) {
         case Py_SOAC_INSTANCE_DICT_NONE:
-            return spec->new_instance_dict == NULL &&
-                spec->prepare_instance_dictionary_policy == NULL;
-        case Py_SOAC_INSTANCE_DICT_INDEXED:
-            return spec->new_instance_dict != NULL &&
-                spec->prepare_instance_dictionary_policy == NULL;
+            return spec->prepare_instance_dictionary_policy == NULL;
         case Py_SOAC_INSTANCE_DICT_ORDINARY:
-            return spec->new_instance_dict == NULL &&
-                spec->prepare_instance_dictionary_policy != NULL &&
+            return spec->prepare_instance_dictionary_policy != NULL &&
                 spec->check_instance_write != NULL;
         default:
             return 0;
@@ -833,7 +791,7 @@ soac_valid_dictionary_spec(const PySoacTypeContractSpecV4 *spec)
 }
 
 static int
-soac_valid_contract_spec(const PySoacTypeContractSpecV4 *spec)
+soac_valid_contract_spec(const PySoacTypeContractSpecV5 *spec)
 {
     return spec != NULL && !(spec->flags & ~Py_SOAC_TYPE_FINAL) &&
         soac_valid_dictionary_spec(spec) && spec->fields != NULL && soac_valid_names(spec->fields) &&
@@ -843,13 +801,13 @@ soac_valid_contract_spec(const PySoacTypeContractSpecV4 *spec)
 }
 
 static int
-soac_empty_contract_spec(const PySoacTypeContractSpecV4 *spec)
+soac_empty_contract_spec(const PySoacTypeContractSpecV5 *spec)
 {
     return spec->flags == 0 && spec->dictionary_mode == Py_SOAC_INSTANCE_DICT_NONE &&
         spec->fields == NULL &&
         spec->protected_names == NULL && spec->final_methods == NULL &&
         spec->object_slot_fields == NULL && spec->check_instance_write == NULL &&
-        spec->new_instance_dict == NULL && spec->prepare_instance_dictionary_policy == NULL;
+        spec->prepare_instance_dictionary_policy == NULL;
 }
 
 static PyObject *
@@ -889,12 +847,6 @@ soac_new_construction_handle(const PySoacTypeConstructionSpec *spec,
             return NULL;
         }
         if (_PySOAC_CheckTypeAllocation((PyTypeObject *)base) < 0) return NULL;
-        if (spec->contract.new_instance_dict != NULL &&
-            ((PyTypeObject *)base)->tp_flags & Py_TPFLAGS_INLINE_VALUES) {
-            PyErr_SetString(soac_type_mutation_error(),
-                "strict dictionary construction cannot replace an inherited inline-values layout");
-            return NULL;
-        }
     }
     PyObject *unsupported_hooks[] = {
         &_Py_ID(__getattribute__), &_Py_ID(__getattr__),
@@ -1204,24 +1156,6 @@ soac_class_dictionary_policy(PyObject *owner, PyObject *dict, PyObject *key,
          * Sealed, terminal, final, and field-descriptor barriers still apply. */
         return soac_check_class_write(state->type, key, value, provenance);
     }
-    if (operation == PyDict_SOAC_CACHE_INSERT || operation == PyDict_SOAC_CACHE_REPLACE) {
-        if (!state->sealed || provenance == NULL || provenance != state->annotation_provider ||
-            key == NULL || !PyUnicode_CheckExact(key)) {
-            PyErr_SetString(soac_type_mutation_error(), "strict annotation cache provider mismatch");
-            return -1;
-        }
-        if (_PyUnicode_EqualToASCIIString(key, "__annotate_func__") &&
-            operation == PyDict_SOAC_CACHE_INSERT && provenance == Py_None && value == Py_None) {
-            return 0;
-        }
-        if (_PyUnicode_EqualToASCIIString(key, "__annotations_cache__") && PyDict_Check(value)) {
-            /* Only the native getter calls this private operation. Nested
-             * successful class getters preserve ordinary completion order. */
-            return 0;
-        }
-        PyErr_SetString(soac_type_mutation_error(), "invalid strict annotation cache publication");
-        return -1;
-    }
     if (operation == PyDict_SOAC_CLEAR) {
         PyErr_SetString(soac_type_mutation_error(), "cannot clear a strict class namespace");
         return -1;
@@ -1283,7 +1217,7 @@ _PySOAC_MatchesClassNamespacePolicy(PyObject *policy_owner,
  * preallocated published state. No execution primary is added. */
 static SoacTypeContract *
 soac_prepare_type_contract(PyTypeObject *type, PyObject *owner,
-                           const PySoacTypeContractSpecV4 *spec)
+                           const PySoacTypeContractSpecV5 *spec)
 {
     SoacTypeContract *state = soac_new_type_state(owner, Py_SOAC_TYPE_STATE_ENFORCED);
     if (state == NULL) return NULL;
@@ -1299,14 +1233,12 @@ soac_prepare_type_contract(PyTypeObject *type, PyObject *owner,
     state->sealed = 0;
     state->terminal = 0;
     state->check_instance_write = spec->check_instance_write;
-    state->new_instance_dict = spec->new_instance_dict;
     if (state->protected_names == NULL || state->final_methods == NULL) {
         Py_DECREF(state);
         return NULL;
     }
     if (spec->dictionary_mode == Py_SOAC_INSTANCE_DICT_ORDINARY &&
-        ((type->tp_dictoffset == 0 && !(type->tp_flags & Py_TPFLAGS_MANAGED_DICT)) ||
-         _PySOAC_UsesInstanceDictionaryPolicy(type))) {
+        type->tp_dictoffset == 0 && !(type->tp_flags & Py_TPFLAGS_MANAGED_DICT)) {
         soac_type_state_error("ordinary field policy conflicts with the actual dictionary layout");
         Py_DECREF(state);
         return NULL;
@@ -1397,7 +1329,6 @@ soac_move_prepared_policy(SoacTypeContract *state, SoacTypeContract *prepared)
     state->dictionary_mode = prepared->dictionary_mode;
     state->prepare_instance_dictionary_policy = prepared->prepare_instance_dictionary_policy;
     state->check_instance_write = prepared->check_instance_write;
-    state->new_instance_dict = prepared->new_instance_dict;
 }
 
 /* Ready may have run reentrantly before the ENFORCED bind, or normally
@@ -1846,32 +1777,18 @@ _PySOAC_ClearDataclassSlotsHandle(PyObject *object)
     PyErr_SetRaisedException(exception);
 }
 
-/* Preparation may fail while the pending allocation barrier is still closed.
- * Its one provider reference is the future existing state edge, temporarily
- * owned by the C caller. On failure that caller publishes terminal state before
- * retiring it. The actual permanent namespace policy was installed first. */
+/* Seal the actual destination policy before the pending allocation barrier
+ * opens. Ordinary annotation reads own no separate provider capability. */
 static int
-soac_prepare_type_seal(PyTypeObject *type, PyObject **provider_out)
+soac_prepare_type_seal(PyTypeObject *type)
 {
-    *provider_out = NULL;
-    PyObject *dict = type->tp_dict;
-    PyObject *provider = PyDict_GetItemWithError(dict, &_Py_ID(__annotate__));
-    if (provider == NULL && !PyErr_Occurred()) {
-        provider = PyDict_GetItemWithError(dict, &_Py_ID(__annotate_func__));
-    }
-    if (provider == NULL && PyErr_Occurred()) return -1;
-    *provider_out = Py_NewRef(provider != NULL ? provider : Py_None);
-    return PyDict_SealSoacNamespace(dict);
+    return PyDict_SealSoacNamespace(type->tp_dict);
 }
 
-/* This MOVE and scalar publication cannot allocate, release or run Python.
- * Pending admission performs it before ENFORCED, so no supported allocator can
- * observe an admitted class with an unsealed namespace/provider association. */
 static void
-soac_commit_type_seal(SoacTypeContract *state, PyObject *provider)
+soac_commit_type_seal(SoacTypeContract *state)
 {
-    assert(!state->sealed && state->annotation_provider == NULL && provider != NULL);
-    state->annotation_provider = provider;
+    assert(!state->sealed);
     state->sealed = 1;
     /* The actual final policy has already MOVE-committed. Its native shape
      * cannot change after sealing; compute it once here, not at each write.
@@ -1958,17 +1875,7 @@ PyType_IsSoacSealed(PyObject *object)
     return state != NULL && state->sealed && !state->terminal && state->interpreter == _PyInterpreterState_GET();
 }
 
-int
-_PySOAC_TypeReadCacheReady(PyTypeObject *type)
-{
-    SoacTypeContract *state = soac_type_contract(type);
-    /* Generic lookup retains its own descriptor ordering on a miss. In
-     * particular, pending introspection and a data descriptor on a terminal
-     * type must not acquire a new eager refusal from this cache guard. */
-    return state != NULL && state->phase == Py_SOAC_TYPE_STATE_ENFORCED &&
-        state->sealed && !state->terminal && state->owner != NULL &&
-        state->type == type && state->interpreter == _PyInterpreterState_GET();
-}
+
 
 int
 PyType_SealSoacContract(PyObject *object, PyObject *owner)
@@ -1988,29 +1895,12 @@ PyType_SealSoacContract(PyObject *object, PyObject *owner)
         soac_type_phase(state) != Py_SOAC_TYPE_STATE_ENFORCED) {
         return soac_type_state_error("pending class sealing belongs to final admission");
     }
-    PyObject *provider = NULL;
-    if (soac_prepare_type_seal((PyTypeObject *)object, &provider) < 0) {
-        PyObject *error = PyErr_GetRaisedException();
-        Py_XDECREF(provider);
-        PyErr_SetRaisedException(error);
-        return -1;
-    }
-    soac_commit_type_seal(state, provider);
+    if (soac_prepare_type_seal((PyTypeObject *)object) < 0) return -1;
+    soac_commit_type_seal(state);
     return 0;
 }
 
-int
-_PySOAC_PublishAnnotationCache(PyTypeObject *type, PyObject *key, PyObject *value)
-{
-    SoacTypeContract *state = soac_type_contract(type);
-    if (state == NULL || !state->sealed) {
-        return PyDict_SetItem(type->tp_dict, key, value);
-    }
-    if (soac_contract_live(state) < 0) {
-        return -1;
-    }
-    return _PyDict_SetItemForRuntimeCache(type->tp_dict, key, value, state->annotation_provider);
-}
+
 
 int
 _PySOAC_ProtectedName(PyTypeObject *type, PyObject *name)
@@ -2100,10 +1990,6 @@ _PySOAC_CheckDictionaryReplacement(PyObject *object)
         _PyDict_HasSoacBindingPolicy(((PyModuleObject *)object)->md_dict)) {
         PyErr_SetString(soac_type_mutation_error(),
                         "cannot replace a protected module's __dict__");
-        return -1;
-    }
-    if (_PySOAC_UsesInstanceDictionaryPolicy(Py_TYPE(object))) {
-        PyErr_SetString(soac_type_mutation_error(), "cannot replace a strict instance dictionary");
         return -1;
     }
     return 0;
@@ -2331,18 +2217,7 @@ _PySOAC_TypeContractDealloc(PyTypeObject *type)
     Py_CLEAR(((PyHeapTypeObject *)type)->ht_soac_contract);
 }
 
-PyObject *
-_PySOAC_NewInstanceDictionary(PyObject *object)
-{
-    SoacTypeContract *state = soac_type_dictionary_contract(Py_TYPE(object));
-    if (state == NULL) {
-        return PyDict_New();
-    }
-    if (soac_contract_live(state) < 0) {
-        return NULL;
-    }
-    return state->new_instance_dict(state->owner, object);
-}
+
 
 
 static SoacTypeContract *

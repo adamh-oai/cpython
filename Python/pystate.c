@@ -771,10 +771,6 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
 {
     assert(interp != NULL);
     assert(tstate != NULL);
-    /* Stop native replay resolution before any interpreter-owned callbacks
-     * or reference clearing can re-enter application code. */
-    interp->soac.annotation_replay_closed = 1;
-    interp->soac.annotation_replay_resolver = NULL;
     /* Existing activations may still retire during shutdown: keep the
      * immutable scalar table, but forbid new entry and registration. */
     interp->soac.interpreter_closed = 1;

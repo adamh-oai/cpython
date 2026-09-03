@@ -122,10 +122,6 @@ soac_test_validate(PyObject *op, PyObject *dict, PyObject *key,
                    PyObject *value, int operation, PyObject *provenance)
 {
     SoacTestOwner *owner = (SoacTestOwner *)op;
-    if (operation == PyDict_SOAC_CACHE_INSERT || operation == PyDict_SOAC_CACHE_REPLACE) {
-        PyErr_SetString(PyExc_TypeError, "SOAC test owner has no cache provider");
-        return -1;
-    }
     int attribute = operation == PyDict_SOAC_ATTRIBUTE_SET ||
                     operation == PyDict_SOAC_ATTRIBUTE_SET_EXISTING;
     assert(attribute ? (provenance != NULL && PyUnicode_Check(provenance))

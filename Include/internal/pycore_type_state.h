@@ -19,11 +19,9 @@ extern "C" {
 #define _Py_DICT_TYPE_STATE_TERMINAL (UINT64_C(1) << 16)
 #define _Py_DICT_TYPE_STATE_INSTALLING (UINT64_C(1) << 17)
 
-typedef struct SoacSplitClearFrame SoacSplitClearFrame;
-
 /* Existing dictionary rule representation. Direct states publish its rule
  * fields once; their mutable attachment flags live on the actual dictionary.
- * Only legacy policies use the remaining local clear/installation fields. */
+ * Only legacy policies use the local installation flags. */
 typedef struct {
     PyObject *owner;
     PyDict_SoacPolicyCallback validate;
@@ -34,14 +32,11 @@ typedef struct {
     unsigned char sealed;
     unsigned char terminal;
     unsigned char mutating;
-    PyDictKeysObject *baseline_keys;
-    uint8_t baseline_capacity;
-    unsigned char baseline_embedded;
-    unsigned char baseline_promoted;
-    unsigned char instance_bound;
-    SoacSplitClearFrame *split_clear;
-    uint32_t split_clear_pending;
 } SoacDictPolicy;
+
+/* Allocation only: obj is still private. A NULL explicit state selects the
+ * registered native instance policy. */
+extern int _PyDict_InitInstanceWritePolicy(PyObject *obj, PyTypeState *state);
 
 typedef struct {
     Py_ssize_t offset;
@@ -90,6 +85,8 @@ PyAPI_FUNC(PyTypeState **) _PyObject_TypeStateSlot(PyObject *object);
 extern int _PyObject_TypeStateTraverse(PyObject *, visitproc, void *);
 extern void _PyObject_ClearTypeState(PyObject *);
 extern void _PyObject_InitWithTypeState(PyObject *, PyTypeObject *, PyTypeState *);
+extern int _PyObject_InitWithInstanceWritePolicy(
+    PyObject *, PyTypeObject *, Py_ssize_t, PyTypeState *);
 extern int _PyTypeState_AllocationSize(PyTypeObject *, size_t, size_t *);
 extern int _PyTypeState_BindSpec(PyTypeObject *, const PyTypeStateSpecV1 *, PyTypeState *);
 extern int _PyTypeState_CheckInstanceContracts(PyTypeState *);

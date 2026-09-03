@@ -212,11 +212,11 @@ soac_type_construction_layout(PyObject *self, PyObject *Py_UNUSED(args))
     return Py_BuildValue("{s:i,s:n,s:n,s:n,s:n,s:n,s:i,s:n,s:n}",
         "abi_version", Py_SOAC_TYPE_CONTRACT_ABI,
         "spec_size", (Py_ssize_t)sizeof(PySoacTypeConstructionSpec),
-        "contract_size", (Py_ssize_t)sizeof(PySoacTypeContractSpecV4),
+        "contract_size", (Py_ssize_t)sizeof(PySoacTypeContractSpecV5),
         "contract", (Py_ssize_t)offsetof(PySoacTypeConstructionSpec, contract),
         "commit_final", (Py_ssize_t)offsetof(PySoacTypeConstructionSpec, commit_final),
         "object_slot_fields", (Py_ssize_t)(offsetof(PySoacTypeConstructionSpec, contract) +
-            offsetof(PySoacTypeContractSpecV4, object_slot_fields)),
+            offsetof(PySoacTypeContractSpecV5, object_slot_fields)),
         "dataclass_abi_version", Py_SOAC_DATACLASS_ABI,
         "dataclass_callbacks_size", (Py_ssize_t)sizeof(PySoacDataclassCallbacks),
         "prepare_slots", (Py_ssize_t)offsetof(PySoacDataclassCallbacks, prepare_slots));

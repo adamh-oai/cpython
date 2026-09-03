@@ -44,9 +44,6 @@ PyMember_GetOne(const char *obj_addr, PyMemberDef *l)
         return NULL;
     }
 
-    if (_PySOAC_CheckObjectSlotAccess((PyObject *)obj_addr, l) < 0) {
-        return NULL;
-    }
     const void *addr = _PyMember_GetOffset((PyObject *)obj_addr, l);
     switch (l->type) {
     case Py_T_BOOL:
