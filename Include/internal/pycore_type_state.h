@@ -96,6 +96,9 @@ extern int _PyTypeState_SupportedInstanceType(PyTypeObject *);
 extern int _PyTypeState_CheckInlineWrite(PyObject *, PyObject *, PyObject *);
 extern int _PyTypeState_CheckMemberAccess(PyObject *, const PyMemberDef *);
 extern int _PyTypeState_CheckMemberWrite(PyObject *, Py_ssize_t, PyObject *);
+/* 1: canonical object member stored; 0: use the general member-view path;
+ * -1: failed. Caller has already rejected read-only/relative member flags. */
+extern int _PyTypeState_TrySetMember(PyObject *, const PyMemberDef *, PyObject *);
 
 #ifdef __cplusplus
 }

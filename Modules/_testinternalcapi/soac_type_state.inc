@@ -42,6 +42,26 @@ soac_test_type_state_bind(PyObject *owner, PyObject *actual_type)
 }
 
 static int
+soac_test_slot_state_field(PyObject *owner, PyObject *name, PyObject *value)
+{
+    /* This optional observer belongs to the fixture's GC-visible owner. Pin
+     * it while the callback exercises real metadata or receiver tp_clear. */
+    Py_INCREF(owner);
+    PyObject *callback = PyTuple_GET_ITEM(owner, 3);
+    PyObject *observed = PyObject_CallFunctionObjArgs(
+        callback, name, value == NULL ? Py_None : value, NULL);
+    int result = -1;
+    if (observed != NULL) {
+        Py_DECREF(observed);
+        result = soac_test_ordinary_field(owner, name, value);
+    }
+    PyObject *error = PyErr_GetRaisedException();
+    Py_DECREF(owner);
+    PyErr_SetRaisedException(error);
+    return result;
+}
+
+static int
 soac_test_slot_state_factory(PyObject *owner, PyObject *actual_type, PyTypeState **out)
 {
     *out = NULL;
@@ -68,7 +88,8 @@ soac_test_slot_state_factory(PyObject *owner, PyObject *actual_type, PyTypeState
         rows[i] = (PyTypeStateSlotSpecV1){
             .expected_class_owner = owner, .field_index = i, .offset = offset,
             .canonical_name = PyTuple_GET_ITEM(fields, i), .rule_owner = owner,
-            .validate = soac_test_ordinary_field,
+            .validate = PyTuple_GET_ITEM(owner, 3) == Py_None
+                ? soac_test_ordinary_field : soac_test_slot_state_field,
         };
     }
     if (corruption == 2) rows[0].expected_class_owner = Py_None;
@@ -111,11 +132,17 @@ static PyObject *
 slot_new_soac_type_state_type(PyObject *self, PyObject *args)
 {
     PyObject *name, *bases, *namespace, *fields, *namespace_function;
+    PyObject *validator = Py_None;
     int corruption = 0;
-    if (!PyArg_ParseTuple(args, "OOOOO|i:slot_new_soac_type_state_type",
-                         &name, &bases, &namespace, &fields, &namespace_function, &corruption)) return NULL;
+    if (!PyArg_ParseTuple(args, "OOOOO|iO:slot_new_soac_type_state_type",
+                         &name, &bases, &namespace, &fields, &namespace_function,
+                         &corruption, &validator)) return NULL;
     if (!PyTuple_CheckExact(fields) || PyTuple_GET_SIZE(fields) == 0 || corruption < 0 || corruption > 3) {
         PyErr_SetString(PyExc_TypeError, "slot fixture requires nonempty actual slot names and a supported corruption mode");
+        return NULL;
+    }
+    if (validator != Py_None && !PyCallable_Check(validator)) {
+        PyErr_SetString(PyExc_TypeError, "slot fixture validator must be callable or None");
         return NULL;
     }
     for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(fields); ++i) {
@@ -125,7 +152,8 @@ slot_new_soac_type_state_type(PyObject *self, PyObject *args)
         }
     }
     PyObject *empty = PyTuple_New(0), *keywords = PyDict_New(), *mode = PyLong_FromLong(corruption);
-    PyObject *owner = empty == NULL || mode == NULL ? NULL : PyTuple_Pack(3, fields, empty, mode);
+    PyObject *owner = empty == NULL || mode == NULL ? NULL
+        : PyTuple_Pack(4, fields, empty, mode, validator);
     Py_XDECREF(mode);
     if (empty == NULL || keywords == NULL || owner == NULL) {
         Py_XDECREF(empty);

@@ -380,26 +380,37 @@ soac_owner_liveness_error(const char *message)
 }
 
 static int
-soac_contract_live(SoacTypeContract *state)
+soac_contract_not_terminal(SoacTypeContract *state)
 {
-    if (state->terminal || state->interpreter != _PyInterpreterState_GET()) {
+    if (state->terminal) {
         PyErr_SetString(soac_type_mutation_error(), "strict class contract is unavailable in this execution");
         return -1;
     }
-    if (state->empty_write_class_record != NULL ||
-        state->empty_write_storage_record != NULL ||
-        state->empty_write_storage_owner != NULL) {
+    if (state->empty_write_class_record != NULL) {
         /* Direct native owner edges support both scalar reads. Rust tp_clear
          * publishes TERMINAL before draining its own GC reference vector. */
-        if (state->owner == NULL || state->empty_write_storage_owner == NULL ||
-            state->empty_write_class_record == NULL ||
-            state->empty_write_storage_record == NULL ||
-            state->empty_write_class_record->state >= Py_SOAC_OWNER_LIVENESS_TERMINAL ||
+        assert(state->owner != NULL && state->empty_write_storage_owner != NULL);
+        assert(state->empty_write_storage_record != NULL);
+        if (state->empty_write_class_record->state >= Py_SOAC_OWNER_LIVENESS_TERMINAL ||
             state->empty_write_storage_record->state >= Py_SOAC_OWNER_LIVENESS_TERMINAL) {
             return soac_owner_liveness_error("strict class or storage owner is terminal");
         }
     }
+    else {
+        assert(state->empty_write_storage_record == NULL);
+        assert(state->empty_write_storage_owner == NULL);
+    }
     return 0;
+}
+
+static int
+soac_contract_live(SoacTypeContract *state)
+{
+    if (state->interpreter != _PyInterpreterState_GET()) {
+        PyErr_SetString(soac_type_mutation_error(), "strict class contract is unavailable in this execution");
+        return -1;
+    }
+    return soac_contract_not_terminal(state);
 }
 
 int
@@ -471,17 +482,15 @@ PyType_SetSoacEmptyInstanceWritePolicyV1(
 int
 _PyTypeState_CheckInstanceContracts(PyTypeState *storage)
 {
-    if (storage->class_contracts == NULL ||
-        !PyTuple_CheckExact(storage->class_contracts)) {
-        return soac_type_state_error("instance storage has no native contract liveness projection");
-    }
+    /* BindSpec authenticated these immutable edges in storage's interpreter.
+     * Their terminal states can still change during a validator callback. */
+    assert(storage->class_contracts != NULL);
+    assert(PyTuple_CheckExact(storage->class_contracts));
     for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(storage->class_contracts); ++i) {
         PyObject *item = PyTuple_GET_ITEM(storage->class_contracts, i);
-        if (!Py_IS_TYPE(item, &SoacTypeContract_Type) ||
-            soac_contract_live((SoacTypeContract *)item) < 0) {
-            if (!PyErr_Occurred()) {
-                return soac_type_state_error("instance storage has foreign native contract metadata");
-            }
+        assert(Py_IS_TYPE(item, &SoacTypeContract_Type));
+        assert(((SoacTypeContract *)item)->interpreter == storage->interpreter);
+        if (soac_contract_not_terminal((SoacTypeContract *)item) < 0) {
             return -1;
         }
     }

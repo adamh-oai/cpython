@@ -478,35 +478,106 @@ unsafe_view:
     return -1;
 }
 
-int
-_PyTypeState_CheckMemberWrite(PyObject *object, Py_ssize_t offset, PyObject *value)
+/* The allocation marker authenticates this trailer's layout. Only allocation
+ * can install a state, and supported type mutations cannot move its storage.
+ * Retirement and interpreter ownership are still mutable runtime conditions. */
+static PyTypeState *
+soac_member_write_state(PyObject *object, PyTypeState ***tail)
 {
-    PyTypeState *state = PyObject_GetTypeState(object);
-    if (state == NULL) return -1;
-    if (state->kind != _Py_TYPE_STATE_INSTANCE) {
-        return soac_type_state_error("native slot write has another storage family");
-    }
+    *tail = _PyObject_TypeStateSlot(object);
+    assert(*tail != NULL);
+    PyTypeState *state = **tail;
+    if (_PyTypeState_CheckLive(state) < 0) return NULL;
+    assert(state->kind == _Py_TYPE_STATE_INSTANCE);
+    assert(state->allocation_type == Py_TYPE(object));
+    return state;
+}
+
+static int
+soac_validate_member_write(PyObject *object, PyTypeState *state,
+                           PyTypeState **tail, Py_ssize_t offset,
+                           Py_ssize_t first, PyObject *value)
+{
     PyTypeObject *type = Py_TYPE(object);
+    /* A foreign validator may run Python or explicitly clear the receiver.
+     * Keep its catalogue alive until attachment/retirement has been checked. */
     Py_INCREF(state);
-    int result = 0;
-    for (Py_ssize_t i = 0; i < state->slot_count; ++i) {
+    for (Py_ssize_t i = first; i < state->slot_count; ++i) {
         const _PyTypeStateSlot *slot = &state->slots[i];
         if (slot->offset != offset) continue;
         if (slot->validate(slot->owner, slot->canonical_name, value) != 0 || PyErr_Occurred()) {
             if (!PyErr_Occurred()) soac_type_state_error("native slot validator failed without an exception");
-            result = -1;
-            break;
+            goto error;
         }
-        if (Py_TYPE(object) != type || PyObject_GetTypeState(object) != state) {
-            if (!PyErr_Occurred()) soac_type_state_error("native slot state changed during validation");
-            result = -1;
-            break;
+        if (Py_TYPE(object) != type || *tail != state || state->terminal) {
+            soac_type_state_error("native slot state changed during validation");
+            goto error;
+        }
+        /* Recheck only what the callback can retire, without another trailer
+         * lookup, allocation/layout proof or current-interpreter query. */
+        assert(state->interpreter == _PyInterpreterState_GET());
+        if (_PyTypeState_CheckInstanceContracts(state) < 0) {
+            goto error;
         }
     }
-    PyObject *error = PyErr_GetRaisedException();
+    /* A successful write still has its attachment reference, so this cannot
+     * invoke cleanup. Preserve exception state only on the failure path. */
+    assert(*tail == state);
+    assert(Py_REFCNT(state) > 1);
     Py_DECREF(state);
-    PyErr_SetRaisedException(error);
-    return result;
+    return 0;
+error:
+    {
+        PyObject *error = PyErr_GetRaisedException();
+        Py_DECREF(state);
+        PyErr_SetRaisedException(error);
+        return -1;
+    }
+}
+
+int
+_PyTypeState_TrySetMember(PyObject *object, const PyMemberDef *view,
+                         PyObject *value)
+{
+    assert(view->flags == 0);
+    assert(view->type == _Py_T_OBJECT || view->type == Py_T_OBJECT_EX);
+    /* Marked dictionaries have a different storage family. Their foreign
+     * member views must go through the ordinary checked boundary below. */
+    if (PyDict_CheckExact(object)) return 0;
+    PyTypeState **tail;
+    PyTypeState *state = soac_member_write_state(object, &tail);
+    if (state == NULL) return -1;
+    for (Py_ssize_t i = 0; i < state->slot_count; ++i) {
+        if (state->slots[i].offset != view->offset) continue;
+        /* BindSpec authenticated this offset and pointer representation.
+         * Exact matches cannot overlap a different slot or bookkeeping;
+         * member names never select policy, including copied/renamed views. */
+        PyObject **address = (PyObject **)((char *)object + view->offset);
+        if (value == NULL && view->type == Py_T_OBJECT_EX && *address == NULL) {
+            PyErr_SetString(PyExc_AttributeError, view->name);
+            return -1;
+        }
+        if (soac_validate_member_write(object, state, tail, view->offset,
+                                        i, value) < 0) return -1;
+        PyObject *old;
+        Py_BEGIN_CRITICAL_SECTION(object);
+        old = *address;
+        FT_ATOMIC_STORE_PTR_RELEASE(*address, Py_XNewRef(value));
+        Py_END_CRITICAL_SECTION();
+        Py_XDECREF(old);
+        return 1;
+    }
+    /* Arbitrary public PyMemberDef views retain overlap/extent validation. */
+    return 0;
+}
+
+int
+_PyTypeState_CheckMemberWrite(PyObject *object, Py_ssize_t offset, PyObject *value)
+{
+    PyTypeState **tail;
+    PyTypeState *state = soac_member_write_state(object, &tail);
+    if (state == NULL) return -1;
+    return soac_validate_member_write(object, state, tail, offset, 0, value);
 }
 
 static int

@@ -87,17 +87,18 @@ type_state_new(unsigned char kind)
 int
 _PyTypeState_CheckLive(PyTypeState *state)
 {
-    if (state == NULL || !Py_IS_TYPE(state, &_PyTypeState_Type) ||
-        state->terminal || state->interpreter != _PyInterpreterState_GET()) {
+    if (state == NULL || state->terminal ||
+        state->interpreter != _PyInterpreterState_GET()) {
         return type_state_unavailable("native storage type state is unavailable");
     }
+    /* Only verified state constructors can publish an attachment. The type
+     * and storage family cannot change while that attachment is live. */
+    assert(Py_IS_TYPE(state, &_PyTypeState_Type));
     if (state->kind == _Py_TYPE_STATE_INSTANCE) {
         return _PyTypeState_CheckInstanceContracts(state);
     }
-    if (state->kind != _Py_TYPE_STATE_DICTIONARY ||
-        state->dictionary_policy.owner == NULL) {
-        return type_state_unavailable("native dictionary rules are unavailable");
-    }
+    assert(state->kind == _Py_TYPE_STATE_DICTIONARY);
+    assert(state->dictionary_policy.owner != NULL);
     return 0;
 }
 
@@ -211,12 +212,10 @@ _PyObject_TypeStateSlot(PyObject *object)
     else {
         /* Access checks immutable layout, not current constructor eligibility:
          * an allowed later __new__ mutation cannot move an old object's tail. */
-        if (!(type->tp_flags & Py_TPFLAGS_HEAPTYPE) ||
-            !(type->tp_flags & Py_TPFLAGS_HAVE_GC) || type->tp_itemsize != 0 ||
-            type->tp_basicsize < (Py_ssize_t)sizeof(PyObject)) {
-            type_state_unavailable("type-state marker has an unsupported allocation family");
-            return NULL;
-        }
+        assert(type->tp_flags & Py_TPFLAGS_HEAPTYPE);
+        assert(type->tp_flags & Py_TPFLAGS_HAVE_GC);
+        assert(type->tp_itemsize == 0);
+        assert(type->tp_basicsize >= (Py_ssize_t)sizeof(PyObject));
         /* Only the audited allocator sets this marker; class reassignment
          * across an installed contract cannot transfer it. No MRO walk belongs
          * on this direct storage access path. */
@@ -224,23 +223,19 @@ _PyObject_TypeStateSlot(PyObject *object)
         if (type->tp_flags & Py_TPFLAGS_INLINE_VALUES) {
             PyDictValues *values = _PyObject_InlineValues(object);
             size_t capacity = values->soac_allocated_capacity;
-            if (capacity == 0 || capacity > SHARED_KEYS_MAX_SIZE ||
-                capacity < values->capacity) {
-                type_state_unavailable("type-state inline allocation extent is invalid");
-                return NULL;
-            }
+            assert(capacity > 0 && capacity <= SHARED_KEYS_MAX_SIZE);
+            assert(capacity >= values->capacity);
             size_t inline_size = _Py_SIZE_ROUND_UP(capacity, sizeof(PyObject *)) +
                                  (capacity + 1) * sizeof(PyObject *);
-            if (ordinary > (size_t)PY_SSIZE_T_MAX - inline_size) {
-                type_state_unavailable("type-state inline allocation size overflows");
-                return NULL;
-            }
+            assert(ordinary <= (size_t)PY_SSIZE_T_MAX - inline_size);
             ordinary += inline_size;
         }
     }
-    size_t size;
-    if (_PyTypeState_AllocationSize(type, ordinary, &size) < 0) return NULL;
-    return (PyTypeState **)((char *)object + size - sizeof(PyTypeState *));
+    /* Allocation checked this extent before setting the marker. Supported
+     * type and member mutations cannot move or overwrite the trailer. */
+    const size_t alignment = sizeof(PyTypeState *);
+    assert(ordinary <= (size_t)PY_SSIZE_T_MAX - 2 * alignment);
+    return (PyTypeState **)((char *)object + _Py_SIZE_ROUND_UP(ordinary, alignment));
 #else
     return NULL;
 #endif

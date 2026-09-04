@@ -8,6 +8,7 @@
 #include "pycore_object.h"        // _Py_TryIncrefCompare(), FT_ATOMIC_*()
 #include "pycore_critical_section.h"
 #include "pycore_soac_type.h"    // native physical member policies
+#include "pycore_type_state.h"   // canonical native object member writes
 
 
 static inline PyObject *
@@ -170,6 +171,14 @@ PyMember_SetOne(char *addr, PyMemberDef *l, PyObject *v)
     {
         PyErr_SetString(PyExc_AttributeError, "readonly attribute");
         return -1;
+    }
+    if (l->flags == 0 &&
+        (l->type == _Py_T_OBJECT || l->type == Py_T_OBJECT_EX) &&
+        _PyObject_HasTypeStateSlot(obj)) {
+        int result = _PyTypeState_TrySetMember(obj, l, v);
+        if (result != 0) {
+            return result < 0 ? -1 : 0;
+        }
     }
     if (_PySOAC_CheckObjectSlotAccess(obj, l) < 0) {
         return -1;
