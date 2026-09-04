@@ -1,4 +1,4 @@
-/* Included by funcobject.c: C-only, interpreter-owned dataclass provenance.
+/* Included by funcobject.c: C-only dataclass construction provenance.
  * None of these records permits execution of original strict bytecode.
  */
 
@@ -26,7 +26,6 @@ typedef enum {
 
 typedef struct {
     PyObject_HEAD
-    int64_t interpreter_id;
     SoacDataclassPhase phase;
     PyObject *owner;              /* Active GC-visible compiler/catalog owner. */
     PyObject *class_owner;        /* Active contract owner, not the type. */
@@ -175,13 +174,12 @@ soac_dataclass_fail(SoacDataclassInvocation *invocation, const char *message)
 }
 
 static int
-soac_dataclass_current(SoacDataclassInvocation *invocation)
+soac_dataclass_callbacks_available(void)
 {
     PyInterpreterState *interp = _PyInterpreterState_GET();
-    if (invocation->interpreter_id != PyInterpreterState_GetID(interp) ||
-        interp->soac.dataclass_closed ||
+    if (interp->soac.dataclass_closed ||
         interp->soac.dataclass_callbacks.abi_version != Py_SOAC_DATACLASS_ABI) {
-        return soac_dataclass_error("dataclass invocation belongs to an unavailable interpreter");
+        return soac_dataclass_error("dataclass callbacks are unavailable");
     }
     return 0;
 }
@@ -194,7 +192,7 @@ soac_dataclass_invocation(PyObject *object)
         return NULL;
     }
     SoacDataclassInvocation *invocation = (SoacDataclassInvocation *)object;
-    if (soac_dataclass_current(invocation) < 0) {
+    if (soac_dataclass_callbacks_available() < 0) {
         return NULL;
     }
     return invocation;
@@ -355,7 +353,6 @@ PySoac_NewDataclassInvocation(PyObject *owner)
     if (invocation == NULL) {
         return NULL;
     }
-    invocation->interpreter_id = PyInterpreterState_GetID(interp);
     invocation->phase = SOAC_DC_NEW;
     invocation->owner = Py_NewRef(owner);
     invocation->class_owner = NULL;
@@ -479,7 +476,7 @@ soac_dataclass_enter(SoacDataclassInvocation *invocation, unsigned int stage,
                      int move_invocation)
 {
     if (!soac_dataclass_is_running(invocation) || invocation->owner == NULL ||
-        soac_dataclass_current(invocation) < 0 ||
+        soac_dataclass_callbacks_available() < 0 ||
         (parent != NULL &&
          (parent->soac_dataclass_invocation != (PyObject *)invocation ||
           !soac_dataclass_frame_valid(parent)))) {
@@ -940,7 +937,7 @@ soac_dataclass_record(PyFunctionObject *function)
     SoacDataclassRecord *record = (SoacDataclassRecord *)owner;
     if (record->function != function || record->invocation == NULL ||
         record->phase == SOAC_DC_RECORD_TERMINAL ||
-        soac_dataclass_current(record->invocation) < 0) {
+        soac_dataclass_callbacks_available() < 0) {
         soac_dataclass_error("generated function record is cleared or replayed");
         return NULL;
     }
@@ -989,7 +986,6 @@ _PySOAC_DataclassCreationInfo(
     if (record->function != function || invocation == NULL ||
         record->phase != SOAC_DC_RECORD_FRESH || record->identity == 0 ||
         !soac_dataclass_original_code(record, function) ||
-        invocation->interpreter_id != PyInterpreterState_GetID(interp) ||
         interp->soac.dataclass_closed ||
         interp->soac.dataclass_callbacks.abi_version != Py_SOAC_DATACLASS_ABI ||
         invocation->owner == NULL || invocation->phase >= SOAC_DC_COMPLETE) return;
@@ -1036,7 +1032,7 @@ soac_dataclass_check_creation(_PyInterpreterFrame *producer, PyObject *code,
     if (!soac_dataclass_is_running(invocation)) {
         return 0;
     }
-    if (soac_dataclass_current(invocation) < 0 || invocation->owner == NULL ||
+    if (soac_dataclass_callbacks_available() < 0 || invocation->owner == NULL ||
         !soac_dataclass_frame_valid(producer) || !PyCode_Check(code) ||
         (((PyCodeObject *)code)->co_flags & CO_FUTURE_STRICT) ||
         ((PyCodeObject *)code)->_co_soac_strict_source_id != 0) {
@@ -1206,7 +1202,7 @@ soac_dataclass_validate_member_native(SoacDataclassInvocation *invocation,
                               PyObject *name, PyObject *function,
                               SoacDataclassRecord *record)
 {
-    if (soac_dataclass_current(invocation) < 0 ||
+    if (soac_dataclass_callbacks_available() < 0 ||
         invocation->phase != SOAC_DC_APPLY_ACTIVE || invocation->owner == NULL ||
         actual_type != (PyObject *)invocation->actual_type ||
         class_owner == NULL || class_owner != invocation->class_owner ||

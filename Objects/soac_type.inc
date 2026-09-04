@@ -13,7 +13,6 @@ enum {
 
 struct SoacConstructionHandle {
     PyObject_HEAD
-    PyInterpreterState *interpreter;
     PySoacTypeConstructionSpec spec;
     int consumed;
     int dataclass_slots;
@@ -47,7 +46,6 @@ typedef struct {
 
 struct SoacTypeContract {
     PyObject_HEAD
-    PyInterpreterState *interpreter;
     PyObject *owner;
     PyObject *fields;
     PyObject *object_slot_fields;
@@ -219,7 +217,7 @@ soac_constructor_live(PyTypeObject *type)
     if (soac_type_phase(state) != Py_SOAC_TYPE_STATE_PENDING ||
         root->lineage_phase != SOAC_LINEAGE_OPEN ||
         root->active_constructions == 0 || state->type != type ||
-        state->owner == NULL || state->interpreter != _PyInterpreterState_GET()) {
+        state->owner == NULL) {
         soac_fail_construction(state->construction);
         return soac_type_state_error("pending native construction was invalidated");
     }
@@ -232,7 +230,6 @@ PyType_AbandonSoacPendingV1(PyObject *object, PyObject *expected_owner)
     if (object == NULL || expected_owner == NULL || !PyType_Check(object)) return;
     SoacTypeContract *state = soac_type_state((PyTypeObject *)object);
     if (state != NULL && state->owner == expected_owner &&
-        state->interpreter == _PyInterpreterState_GET() &&
         !state->terminal && soac_has_pending_construction(state) &&
         (state->phase == Py_SOAC_TYPE_STATE_PENDING || state->phase == Py_SOAC_TYPE_STATE_ADMITTING)) {
         soac_fail_construction(state->construction);
@@ -248,8 +245,7 @@ soac_type_allocation_barrier(PyTypeObject *type)
 {
     SoacTypeContract *state = soac_type_state(type);
     if (state == NULL || soac_type_phase(state) == Py_SOAC_TYPE_STATE_DYNAMIC) return 0;
-    if (state->interpreter != _PyInterpreterState_GET() ||
-        soac_type_phase(state) != Py_SOAC_TYPE_STATE_ENFORCED) {
+    if (soac_type_phase(state) != Py_SOAC_TYPE_STATE_ENFORCED) {
         return soac_type_state_error("instances of a pending or failed strict type are unavailable");
     }
     return 0;
@@ -323,8 +319,7 @@ _PySOAC_GetTypeConstructionOwner(PyObject *object)
     SoacTypeContract *state = soac_type_state((PyTypeObject *)object);
     if (state == NULL || soac_type_phase(state) == Py_SOAC_TYPE_STATE_DYNAMIC) return NULL;
     if (state->owner == NULL || state->terminal ||
-        soac_type_phase(state) == Py_SOAC_TYPE_STATE_FAILED ||
-        state->interpreter != _PyInterpreterState_GET()) {
+        soac_type_phase(state) == Py_SOAC_TYPE_STATE_FAILED) {
         soac_type_state_error("native type construction owner is unavailable");
         return NULL;
     }
@@ -407,16 +402,6 @@ soac_contract_not_terminal(SoacTypeContract *state)
     return 0;
 }
 
-static int
-soac_contract_live(SoacTypeContract *state)
-{
-    if (state->interpreter != _PyInterpreterState_GET()) {
-        PyErr_SetString(soac_type_mutation_error(), "strict class contract is unavailable in this execution");
-        return -1;
-    }
-    return soac_contract_not_terminal(state);
-}
-
 int
 PyType_SetSoacStorageStateFactoryV1(PyObject *object, PyObject *expected_owner,
                                    PySoacStorageStateFactoryV1 prepare)
@@ -430,7 +415,7 @@ PyType_SetSoacStorageStateFactoryV1(PyObject *object, PyObject *expected_owner,
         ? soac_type_state((PyTypeObject *)object) : NULL;
     if (state == NULL || expected_owner == NULL || prepare == NULL ||
         state->owner != expected_owner || state->type != (PyTypeObject *)object ||
-        state->interpreter != _PyInterpreterState_GET() || state->terminal ||
+        state->terminal ||
         soac_type_phase(state) != Py_SOAC_TYPE_STATE_PENDING ||
         state->permanent_contract_published || state->construction == NULL ||
         !state->binding_storage_factory || state->storage_state_factory != NULL ||
@@ -461,7 +446,7 @@ PyType_SetSoacEmptyInstanceWritePolicyV1(
         class_record == NULL || storage_owner == NULL || storage_record == NULL ||
         storage_owner == expected_class_owner || class_record == storage_record ||
         state->owner != expected_class_owner || state->type != (PyTypeObject *)object ||
-        state->interpreter != _PyInterpreterState_GET() || state->terminal ||
+        state->terminal ||
         soac_type_phase(state) != Py_SOAC_TYPE_STATE_PENDING ||
         state->permanent_contract_published || !soac_has_pending_construction(state) ||
         !state->binding_storage_factory ||
@@ -486,14 +471,13 @@ PyType_SetSoacEmptyInstanceWritePolicyV1(
 int
 _PyTypeState_CheckInstanceContracts(PyTypeState *storage)
 {
-    /* BindSpec authenticated these immutable edges in storage's interpreter.
+    /* BindSpec authenticated these immutable class-contract edges.
      * Their terminal states can still change during a validator callback. */
     assert(storage->class_contracts != NULL);
     assert(PyTuple_CheckExact(storage->class_contracts));
     for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(storage->class_contracts); ++i) {
         PyObject *item = PyTuple_GET_ITEM(storage->class_contracts, i);
         assert(Py_IS_TYPE(item, &SoacTypeContract_Type));
-        assert(((SoacTypeContract *)item)->interpreter == storage->interpreter);
         if (soac_contract_not_terminal((SoacTypeContract *)item) < 0) {
             return -1;
         }
@@ -525,7 +509,7 @@ _PyTypeState_ForAllocation(PyTypeObject *type)
     for (Py_ssize_t i = -1; i < PyTuple_GET_SIZE(mro); ++i) {
         SoacTypeContract *contract = soac_object_slot_contract_at(type, mro, i);
         if (contract == NULL) continue;
-        if (soac_contract_live(contract) < 0) return NULL;
+        if (soac_contract_not_terminal(contract) < 0) return NULL;
         /* No arbitrary owner is passed to another runtime's factory. A mixed
          * legacy/native family keeps every existing policy and no tail. The
          * factory authenticates every declaring owner, including method-only
@@ -566,7 +550,7 @@ _PyTypeState_ForAllocation(PyTypeObject *type)
         type->tp_mro != mro || type->tp_version_tag != version ||
         !_PyTypeState_SupportedInstanceType(type) ||
         selected->owner != owner || selected->storage_state_factory != factory ||
-        soac_contract_live(selected) < 0) {
+        soac_contract_not_terminal(selected) < 0) {
         if (!PyErr_Occurred()) soac_type_state_error("storage-state factory changed its native allocation binding");
         goto done;
     }
@@ -765,7 +749,6 @@ soac_new_type_state(PyObject *owner, unsigned int phase)
     SoacTypeContract *state = PyObject_GC_New(SoacTypeContract, &SoacTypeContract_Type);
     if (state == NULL) return NULL;
     memset((char *)state + sizeof(PyObject), 0, sizeof(*state) - sizeof(PyObject));
-    state->interpreter = _PyInterpreterState_GET();
     state->owner = Py_NewRef(owner);
     state->phase = phase;
     return state;
@@ -891,7 +874,6 @@ soac_new_construction_handle(const PySoacTypeConstructionSpec *spec,
     if (handle == NULL) {
         return NULL;
     }
-    handle->interpreter = _PyInterpreterState_GET();
     handle->spec = *spec;
     handle->consumed = 0;
     handle->dataclass_slots = dataclass_slots;
@@ -984,7 +966,7 @@ soac_final_override(PyTypeObject *type, PyObject *name)
     for (Py_ssize_t i = 1; i < PyTuple_GET_SIZE(mro); ++i) {
         SoacTypeContract *base = soac_type_contract((PyTypeObject *)PyTuple_GET_ITEM(mro, i));
         if (base != NULL) {
-            if (soac_contract_live(base) < 0) {
+            if (soac_contract_not_terminal(base) < 0) {
                 return -1;
             }
             int found = soac_names_contains(base->final_methods, name);
@@ -1016,7 +998,7 @@ soac_check_class_write_state(PyTypeObject *type, SoacTypeContract *state,
         }
     }
     if (state != NULL) {
-        if (soac_contract_live(state) < 0) {
+        if (soac_contract_not_terminal(state) < 0) {
             return -1;
         }
         if (state->sealed) {
@@ -1133,7 +1115,7 @@ soac_class_dictionary_policy(PyObject *owner, PyObject *dict, PyObject *key,
                 if (match != 1) {
                     return soac_type_state_error("pending frozen hook creation changed");
                 }
-                return soac_contract_live(state) < 0
+                return soac_contract_not_terminal(state) < 0
                     ? -1 : soac_final_override(state->type, key);
             }
         }
@@ -1143,14 +1125,14 @@ soac_class_dictionary_policy(PyObject *owner, PyObject *dict, PyObject *key,
               _PyUnicode_Equal(key, &_Py_ID(__setattr__))) ||
              (value == state->initial_frozen_delattr &&
               _PyUnicode_Equal(key, &_Py_ID(__delattr__))))) {
-            if (soac_contract_live(state) < 0) {
+            if (soac_contract_not_terminal(state) < 0) {
                 return -1;
             }
             return soac_final_override(state->type, key);
         }
         return soac_check_class_write_state(state->type, state, key, value, NULL);
     }
-    if (soac_contract_live(state) < 0 ||
+    if (soac_contract_not_terminal(state) < 0 ||
         (state->type != NULL && _PySOAC_CheckPendingTypeWrite(state->type) < 0)) {
         return -1;
     }
@@ -1205,8 +1187,7 @@ _PySOAC_MatchesClassNamespacePolicy(PyObject *policy_owner,
         return 0;
     }
     SoacTypeContract *state = (SoacTypeContract *)policy_owner;
-    if (state->terminal || state->type == NULL || state->owner == NULL ||
-        state->interpreter != _PyInterpreterState_GET()) {
+    if (state->terminal || state->type == NULL || state->owner == NULL) {
         PyObject *error = PySoac_GetStrictRuntimeUnavailableError();
         if (error != NULL) {
             PyErr_SetString(error, "strict class namespace binding is unavailable");
@@ -1273,7 +1254,7 @@ soac_prepare_type_contract(PyTypeObject *type, PyObject *owner,
             }
             continue;
         }
-        if (soac_contract_live(base) < 0 || _PySet_Update(state->protected_names, base->protected_names) < 0 ||
+        if (soac_contract_not_terminal(base) < 0 || _PySet_Update(state->protected_names, base->protected_names) < 0 ||
             _PySet_Update(state->final_methods, base->final_methods) < 0) {
             Py_DECREF(state);
             return NULL;
@@ -1690,14 +1671,13 @@ PyObject *
 PyType_FromSoacConstructionHandle(PyObject *object, PyObject *namespace_function)
 {
     if (!Py_IS_TYPE(object, &SoacConstructionHandle_Type)) {
-        PyErr_SetString(soac_type_mutation_error(), "expected an interpreter-owned strict construction handle");
+        PyErr_SetString(soac_type_mutation_error(), "expected a native strict construction handle");
         return NULL;
     }
     SoacConstructionHandle *handle = (SoacConstructionHandle *)object;
     if (handle->dataclass_slots || handle->consumed ||
-        handle->interpreter != _PyInterpreterState_GET() ||
         handle->spec.namespace_function != namespace_function) {
-        PyErr_SetString(soac_type_mutation_error(), "strict construction handle was consumed, transferred, or used by the wrong namespace function");
+        PyErr_SetString(soac_type_mutation_error(), "strict construction handle was consumed or used by the wrong namespace function");
         return NULL;
     }
     return soac_type_from_handle(handle, NULL);
@@ -1715,13 +1695,12 @@ _PySOAC_TypeFromInterpreterConstructionHandle(
 {
     if (object == NULL || !Py_IS_TYPE(object, &SoacConstructionHandle_Type)) {
         PyErr_SetString(soac_type_mutation_error(),
-                        "expected an interpreter-owned strict construction handle");
+                        "expected a native strict construction handle");
         return NULL;
     }
     SoacConstructionHandle *handle = (SoacConstructionHandle *)object;
     PySoacTypeConstructionSpec *spec = &handle->spec;
     if (handle->dataclass_slots || handle->consumed || handle->borrowed_inputs ||
-        handle->interpreter != _PyInterpreterState_GET() ||
         metaclass != (PyObject *)&PyType_Type ||
         namespace_function == NULL || spec->namespace_function != namespace_function ||
         name == NULL || spec->name != name || bases == NULL || spec->bases != bases ||
@@ -1767,7 +1746,6 @@ _PySOAC_TypeFromDataclassSlotsHandle(_PySoacDataclassSlotsContext *context,
     }
     SoacConstructionHandle *handle = (SoacConstructionHandle *)object;
     if (!handle->dataclass_slots || handle->consumed ||
-        handle->interpreter != _PyInterpreterState_GET() ||
         _PySOAC_DataclassValidateSlotsHandle(context, object, &handle->spec) < 0) {
         _PySOAC_DataclassFailSlots(context, "replacement construction handle is unavailable");
         return NULL;
@@ -1843,8 +1821,7 @@ PyType_GetSoacContractOwner(PyObject *object)
     if (state == NULL && !(type->tp_flags & Py_TPFLAGS_SOAC_CONTRACT)) {
         return NULL;
     }
-    if (state == NULL || state->terminal || state->owner == NULL ||
-        state->interpreter != _PyInterpreterState_GET()) {
+    if (state == NULL || state->terminal || state->owner == NULL) {
         PyObject *error = PySoac_GetStrictRuntimeUnavailableError();
         if (error != NULL) {
             PyErr_SetString(error, "strict class owner is unavailable in this execution");
@@ -1886,7 +1863,7 @@ int
 PyType_IsSoacSealed(PyObject *object)
 {
     SoacTypeContract *state = PyType_Check(object) ? soac_type_contract((PyTypeObject *)object) : NULL;
-    return state != NULL && state->sealed && !state->terminal && state->interpreter == _PyInterpreterState_GET();
+    return state != NULL && state->sealed && !state->terminal;
 }
 
 
@@ -1899,7 +1876,7 @@ PyType_SealSoacContract(PyObject *object, PyObject *owner)
         PyErr_SetString(soac_type_mutation_error(), "strict class seal owner mismatch");
         return -1;
     }
-    if (soac_contract_live(state) < 0) {
+    if (soac_contract_not_terminal(state) < 0) {
         return -1;
     }
     if (state->sealed) {
@@ -1923,7 +1900,7 @@ _PySOAC_ProtectedName(PyTypeObject *type, PyObject *name)
     if (state == NULL) {
         return 0;
     }
-    if (soac_contract_live(state) < 0) {
+    if (soac_contract_not_terminal(state) < 0) {
         return -1;
     }
     return soac_names_contains(state->protected_names, name);
@@ -1947,7 +1924,7 @@ _PySOAC_CheckInstanceWrite(PyObject *object, PyObject *name, PyObject *value)
         /* An ordinary child retains its base's receiver-write boundary even
          * when its independently live dictionary already owns the field rules. */
         state = soac_type_ordinary_dictionary_contract(Py_TYPE(object));
-        return state != NULL ? soac_contract_live(state) : 0;
+        return state != NULL ? soac_contract_not_terminal(state) : 0;
     }
     int protected = _PySOAC_ProtectedName(Py_TYPE(object), name);
     if (protected != 0) {
@@ -2147,7 +2124,7 @@ _PySOAC_ReadyTypeInheritance(PyTypeObject *type)
         if (base == NULL) {
             continue;
         }
-        if (soac_contract_live(base) < 0) {
+        if (soac_contract_not_terminal(base) < 0) {
             Py_XDECREF(inherited_finals);
             return -1;
         }
@@ -2289,7 +2266,7 @@ _PySOAC_CheckInlineInstanceWrite(PyObject *object, PyObject *name, PyObject *val
     SoacTypeContract *state = soac_type_ordinary_dictionary_contract(type);
     if (state == NULL) return 0;
     if (name == NULL || !PyUnicode_CheckExact(name) ||
-        soac_contract_live(state) < 0 || state->owner == NULL ||
+        soac_contract_not_terminal(state) < 0 || state->owner == NULL ||
         state->check_instance_write == NULL) {
         return soac_type_state_error("ordinary inline field policy is unavailable");
     }
@@ -2297,7 +2274,7 @@ _PySOAC_CheckInlineInstanceWrite(PyObject *object, PyObject *name, PyObject *val
     int result = state->check_instance_write(owner, object, name, value);
     if (result != 0 || PyErr_Occurred() || Py_TYPE(object) != type ||
         soac_type_ordinary_dictionary_contract(type) != state ||
-        state->owner != owner || soac_contract_live(state) < 0) {
+        state->owner != owner || soac_contract_not_terminal(state) < 0) {
         return soac_type_state_error("ordinary inline field check failed or changed");
     }
     return 0;
@@ -2342,14 +2319,14 @@ _PySOAC_PrepareInstanceDictPolicy(PyObject *object, PyObject *dict,
     if (state == NULL) return 0;
     if (dict == NULL || !PyDict_Check(dict) || state->owner == NULL ||
         state->prepare_instance_dictionary_policy == NULL ||
-        soac_contract_live(state) < 0) {
+        soac_contract_not_terminal(state) < 0) {
         return soac_type_state_error("ordinary dictionary policy preparation is unavailable");
     }
     PyObject *owner = state->owner;
     int result = state->prepare_instance_dictionary_policy(owner, object, dict, existing, out);
     if (result != 0 || PyErr_Occurred() || Py_TYPE(object) != type ||
         soac_type_ordinary_dictionary_contract(type) != state || state->owner != owner ||
-        soac_contract_live(state) < 0 || out->owner == NULL || out->validate == NULL ||
+        soac_contract_not_terminal(state) < 0 || out->owner == NULL || out->validate == NULL ||
         (existing != NULL &&
          (out->owner != existing->owner || out->validate != existing->validate))) {
         soac_type_state_error("ordinary dictionary policy factory failed or changed");

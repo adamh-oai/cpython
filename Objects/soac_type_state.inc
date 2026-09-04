@@ -77,7 +77,6 @@ type_state_new(unsigned char kind)
     memset(mem, 0, presize + sizeof(PyTypeState));
     PyTypeState *state = (PyTypeState *)(mem + presize);
     _PyObject_GC_Link((PyObject *)state);
-    state->interpreter = _PyInterpreterState_GET();
     state->kind = kind;
     state->terminal = 1;  /* private, incomplete metadata cannot validate */
     _PyObject_Init((PyObject *)state, &_PyTypeState_Type);
@@ -87,8 +86,7 @@ type_state_new(unsigned char kind)
 int
 _PyTypeState_CheckLive(PyTypeState *state)
 {
-    if (state == NULL || state->terminal ||
-        state->interpreter != _PyInterpreterState_GET()) {
+    if (state == NULL || state->terminal) {
         return type_state_unavailable("native storage type state is unavailable");
     }
     /* Only verified state constructors can publish an attachment. The type

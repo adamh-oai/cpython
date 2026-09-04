@@ -1,6 +1,6 @@
 /* Exact opcode-dispatched bridges. Their public/C entries are ordinary calls;
  * neither the implementation pointer nor a Python module binding is authority.
- * Included by soac_dataclass.inc, sharing its one interpreter-owned protocol. */
+ * Included by soac_dataclass.inc, sharing its one construction protocol. */
 
 static PyObject *
 soac_dataclass_builtin(PyInterpreterState *interp, unsigned int kind)
@@ -185,7 +185,7 @@ soac_dataclass_validate_bridge(_PyInterpreterFrame *parent, PyObject *builtin,
 {
     SoacDataclassInvocation *invocation =
         (SoacDataclassInvocation *)parent->soac_dataclass_invocation;
-    if (invocation == NULL || soac_dataclass_current(invocation) < 0 ||
+    if (invocation == NULL || soac_dataclass_callbacks_available() < 0 ||
         !soac_dataclass_is_running(invocation) || invocation->owner == NULL ||
         !soac_dataclass_frame_valid(parent) ||
         soac_dataclass_bridge_kind(builtin) != kind) {

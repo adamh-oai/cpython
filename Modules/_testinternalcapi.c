@@ -3443,50 +3443,52 @@ soac_descriptor_birth_exhaustion(PyObject *self, PyObject *const *args,
 #endif
 }
 
+/* Test-only prefixes for scalar metadata fault injection. These match the
+ * private diagnostic records in soac_interpreter.inc; no object is ever
+ * moved between interpreters. */
+typedef struct {
+    PyObject_HEAD
+    int64_t interpreter_id;
+} SoacTestInterpreterIdPrefix;
+
+typedef struct {
+    PyObject_VAR_HEAD
+    PyObject *publication, *execution, *globals;
+    uint64_t source_id;
+    int64_t interpreter_id;
+} SoacTestSourceBindingPrefix;
+
 static PyObject *
-soac_descriptor_birth_foreign(PyObject *self, PyObject *const *args,
-                              Py_ssize_t nargs)
+soac_metadata_interpreter_id(PyObject *self, PyObject *args)
 {
-    if (nargs != 5) {
-        PyErr_SetString(PyExc_TypeError, "descriptor fixture needs five operands");
-        return NULL;
+    PyObject *object;
+    long long replacement;
+    if (!PyArg_ParseTuple(args, "OL:soac_metadata_interpreter_id",
+                         &object, &replacement)) return NULL;
+    const char *name = Py_TYPE(object)->tp_name;
+    size_t offset;
+    if (strcmp(name, "_soac_interpreter_execution_guard") == 0) {
+        offset = offsetof(SoacTestInterpreterIdPrefix, interpreter_id);
     }
-    PyThreadState *saved = PyThreadState_Swap(NULL);
-    PyThreadState *foreign;
-    PyInterpreterConfig config = _PyInterpreterConfig_LEGACY_INIT;
-    PyStatus status = Py_NewInterpreterFromConfig(&foreign, &config);
-    if (PyStatus_Exception(status)) {
-        PyThreadState_Swap(saved);
-        _PyErr_SetFromPyStatus(status);
-        return NULL;
-    }
-    /* The original caller pins all operands. We neither refcount nor use the
-     * foreign function/environment: each API must reject the birth's origin
-     * first and set an exception belonging to this current interpreter. */
-    int rejected = 0;
-    PyObject *error = PySoac_GetStrictRuntimeUnavailableError();
-    if (error != NULL) {
-        uint64_t identity = PySoac_GetDescriptorBirthId(args[0]);
-        rejected += identity == 0 && PyErr_ExceptionMatches(error);
-        PyErr_Clear();
-        PyObject *owner = PySoac_GetDescriptorBirthOwner(args[0]);
-        rejected += owner == NULL && PyErr_ExceptionMatches(error);
-        PyErr_Clear();
-        int matches = PySoac_MatchesDescriptorBirth(
-            args[0], args[1], args[2], args[3], args[4]);
-        rejected += matches == -1 && PyErr_ExceptionMatches(error);
-        PyErr_Clear();
-        int adopted = PySoac_AdoptBuiltinDescriptor(
-            args[0], args[1], args[2], args[3], args[4]);
-        rejected += adopted == -1 && PyErr_ExceptionMatches(error);
-        PyErr_Clear();
+    else if (strcmp(name, "_soac_interpreter_source_binding") == 0) {
+        offset = offsetof(SoacTestSourceBindingPrefix, interpreter_id);
     }
     else {
-        PyErr_Clear();
+        PyErr_SetString(PyExc_TypeError, "expected native SOAC interpreter-ID metadata");
+        return NULL;
     }
-    Py_EndInterpreter(foreign);
-    PyThreadState_Swap(saved);
-    return PyLong_FromLong(rejected);
+    if (!(Py_TYPE(object)->tp_flags & Py_TPFLAGS_DISALLOW_INSTANTIATION) ||
+        Py_TYPE(object)->tp_basicsize < (Py_ssize_t)(offset + sizeof(int64_t))) {
+        PyErr_SetString(PyExc_TypeError, "native SOAC metadata layout changed");
+        return NULL;
+    }
+    int64_t previous;
+    memcpy(&previous, (char *)object + offset, sizeof(previous));
+    PyObject *result = PyLong_FromLongLong(previous);
+    if (result == NULL) return NULL;
+    int64_t value = (int64_t)replacement;
+    memcpy((char *)object + offset, &value, sizeof(value));
+    return result;
 }
 
 static PyMethodDef module_functions[] = {
@@ -3505,7 +3507,7 @@ static PyMethodDef module_functions[] = {
     {"soac_type_construction_layout", soac_type_construction_layout, METH_NOARGS},
     {"soac_new_builtin_descriptor", _PyCFunction_CAST(soac_new_builtin_descriptor), METH_FASTCALL},
     {"soac_descriptor_birth_exhaustion", _PyCFunction_CAST(soac_descriptor_birth_exhaustion), METH_FASTCALL},
-    {"soac_descriptor_birth_foreign", _PyCFunction_CAST(soac_descriptor_birth_foreign), METH_FASTCALL},
+    {"soac_metadata_interpreter_id", soac_metadata_interpreter_id, METH_VARARGS},
     {"soac_dataclass_fixture", soac_dataclass_fixture, METH_VARARGS},
     {"soac_dataclass_fixture_call", soac_dataclass_fixture_call, METH_VARARGS},
     {"soac_dataclass_fixture_c_proxy", soac_dataclass_fixture_c_proxy, METH_O},

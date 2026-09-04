@@ -204,8 +204,7 @@ soac_policy(PyDictObject *dict)
         if (slot == NULL || *slot == NULL) return &soac_terminal_direct_policy;
         PyTypeState *state = *slot;
         if (!Py_IS_TYPE(state, &_PyTypeState_Type) ||
-            state->kind != _Py_TYPE_STATE_DICTIONARY || state->terminal ||
-            state->interpreter != _PyInterpreterState_GET()) {
+            state->kind != _Py_TYPE_STATE_DICTIONARY || state->terminal) {
             return &soac_terminal_direct_policy;
         }
         return &state->dictionary_policy;
@@ -223,7 +222,7 @@ soac_policy(PyDictObject *dict)
     SoacDictPolicy *policy = policies == NULL
         ? NULL : _Py_hashtable_get(policies, dict);
     if (policy == NULL) {
-        Py_FatalError("SOAC dictionary policy belongs to another interpreter");
+        Py_FatalError("SOAC dictionary is missing its installed policy");
     }
     return policy;
 }

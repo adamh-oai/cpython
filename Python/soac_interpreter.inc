@@ -5,7 +5,7 @@ static PyTypeObject SoacInterpreterActivation_Type;
 
 typedef struct {
     PyObject_HEAD
-    int64_t interpreter_id;
+    int64_t interpreter_id;  /* Diagnostic origin for published source views. */
     uint8_t terminal;
 } SoacInterpreterExecutionGuard;
 
@@ -23,7 +23,7 @@ typedef struct {
     SoacInterpreterExecutionGuard *execution;
     PyObject *globals;               /* Comparison only; actual module owns. */
     uint64_t source_id;
-    int64_t interpreter_id;
+    int64_t interpreter_id;  /* Diagnostic origin, not an ownership gate. */
     uint8_t terminal;
     PySoacInterpreterDescriptorV1 descriptors[1];
 } SoacInterpreterSourceBinding;
@@ -37,7 +37,6 @@ typedef struct {
     PyCodeObject *original_code; /* Comparison only; function/source own code. */
     PyObject *globals, *builtins; /* Immutable function edges, never dereferenced here. */
     uint64_t source_id;
-    int64_t interpreter_id;
     uint8_t ready, terminal, entered;
     SoacInterpreterExecutionGuard *execution;
     /* Borrowed from the actual function's dynamic owner GC vector. */
@@ -138,8 +137,7 @@ static int
 soac_source_binding_live(const SoacInterpreterSourceBinding *binding)
 {
     return binding != NULL && !binding->terminal && binding->publication != NULL &&
-        binding->execution != NULL && !binding->execution->terminal &&
-        binding->interpreter_id == _PyInterpreterState_GET()->id;
+        binding->execution != NULL && !binding->execution->terminal;
 }
 
 static SoacInterpreterSourceBinding *
@@ -193,7 +191,7 @@ PySoac_NewInterpreterSourceBindingV1(
         return NULL;
     }
     SoacInterpreterExecutionGuard *guard = (SoacInterpreterExecutionGuard *)execution;
-    if (guard->terminal || guard->interpreter_id != _PyInterpreterState_GET()->id) {
+    if (guard->terminal) {
         soac_interpreter_error("interpreter publication execution is unavailable");
         return NULL;
     }
@@ -250,8 +248,7 @@ PySoac_GetInterpreterSourcePublicationForTeardownV1(PyObject *object)
 {
     if (!PySoac_IsInterpreterSourceBindingV1(object)) return NULL;
     SoacInterpreterSourceBinding *binding = (SoacInterpreterSourceBinding *)object;
-    return binding->interpreter_id == _PyInterpreterState_GET()->id
-        ? binding->publication : NULL;
+    return binding->publication;
 }
 
 int
@@ -260,8 +257,6 @@ PySoac_InterpreterSourceBindingInvalidateV1(PyObject *object)
     if (!PySoac_IsInterpreterSourceBindingV1(object))
         return soac_interpreter_error("invalid interpreter source binding");
     SoacInterpreterSourceBinding *binding = (SoacInterpreterSourceBinding *)object;
-    if (binding->interpreter_id != _PyInterpreterState_GET()->id)
-        return soac_interpreter_error("interpreter source binding belongs to another interpreter");
     binding->terminal = 1;
     if (binding->execution != NULL) binding->execution->terminal = 1;
     return 0;
@@ -362,10 +357,6 @@ soac_function_guard(PyObject *guard)
         return NULL;
     }
     SoacInterpreterFunctionGuard *value = (SoacInterpreterFunctionGuard *)guard;
-    if (value->interpreter_id != _PyInterpreterState_GET()->id) {
-        soac_interpreter_error("interpreter function guard belongs to another interpreter");
-        return NULL;
-    }
     return value;
 }
 
@@ -380,7 +371,6 @@ _PySOAC_InterpreterGuardCreate(PyFunctionObject *function)
     guard->source_id = guard->original_code->_co_soac_strict_source_id;
     guard->globals = function->func_globals;
     guard->builtins = function->func_builtins;
-    guard->interpreter_id = _PyInterpreterState_GET()->id;
     guard->ready = guard->terminal = guard->entered = 0;
     guard->execution = NULL;
     guard->binding = NULL;
@@ -409,7 +399,7 @@ PyFunction_GetSoacStrictOwnerForTeardownV1(PyObject *object)
     if (function->func_soac_strict_owner_state != FUNC_SOAC_OWNER_INTERPRETER_ATTACHED) return NULL;
     SoacInterpreterFunctionGuard *guard =
         (SoacInterpreterFunctionGuard *)function->func_soac_interpreter_guard;
-    if (guard == NULL || guard->terminal || guard->interpreter_id != _PyInterpreterState_GET()->id)
+    if (guard == NULL || guard->terminal)
         return NULL;
     return function->func_soac_strict_owner;
 }
@@ -478,8 +468,6 @@ PySoac_InvalidateInterpreterExecutionGuardV1(PyObject *object)
     if (object == NULL || !Py_IS_TYPE(object, &SoacInterpreterExecutionGuard_Type))
         return soac_interpreter_error("invalid interpreter execution guard");
     SoacInterpreterExecutionGuard *guard = (SoacInterpreterExecutionGuard *)object;
-    if (guard->interpreter_id != _PyInterpreterState_GET()->id)
-        return soac_interpreter_error("execution guard belongs to another interpreter");
     guard->terminal = 1;
     return 0;
 }
@@ -492,7 +480,7 @@ PySoac_BindInterpreterFunctionExecutionV1(PyObject *object, PyObject *execution)
     if (execution == NULL || !Py_IS_TYPE(execution, &SoacInterpreterExecutionGuard_Type))
         return soac_interpreter_error("invalid interpreter execution guard");
     SoacInterpreterExecutionGuard *value = (SoacInterpreterExecutionGuard *)execution;
-    if (value->terminal || value->interpreter_id != guard->interpreter_id || guard->terminal ||
+    if (value->terminal || guard->terminal ||
         (guard->execution != NULL && guard->execution != value))
         return soac_interpreter_error("function execution guard is unavailable or changed");
     if (guard->execution == NULL) guard->execution = (SoacInterpreterExecutionGuard *)Py_NewRef(execution);
@@ -719,7 +707,6 @@ _PySOAC_InterpreterView(_PyInterpreterFrame *frame,
             (PyFunctionObject *)PyStackRef_AsPyObjectBorrow(frame->f_funcobj) ||
         activation->code != _PyFrame_GetCode(frame) ||
         activation->phase != phase || activation->state != state ||
-        activation->interpreter_id != _PyInterpreterState_GET()->id ||
         activation->activation_id == 0) {
         return soac_interpreter_error("interpreter callback activation changed");
     }
@@ -968,7 +955,6 @@ soac_interpreter_authorize(_PyInterpreterFrame *frame)
     if (function->func_soac_strict_owner_state != FUNC_SOAC_OWNER_INTERPRETER_ATTACHED ||
         function->func_soac_strict_owner == NULL || guard == NULL || guard->terminal ||
         function->func_soac_metadata != NULL ||
-        guard->interpreter_id != _PyInterpreterState_GET()->id ||
         (guard->execution != NULL && guard->execution->terminal) ||
         function->func_globals != guard->globals || function->func_builtins != guard->builtins ||
         frame->f_globals != function->func_globals || frame->f_builtins != function->func_builtins)
@@ -1006,7 +992,6 @@ soac_interpreter_authorize(_PyInterpreterFrame *frame)
             _PySoacInterpreterActivationV1 *activation = (_PySoacInterpreterActivationV1 *)object;
             if (activation->activation_id != active_context.activation_id ||
                 activation->interpreter_id != active_context.interpreter_id ||
-                activation->interpreter_id != _PyInterpreterState_GET()->id ||
                 activation->kind != active_context.kind ||
                 activation->phase != active_context.phase ||
                 activation->state != active_context.call_state ||

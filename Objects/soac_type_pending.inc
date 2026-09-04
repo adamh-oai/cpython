@@ -12,9 +12,6 @@ PyType_GetSoacConstructionInfoV1(PyObject *object,
     }
     SoacTypeContract *state = soac_type_state((PyTypeObject *)object);
     if (state == NULL) return 0;
-    if (state->interpreter != _PyInterpreterState_GET()) {
-        return soac_type_state_error("foreign native type construction state");
-    }
     out->abi_version = Py_SOAC_TYPE_CONSTRUCTION_INFO_ABI_V1;
     out->struct_size = sizeof(*out);
     out->phase = soac_type_phase(state);
@@ -36,8 +33,7 @@ PyType_FailSoacPendingV1(PyObject *object)
     }
     SoacConstructionHandle *root = (SoacConstructionHandle *)object;
     if (root->root != NULL || !root->consumed ||
-        root->spec.construction_mode != Py_SOAC_TYPE_CONSTRUCT_PENDING ||
-        root->interpreter != _PyInterpreterState_GET()) {
+        root->spec.construction_mode != Py_SOAC_TYPE_CONSTRUCT_PENDING) {
         return soac_type_state_error("pending failure handle is not this canonical lineage");
     }
     /* No releases/callbacks; this never revokes a successfully enforced type. */
@@ -53,7 +49,6 @@ soac_admission_live(PyTypeObject *type, SoacTypeContract *state,
 {
     if (soac_type_state(type) != state || state->type != type ||
         state->owner != owner || state->terminal ||
-        state->interpreter != _PyInterpreterState_GET() ||
         state->construction == NULL || soac_construction_root(state->construction) != root ||
         state->phase != Py_SOAC_TYPE_STATE_ADMITTING ||
         root->lineage_phase != SOAC_LINEAGE_ADMITTING ||
@@ -110,8 +105,7 @@ PyType_AdmitSoacPendingV1(PyObject *object, PyObject *owner, PyObject *expected_
     SoacTypeContract *state = soac_type_state(type);
     if (!soac_has_pending_construction(state) ||
         state->owner != owner || state->type != type || state->terminal ||
-        state->permanent_contract_published ||
-        state->interpreter != _PyInterpreterState_GET()) {
+        state->permanent_contract_published) {
         return soac_type_state_error("pending final type/owner does not match");
     }
     if (state->commit_final == NULL || state->commit_final != expected_commit_final) {
@@ -190,8 +184,7 @@ PyType_DisposeSoacProvisionalV1(PyObject *object, PyObject *owner,
     SoacTypeContract *state = soac_type_state((PyTypeObject *)object);
     if (!soac_has_pending_construction(state) || state->owner != owner ||
         state->type != (PyTypeObject *)object || state->terminal ||
-        state->permanent_contract_published ||
-        state->interpreter != _PyInterpreterState_GET()) {
+        state->permanent_contract_published) {
         return soac_type_state_error("provisional type is not this uncommitted native state");
     }
     SoacConstructionHandle *root = soac_construction_root(state->construction);
@@ -228,9 +221,7 @@ _PySOAC_LinkPendingTypeHandle(PyObject *object, PyObject *original, PyObject *ow
     if (!original_pending && !replacement_pending) return 0; /* unchanged ENFORCED path */
     if (!original_pending || !replacement_pending || state->owner != owner ||
         state->construction == NULL || handle->root != NULL || handle->consumed ||
-        !handle->dataclass_slots || handle->reserved_state == NULL ||
-        handle->interpreter != _PyInterpreterState_GET() ||
-        state->interpreter != handle->interpreter) {
+        !handle->dataclass_slots || handle->reserved_state == NULL) {
         return soac_type_state_error("replacement must inherit its actual pending lineage");
     }
     SoacConstructionHandle *root = soac_construction_root(state->construction);
@@ -253,8 +244,7 @@ _PySOAC_BeginPendingTypeAdapter(PyObject *actual, PyObject **out)
     if (state == NULL || state->permanent_contract_published ||
         state->phase == Py_SOAC_TYPE_STATE_DYNAMIC) return 0;
     if (!soac_has_pending_construction(state) ||
-        soac_type_phase(state) != Py_SOAC_TYPE_STATE_PENDING || state->terminal ||
-        state->interpreter != _PyInterpreterState_GET()) {
+        soac_type_phase(state) != Py_SOAC_TYPE_STATE_PENDING || state->terminal) {
         return soac_type_state_error("pending adapter type is unavailable");
     }
     SoacConstructionHandle *root = soac_construction_root(state->construction);
@@ -307,7 +297,6 @@ _PySOAC_PendingTypeMemberTarget(PyObject *object, PyObject *owner,
         soac_type_phase(state) != Py_SOAC_TYPE_STATE_PENDING ||
         state->terminal || state->sealed || state->permanent_contract_published ||
         state->type != type || state->owner != owner || owner == NULL ||
-        state->interpreter != _PyInterpreterState_GET() ||
         (PyObject *)root != expected_root ||
         root->lineage_phase != SOAC_LINEAGE_OPEN || !root->active_adapters ||
         dict == NULL || type->tp_dict != dict || !PyDict_CheckExact(dict) ||
@@ -336,7 +325,6 @@ _PySOAC_MatchesPendingMemberPolicy(PyObject *owner,
     SoacTypeContract *state = (SoacTypeContract *)owner;
     return state->owner == expected_owner && expected_owner != NULL &&
         !state->terminal && !state->sealed && !state->permanent_contract_published &&
-        state->interpreter == _PyInterpreterState_GET() &&
         soac_has_pending_construction(state) &&
         soac_type_phase(state) == Py_SOAC_TYPE_STATE_PENDING &&
         soac_construction_root(state->construction)->lineage_phase == SOAC_LINEAGE_OPEN &&
@@ -357,7 +345,6 @@ _PySOAC_PendingTypeCopiedHook(PyObject *object, PyObject *expected_root,
     if (!soac_has_pending_construction(state)) return 0;
     if (state->type != type || state->terminal || state->sealed ||
         state->permanent_contract_published || state->owner == NULL ||
-        state->interpreter != _PyInterpreterState_GET() ||
         soac_type_phase(state) != Py_SOAC_TYPE_STATE_PENDING ||
         (PyObject *)soac_construction_root(state->construction) != expected_root ||
         soac_construction_root(state->construction)->lineage_phase != SOAC_LINEAGE_OPEN ||

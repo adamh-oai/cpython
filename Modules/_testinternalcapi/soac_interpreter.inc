@@ -84,7 +84,6 @@ typedef struct {
     /* Callback-free weak witnesses only, never function or owner primaries. */
     Py_ssize_t pending_count;
     PyObject *pending[SOAC_IP_MAX_PENDING];
-    PyInterpreterState *interpreter;
     uintptr_t module, globals, root_code;
     uint64_t source_id;
     int root_phase;  /* 0:fresh, 1:consumed, 2:done, 3:failed/cleared, 4:preparing */
@@ -151,9 +150,8 @@ soac_ip_fixture(PyObject *object)
         return NULL;
     }
     SoacInterpreterFixture *fixture = (SoacInterpreterFixture *)object;
-    if (fixture->interpreter != _PyInterpreterState_GET() ||
-        fixture->probe == NULL || fixture->source_id == 0) {
-        soac_ip_error("interpreter fixture owner is terminal or foreign");
+    if (fixture->probe == NULL || fixture->source_id == 0) {
+        soac_ip_error("interpreter fixture owner is terminal");
         return NULL;
     }
     return fixture;
@@ -206,7 +204,6 @@ soac_ip_info(const PySoacInterpreterFrameViewV1 *view,
         return -1;
     }
     if (info->abi_version != Py_SOAC_INTERPRETER_ABI_V2 ||
-        info->interpreter_id != PyInterpreterState_GetID(_PyInterpreterState_GET()) ||
         info->activation_id == 0 || info->kind < Py_SOAC_INTERPRETER_ROOT ||
         info->kind > Py_SOAC_INTERPRETER_CLASS_NAMESPACE ||
         info->source_authority > 1 ||
@@ -1745,7 +1742,6 @@ soac_interpreter_fixture(PyObject *self, PyObject *args)
         SoacInterpreterFixture, &SoacInterpreterFixture_Type);
     if (fixture == NULL) return NULL;
     memset((char *)fixture + sizeof(PyObject), 0, sizeof(*fixture) - sizeof(PyObject));
-    fixture->interpreter = _PyInterpreterState_GET();
     fixture->source_id = source_id;
     fixture->module = (uintptr_t)module;
     fixture->globals = (uintptr_t)PyModule_GetDict(module);

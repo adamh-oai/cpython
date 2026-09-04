@@ -29,7 +29,7 @@ soac_inherited_dictionary_field(PyTypeObject *type, PyObject *name)
             if (inherited == NULL) {
                 continue;
             }
-            if (soac_contract_live(inherited) < 0) {
+            if (soac_contract_not_terminal(inherited) < 0) {
                 return -1;
             }
             /* The inherited field catalog is independent of selected value
@@ -164,7 +164,7 @@ _PyTypeState_BindSpec(PyTypeObject *type, const PyTypeStateSpecV1 *spec,
     for (Py_ssize_t i = -1; i < PyTuple_GET_SIZE(mro); ++i) {
         SoacTypeContract *state = soac_object_slot_contract_at(type, mro, i);
         if (state == NULL) continue;
-        if (soac_contract_live(state) < 0) goto error;
+        if (soac_contract_not_terminal(state) < 0) goto error;
         ++contracts;
         dictionary |= state->dictionary_mode == Py_SOAC_INSTANCE_DICT_ORDINARY;
         if (state->object_slot_count > PY_SSIZE_T_MAX - required_slots) {
@@ -209,7 +209,7 @@ _PyTypeState_BindSpec(PyTypeObject *type, const PyTypeStateSpecV1 *spec,
     for (Py_ssize_t i = -1; i < PyTuple_GET_SIZE(mro); ++i) {
         SoacTypeContract *state = soac_object_slot_contract_at(type, mro, i);
         if (state == NULL) continue;
-        if (soac_contract_live(state) < 0 || next >= contracts) {
+        if (soac_contract_not_terminal(state) < 0 || next >= contracts) {
             Py_DECREF(held);
             if (!PyErr_Occurred()) soac_type_state_error("native contract catalogue changed during storage preparation");
             goto error;
@@ -252,8 +252,7 @@ soac_find_object_slot_owner(PyObject *object, PyObject *expected_owner,
         if (state == NULL) {
             continue;
         }
-        if (state->terminal || state->owner == NULL ||
-            state->interpreter != _PyInterpreterState_GET()) {
+        if (state->terminal || state->owner == NULL) {
             PyErr_SetString(PySoac_GetStrictRuntimeUnavailableError(),
                             "strict object-slot owner is unavailable");
             return NULL;
@@ -366,7 +365,7 @@ _PySOAC_CheckObjectSlotAccess(PyObject *object, const PyMemberDef *view)
         if (state == NULL || state->object_slot_count == 0) {
             continue;
         }
-        if (soac_contract_live(state) < 0) {
+        if (soac_contract_not_terminal(state) < 0) {
             return -1;
         }
         if ((view->flags & _Py_AFTER_ITEMS) ||
@@ -411,7 +410,7 @@ _PySOAC_CheckObjectSlotWrite(PyObject *object, Py_ssize_t offset, PyObject *valu
         if (state == NULL || state->object_slot_count == 0) {
             continue;
         }
-        if (soac_contract_live(state) < 0) {
+        if (soac_contract_not_terminal(state) < 0) {
             return -1;
         }
         for (Py_ssize_t j = 0; j < state->object_slot_count; ++j) {
@@ -425,7 +424,7 @@ _PySOAC_CheckObjectSlotWrite(PyObject *object, Py_ssize_t offset, PyObject *valu
             }
             /* The fixed callback cannot transfer the physical contract. Keep
              * the final commit fail-closed if it terminalized the owner. */
-            if (Py_TYPE(object) != type || soac_contract_live(state) < 0) {
+            if (Py_TYPE(object) != type || soac_contract_not_terminal(state) < 0) {
                 if (!PyErr_Occurred()) {
                     PyErr_SetString(soac_type_mutation_error(),
                                     "object-slot receiver changed during validation");
@@ -480,7 +479,7 @@ unsafe_view:
 
 /* The allocation marker authenticates this trailer's layout. Only allocation
  * can install a state, and supported type mutations cannot move its storage.
- * Retirement and interpreter ownership are still mutable runtime conditions. */
+ * Retirement remains a mutable runtime condition. */
 static PyTypeState *
 soac_member_write_state(PyObject *object, PyTypeState ***tail)
 {
@@ -514,8 +513,7 @@ soac_validate_member_write(PyObject *object, PyTypeState *state,
         }
         assert(Py_TYPE(object) == state->allocation_type);
         /* Recheck only what the callback can retire, without another trailer
-         * lookup, allocation/layout proof or current-interpreter query. */
-        assert(state->interpreter == _PyInterpreterState_GET());
+         * lookup or allocation/layout proof. */
         if (_PyTypeState_CheckInstanceContracts(state) < 0) {
             goto error;
         }
@@ -585,7 +583,7 @@ soac_validate_existing_slot_descriptor(SoacTypeContract *state,
                                        PyObject *name, PyObject *descriptor)
 {
     Py_ssize_t index = soac_object_slot_name_index(state, name);
-    if (soac_contract_live(state) < 0) {
+    if (soac_contract_not_terminal(state) < 0) {
         return -1;
     }
     if (index < 0 || descriptor == NULL ||
@@ -604,7 +602,7 @@ soac_validate_slot_publication(SoacTypeContract *state, PyObject *dict,
                                PyObject *name, PyObject *descriptor,
                                PyObject *provenance)
 {
-    if (soac_contract_live(state) < 0) {
+    if (soac_contract_not_terminal(state) < 0) {
         return -1;
     }
     if (state->sealed || state->type == NULL || state->type->tp_dict != dict ||

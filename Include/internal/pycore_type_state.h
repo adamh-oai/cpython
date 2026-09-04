@@ -52,7 +52,6 @@ enum {
 
 struct _PyTypeState {
     PyObject_HEAD
-    PyInterpreterState *interpreter;
     unsigned char kind;
     unsigned char terminal;
     /* Comparison-only cache receipt. An instance already owns its actual
