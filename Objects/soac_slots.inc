@@ -498,7 +498,6 @@ soac_validate_member_write(PyObject *object, PyTypeState *state,
                            PyTypeState **tail, Py_ssize_t offset,
                            Py_ssize_t first, PyObject *value)
 {
-    PyTypeObject *type = Py_TYPE(object);
     /* A foreign validator may run Python or explicitly clear the receiver.
      * Keep its catalogue alive until attachment/retirement has been checked. */
     Py_INCREF(state);
@@ -509,10 +508,11 @@ soac_validate_member_write(PyObject *object, PyTypeState *state,
             if (!PyErr_Occurred()) soac_type_state_error("native slot validator failed without an exception");
             goto error;
         }
-        if (Py_TYPE(object) != type || *tail != state || state->terminal) {
+        if (*tail != state || state->terminal) {
             soac_type_state_error("native slot state changed during validation");
             goto error;
         }
+        assert(Py_TYPE(object) == state->allocation_type);
         /* Recheck only what the callback can retire, without another trailer
          * lookup, allocation/layout proof or current-interpreter query. */
         assert(state->interpreter == _PyInterpreterState_GET());
