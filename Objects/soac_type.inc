@@ -398,7 +398,11 @@ soac_contract_not_terminal(SoacTypeContract *state)
     }
     else {
         assert(state->empty_write_storage_record == NULL);
-        assert(state->empty_write_storage_owner == NULL);
+        /* Failed construction detaches both records before releasing owners.
+         * A retained owner without its records is retired, not an empty policy. */
+        if (state->empty_write_storage_owner != NULL) {
+            return soac_owner_liveness_error("strict class or storage owner is terminal");
+        }
     }
     return 0;
 }
