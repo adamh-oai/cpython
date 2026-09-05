@@ -169,6 +169,17 @@ extern Py_ssize_t _PyDictKeys_StringLookup(PyDictKeysObject* dictkeys, PyObject 
  * Returns DKIX_EMPTY if the key is not present.
  */
 extern Py_ssize_t _PyDictKeys_StringLookupAndVersion(PyDictKeysObject* dictkeys, PyObject *key, uint32_t *version);
+/* Optional global-load cache initialization. With the GIL held, prove an
+ * exact combined-Unicode globals miss and a builtin hit without Python
+ * callbacks, then assign native key versions. Returns 1 with versions/index,
+ * or 0 with zero versions/index -1. Does not retain objects, change dictionary
+ * contents or alter the exception indicator. Each nonnull output is initialized
+ * on decline; output storage must not overlap. Free-threaded builds decline. */
+PyAPI_FUNC(int) _PyDict_CaptureBuiltinLookup(
+    PyObject *globals, PyObject *builtins, PyObject *name,
+    uint32_t *globals_version, uint32_t *builtins_version,
+    Py_ssize_t *builtins_index);
+
 extern Py_ssize_t _PyDictKeys_StringLookupSplit(PyDictKeysObject* dictkeys, PyObject *key);
 PyAPI_FUNC(PyObject *)_PyDict_LoadGlobal(PyDictObject *, PyDictObject *, PyObject *);
 PyAPI_FUNC(void) _PyDict_LoadGlobalStackRef(PyDictObject *, PyDictObject *, PyObject *, _PyStackRef *);

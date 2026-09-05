@@ -2099,6 +2099,70 @@ _PyDictKeys_StringLookupAndVersion(PyDictKeysObject *dk, PyObject *key, uint32_t
     return ix;
 }
 
+/* This is cache metadata initialization, never namespace policy or callable
+ * authority. An absent global may be inserted later; every consumer must
+ * compare both current nonzero key versions and read the current entry value.
+ * The exact combined-Unicode restrictions keep both lookups callback-free. */
+int
+_PyDict_CaptureBuiltinLookup(
+    PyObject *globals, PyObject *builtins, PyObject *name,
+    uint32_t *globals_version, uint32_t *builtins_version,
+    Py_ssize_t *builtins_index)
+{
+    if (globals_version != NULL) {
+        *globals_version = 0;
+    }
+    if (builtins_version != NULL) {
+        *builtins_version = 0;
+    }
+    if (builtins_index != NULL) {
+        *builtins_index = -1;
+    }
+    if (globals_version == NULL || builtins_version == NULL ||
+        builtins_index == NULL || globals_version == builtins_version) {
+        return 0;
+    }
+#ifdef Py_GIL_DISABLED
+    return 0;
+#else
+    if (globals == NULL || builtins == NULL || name == NULL ||
+        PyErr_Occurred() != NULL ||
+        !PyDict_CheckExact(globals) || !PyDict_CheckExact(builtins) ||
+        !PyUnicode_CheckExact(name)) {
+        return 0;
+    }
+    PyDictObject *globals_dict = (PyDictObject *)globals;
+    PyDictObject *builtins_dict = (PyDictObject *)builtins;
+    PyDictKeysObject *globals_keys = globals_dict->ma_keys;
+    PyDictKeysObject *builtins_keys = builtins_dict->ma_keys;
+    if (globals_dict->ma_values != NULL || builtins_dict->ma_values != NULL ||
+        globals_keys->dk_kind != DICT_KEYS_UNICODE ||
+        builtins_keys->dk_kind != DICT_KEYS_UNICODE) {
+        return 0;
+    }
+    if (_PyDictKeys_StringLookup(globals_keys, name) != DKIX_EMPTY) {
+        return 0;
+    }
+    Py_ssize_t index = _PyDictKeys_StringLookup(builtins_keys, name);
+    if (index < 0 || index >= builtins_keys->dk_nentries ||
+        DK_UNICODE_ENTRIES(builtins_keys)[index].me_value == NULL) {
+        return 0;
+    }
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    uint32_t global_version =
+        _PyDict_GetKeysVersionForCurrentState(interp, globals_dict);
+    uint32_t builtin_version =
+        _PyDict_GetKeysVersionForCurrentState(interp, builtins_dict);
+    if (global_version == 0 || builtin_version == 0) {
+        return 0;
+    }
+    *globals_version = global_version;
+    *builtins_version = builtin_version;
+    *builtins_index = index;
+    return 1;
+#endif
+}
+
 /* Like _PyDictKeys_StringLookup() but only works on split keys.  Note
  * that in free-threaded builds this locks the keys object as required.
  */
