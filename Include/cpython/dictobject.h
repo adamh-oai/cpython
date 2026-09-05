@@ -143,7 +143,7 @@ PyAPI_FUNC(int) PyDict_MatchesSoacPolicy(
     PyObject *dict, PyObject *owner, PyDict_SoacPolicyCallback validate,
     unsigned int flags);
 /* Authenticate the actual class namespace against its private native policy
- * and expected interpreter-owned contract owner. The expected pointer is
+ * and expected native contract owner. The expected pointer is
  * compared, never dereferenced. Returns 1 for a match, 0 for an unrelated
  * dictionary/owner, and -1 with an exception for a terminal or unavailable
  * native class contract. */

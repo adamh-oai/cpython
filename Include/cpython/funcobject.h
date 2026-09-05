@@ -121,8 +121,9 @@ PyAPI_FUNC(int) PyFunction_CheckSoacStrictDefaults(PyObject *);
  * NULL/StrictRuntimeUnavailableError after irreversible GC clearing. */
 PyAPI_FUNC(int) PyFunction_SetSoacStrictOwner(PyObject *, PyObject *);
 PyAPI_FUNC(PyObject *) PyFunction_GetSoacStrictOwner(PyObject *);
-/* Borrowed actual interpreter owner for metadata-only abandonment. No error,
- * allocation or reference changes; NULL for unrelated/terminal/foreign owners. */
+/* Borrowed actual interpreter-backend owner for metadata-only abandonment.
+ * No error, allocation or reference changes; NULL for unrelated or terminal
+ * owners. */
 PyAPI_FUNC(PyObject *) PyFunction_GetSoacStrictOwnerForTeardownV1(PyObject *);
 /* Exact native generated-function provenance, not source/JIT/check authority.
  * Has is a role query: 0 for unrelated functions, 1 for this exact attached

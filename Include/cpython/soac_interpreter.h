@@ -72,7 +72,7 @@ PyAPI_FUNC(PyObject *) PySoac_NewInterpreterSourceBindingV1(
     size_t count, size_t descriptor_size);
 PyAPI_FUNC(int) PySoac_IsInterpreterSourceBindingV1(PyObject *binding);
 PyAPI_FUNC(PyObject *) PySoac_GetInterpreterSourcePublicationV1(PyObject *binding);
-/* Same-interpreter borrowed publication, including terminal bindings whose
+/* Borrowed actual publication, including terminal bindings whose
  * publication edge still exists. No allocation, errors or reference changes. */
 PyAPI_FUNC(PyObject *) PySoac_GetInterpreterSourcePublicationForTeardownV1(PyObject *binding);
 PyAPI_FUNC(int) PySoac_InterpreterSourceBindingInvalidateV1(PyObject *binding);
@@ -176,7 +176,7 @@ typedef struct {
     uint64_t creation_identity;
     PyObject *value;                  /* Borrowed actual selected operand. */
     /* Only LIVE: borrowed from that operand's existing exact native creation
-     * record, current original code and live same-interpreter invocation.
+     * record, current original code and exact live invocation.
      * NONE/INVALID never expose these pointers. No record is created/renewed. */
     PyObject *dataclass_invocation;
     PyObject *dataclass_owner;
