@@ -799,13 +799,15 @@ PyDict_SetSoacPolicy(PyObject *op, PyObject *owner,
                     "SOAC dictionary policies require a GIL-enabled build");
     return -1;
 #else
-    if (op == NULL || !PyDict_CheckExact(op) || owner == NULL ||
+    if (op == NULL || !PyDict_Check(op) ||
+        (!PyDict_CheckExact(op) && flags != PyDict_SOAC_FUNCTION_DEFAULTS) ||
+        owner == NULL ||
         validate == NULL ||
         (flags != 0 && flags != PyDict_SOAC_ALLOW_NONSTRING_KEYS &&
          flags != PyDict_SOAC_READ_ONLY && flags != PyDict_SOAC_ADMISSION_ONLY &&
          flags != PyDict_SOAC_FUNCTION_DEFAULTS)) {
         PyErr_SetString(PyExc_TypeError,
-                        "SOAC policy requires an exact dict, owner, callback and supported flags");
+                        "SOAC policy requires a supported dict, owner, callback and flags");
         return -1;
     }
     PyDictObject *dict = (PyDictObject *)op;

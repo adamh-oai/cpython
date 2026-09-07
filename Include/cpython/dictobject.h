@@ -83,8 +83,8 @@ enum {
  * The trusted owner validates liveness at resolved write commits, not keys or
  * values. Installation is permanent and this mode cannot be sealed. */
 #define PyDict_SOAC_ADMISSION_ONLY 4u
-/* Mutable function keyword defaults retain ordinary resolved dictionary
- * operations. The private owner validates current function bindings at each
+/* Mutable function keyword defaults, including dict subclasses, retain
+ * ordinary resolved dictionary operations. The private owner validates current function bindings at each
  * commit. This mode can only transition irreversibly to READ_ONLY. */
 #define PyDict_SOAC_FUNCTION_DEFAULTS 8u
 typedef int (*PyDict_SoacPolicyCallback)(

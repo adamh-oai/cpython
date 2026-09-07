@@ -13,6 +13,7 @@ extern "C" {
 
 #define Py_SOAC_FUNCTION_DEFAULTS_KEYWORD 1u
 #define Py_SOAC_FUNCTION_DEFAULTS_SEAL 2u
+#define Py_SOAC_FUNCTION_DEFAULTS_CODE 4u
 
 #define Py_SOAC_INTERPRETER_ROOT 1u
 #define Py_SOAC_INTERPRETER_FUNCTION 2u
@@ -367,7 +368,9 @@ typedef struct {
 
     /* Permitted defaults replacement, after ordinary audits/watchers and before
      * pointer/version publication, or explicit keyword-default sealing. The
-     * caller pins actual owner, code and candidate across this callback and
+     * CODE instead supplies the proposed code object so restoration of the
+     * captured native code validates its current defaults before publication.
+     * The caller pins actual owner, code and candidate across this callback and
      * rejects identity changes afterward. NULL candidate means deletion.
      * Only the authenticated native compiler owner selects value contracts;
      * independent interpreter functions retain ordinary value behavior. */

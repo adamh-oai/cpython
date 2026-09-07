@@ -1125,10 +1125,13 @@ func_set_code(PyObject *self, PyObject *value, void *Py_UNUSED(ignored))
 
     handle_func_event(PyFunction_EVENT_MODIFY_CODE, op, value);
     /* Audit, warning and watcher callbacks may install an irreversible
-       restriction. No callback remains between this check and the store. */
+       restriction. Restoring captured native code must also validate current
+       defaults, then recheck mutability after any metadata allocations. */
     if (func_check_soac_mutable(op) < 0) {
         return -1;
     }
+    if (func_check_soac_defaults(op, value, Py_SOAC_FUNCTION_DEFAULTS_CODE) < 0 ||
+        func_check_soac_mutable(op) < 0) return -1;
     _PyFunction_ClearVersion(op);
     Py_XSETREF(op->func_code, Py_NewRef(value));
     return 0;
