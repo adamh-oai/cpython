@@ -71,8 +71,9 @@ enum {
      * Provenance is that exact native descriptor, checked after watchers. */
     PyDict_SOAC_SLOT_DESCRIPTOR_INSERT = 12,
     PyDict_SOAC_SLOT_DESCRIPTOR_REPLACE = 13,
-    /* Admission-only liveness check before an ordinary empty-dict bulk clone.
-     * key/value/provenance are NULL; no per-key hash/equality is repeated. */
+    /* Ordinary empty-dict bulk clone. key/value are NULL; provenance is the
+     * actual source dict. Defaults owners validate its canonical entries with
+     * no additional per-key hash/equality calls. Admission owners check life. */
     PyDict_SOAC_CLONE = 14
 };
 #define PyDict_SOAC_ALLOW_NONSTRING_KEYS 1u
@@ -82,6 +83,10 @@ enum {
  * The trusted owner validates liveness at resolved write commits, not keys or
  * values. Installation is permanent and this mode cannot be sealed. */
 #define PyDict_SOAC_ADMISSION_ONLY 4u
+/* Mutable function keyword defaults retain ordinary resolved dictionary
+ * operations. The private owner validates current function bindings at each
+ * commit. This mode can only transition irreversibly to READ_ONLY. */
+#define PyDict_SOAC_FUNCTION_DEFAULTS 8u
 typedef int (*PyDict_SoacPolicyCallback)(
     PyObject *owner, PyObject *dict, PyObject *key, PyObject *value,
     int operation, PyObject *provenance);
@@ -133,6 +138,14 @@ PyAPI_FUNC(PyTypeState *) PyTypeState_NewV1(
 PyAPI_FUNC(int) PyDict_SetSoacPolicy(
     PyObject *dict, PyObject *owner, PyDict_SoacPolicyCallback validate,
     unsigned int flags);
+/* Private validator identity and this mode authenticate the returned owned
+ * reference. NULL without error means an unrelated policy; terminal or active
+ * installation/mutation fails. Never expose or replace another policy owner. */
+PyAPI_FUNC(PyObject *) PyDict_GetSoacFunctionDefaultsOwner(
+    PyObject *dict, PyDict_SoacPolicyCallback expected_validate);
+PyAPI_FUNC(int) PyDict_SealSoacFunctionDefaults(
+    PyObject *dict, PyObject *expected_owner,
+    PyDict_SoacPolicyCallback expected_validate);
 PyAPI_FUNC(int) PyDict_SealSoacNamespace(PyObject *dict);
 PyAPI_FUNC(int) PyDict_HasSoacPolicy(PyObject *dict);
 PyAPI_FUNC(int) _PyDict_HasSoacBindingPolicy(PyObject *dict);

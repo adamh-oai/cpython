@@ -9,7 +9,10 @@ extern "C" {
  * The trusted loader, not these hooks, authenticates the ty/source artifact.
  * Ordinary native frames/binding/closures/recursion/observers remain in use. */
 #define Py_SOAC_INTERPRETER_ABI_V2 2u
-#define Py_SOAC_INTERPRETER_CALLBACKS_ABI_V4 4u
+#define Py_SOAC_INTERPRETER_CALLBACKS_ABI_V5 5u
+
+#define Py_SOAC_FUNCTION_DEFAULTS_KEYWORD 1u
+#define Py_SOAC_FUNCTION_DEFAULTS_SEAL 2u
 
 #define Py_SOAC_INTERPRETER_ROOT 1u
 #define Py_SOAC_INTERPRETER_FUNCTION 2u
@@ -361,7 +364,16 @@ typedef struct {
      * error escapes. Completed children stay valid. Native reports secondary
      * errors as unraisable, retires this event, and restores the primary error. */
     int (*definition_abort)(const PySoacInterpreterFrameViewV1 *frame);
-} PySoacInterpreterCallbacksV4;
+
+    /* Permitted defaults replacement, after ordinary audits/watchers and before
+     * pointer/version publication, or explicit keyword-default sealing. The
+     * caller pins actual owner, code and candidate across this callback and
+     * rejects identity changes afterward. NULL candidate means deletion.
+     * Only the authenticated native compiler owner selects value contracts;
+     * independent interpreter functions retain ordinary value behavior. */
+    int (*function_defaults)(PyObject *function, PyObject *owner,
+                             PyObject *candidate, uint32_t flags);
+} PySoacInterpreterCallbacksV5;
 
 typedef struct {
     uint32_t instruction_ordinal;
@@ -408,8 +420,8 @@ PyAPI_FUNC(int) PySoac_BindInterpreterFunctionExecutionV1(PyObject *, PyObject *
  * NULL/out-of-range use fails; no promise validates arbitrary stale C memory.
  * Returned Python references may not outlive their actual native support.
  */
-PyAPI_FUNC(int) PySoac_SetInterpreterCallbacksV4(
-    const PySoacInterpreterCallbacksV4 *callbacks, size_t callbacks_size);
+PyAPI_FUNC(int) PySoac_SetInterpreterCallbacksV5(
+    const PySoacInterpreterCallbacksV5 *callbacks, size_t callbacks_size);
 
 PyAPI_FUNC(PyObject *) PySoac_EvalInterpreterModuleV2(
     PyObject *module, PyObject *root_code, PyObject *source_binding);

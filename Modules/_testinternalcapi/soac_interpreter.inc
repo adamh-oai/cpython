@@ -1261,8 +1261,16 @@ soac_ip_selected_finished(PyObject *object, const PySoacInterpreterFrameViewV1 *
 }
 #endif
 
-static const PySoacInterpreterCallbacksV4 soac_ip_callbacks = {
-    .abi_version = Py_SOAC_INTERPRETER_CALLBACKS_ABI_V4,
+/* This construction-only fixture installs no native function value contract. */
+static int
+soac_ip_function_defaults(PyObject *function, PyObject *owner,
+                          PyObject *candidate, uint32_t flags)
+{
+    return 0;
+}
+
+static const PySoacInterpreterCallbacksV5 soac_ip_callbacks = {
+    .abi_version = Py_SOAC_INTERPRETER_CALLBACKS_ABI_V5,
     .root_begin = soac_ip_root_begin, .root_end = soac_ip_root_end,
     .birth = soac_ip_birth, .function_attribute = soac_ip_function_attribute,
     .enter = soac_ip_enter, .started = soac_ip_started,
@@ -1273,6 +1281,7 @@ static const PySoacInterpreterCallbacksV4 soac_ip_callbacks = {
     .prepare_type = soac_ip_prepare_type, .definition_complete = soac_ip_complete,
     .check_entry = soac_ip_check_entry, .definition_end = soac_ip_definition_end,
     .definition_abort = soac_ip_definition_abort,
+    .function_defaults = soac_ip_function_defaults,
 };
 
 /* Cold fixture setup only. Actual native Details supplies one code-node tree
@@ -1737,7 +1746,7 @@ soac_interpreter_fixture(PyObject *self, PyObject *args)
     if (PyType_Ready(&SoacInterpreterFixture_Type) < 0 ||
         PyType_Ready(&SoacInterpreterTestCall_Type) < 0 ||
         PyType_Ready(&SoacInterpreterTestFunction_Type) < 0 ||
-        PySoac_SetInterpreterCallbacksV4(&soac_ip_callbacks, sizeof(soac_ip_callbacks)) < 0) return NULL;
+        PySoac_SetInterpreterCallbacksV5(&soac_ip_callbacks, sizeof(soac_ip_callbacks)) < 0) return NULL;
     SoacInterpreterFixture *fixture = PyObject_GC_New(
         SoacInterpreterFixture, &SoacInterpreterFixture_Type);
     if (fixture == NULL) return NULL;

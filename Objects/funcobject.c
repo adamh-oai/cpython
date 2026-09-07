@@ -16,6 +16,7 @@
 #include "pycore_setobject.h"     // _PySet_NextEntry()
 #include "pycore_soac_descriptor.h" // Explicit fresh builtin descriptor birth
 #include "pycore_soac_type.h"
+#include "pycore_soac_interpreter.h" // Defaults replacement callback
 #include "pycore_stats.h"
 #include "pycore_tuple.h"         // _PyTuple_ITEMS()
 #include "pycore_weakref.h"       // FT_CLEAR_WEAKREFS()
@@ -122,6 +123,34 @@ func_check_soac_mutable(PyFunctionObject *func)
 }
 
 static int
+func_check_soac_defaults(PyFunctionObject *func, PyObject *candidate, uint32_t flags)
+{
+    if (func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_TERMINAL) {
+        func_soac_runtime_error("strict function owner is terminal");
+        return -1;
+    }
+    PyObject *owner = func->func_soac_strict_owner;
+    if (owner == NULL) return 0;
+    PyObject *code = Py_NewRef(func->func_code);
+    Py_INCREF(owner);
+    Py_XINCREF(candidate);
+    int status = _PySOAC_InterpreterCheckFunctionDefaults(
+        (PyObject *)func, owner, candidate, flags);
+    if (status == 0 &&
+        (func->func_soac_strict_owner != owner || func->func_code != code ||
+         func->func_soac_strict_owner_state == FUNC_SOAC_OWNER_TERMINAL ||
+         ((flags & Py_SOAC_FUNCTION_DEFAULTS_SEAL) &&
+          func->func_kwdefaults != candidate))) {
+        func_soac_runtime_error("function changed during defaults validation");
+        status = -1;
+    }
+    Py_XDECREF(candidate);
+    Py_DECREF(code);
+    Py_DECREF(owner);
+    return status;
+}
+
+static int
 func_soac_kwdefaults_policy(PyObject *owner, PyObject *dict, PyObject *key,
                             PyObject *value, int operation,
                             PyObject *provenance)
@@ -186,12 +215,12 @@ PyFunction_SealSoacStrict(PyObject *object, uint64_t identity)
                             "strict keyword defaults require an exact dictionary");
             return -1;
         }
-        /* Preserve the actual complete mapping, including arbitrary existing
-         * keys and their lookup behavior. This does not create a namespace or
-         * an instance layout. The shared immutable owner adds no function edge. */
-        if (!PyDict_MatchesSoacPolicy(defaults, Py_None,
-                                     func_soac_kwdefaults_policy,
-                                     PyDict_SOAC_READ_ONLY) &&
+        if (func_check_soac_defaults(func, defaults,
+                Py_SOAC_FUNCTION_DEFAULTS_KEYWORD | Py_SOAC_FUNCTION_DEFAULTS_SEAL) < 0 ||
+            func_check_soac_mutable(func) < 0) return -1;
+        /* The native callback seals its existing private defaults owner. Other
+         * backends retain the shared immutable owner with no function edge. */
+        if (!_PyDict_HasLiveSoacReadOnlyPolicy(defaults) &&
             PyDict_SetSoacPolicy(defaults, Py_None,
                                  func_soac_kwdefaults_policy,
                                  PyDict_SOAC_READ_ONLY) < 0) {
@@ -741,6 +770,11 @@ PyFunction_SetDefaults(PyObject *op, PyObject *defaults)
         Py_XDECREF(defaults);
         return -1;
     }
+    if (func_check_soac_defaults((PyFunctionObject *)op, defaults, 0) < 0 ||
+        func_check_soac_mutable((PyFunctionObject *)op) < 0) {
+        Py_XDECREF(defaults);
+        return -1;
+    }
     _PyFunction_ClearVersion((PyFunctionObject *)op);
     Py_XSETREF(((PyFunctionObject *)op)->func_defaults, defaults);
     return 0;
@@ -854,6 +888,11 @@ PyFunction_SetKwDefaults(PyObject *op, PyObject *defaults)
     handle_func_event(PyFunction_EVENT_MODIFY_KWDEFAULTS,
                       (PyFunctionObject *) op, defaults);
     if (func_check_soac_mutable((PyFunctionObject *)op) < 0) {
+        Py_XDECREF(defaults);
+        return -1;
+    }
+    if (func_check_soac_defaults((PyFunctionObject *)op, defaults, Py_SOAC_FUNCTION_DEFAULTS_KEYWORD) < 0 ||
+        func_check_soac_mutable((PyFunctionObject *)op) < 0) {
         Py_XDECREF(defaults);
         return -1;
     }
@@ -1186,6 +1225,8 @@ func_set_defaults(PyObject *self, PyObject *value, void *Py_UNUSED(ignored))
     if (func_check_soac_mutable(op) < 0) {
         return -1;
     }
+    if (func_check_soac_defaults(op, value, 0) < 0 ||
+        func_check_soac_mutable(op) < 0) return -1;
     _PyFunction_ClearVersion(op);
     Py_XSETREF(op->func_defaults, Py_XNewRef(value));
     return 0;
@@ -1238,6 +1279,8 @@ func_set_kwdefaults(PyObject *self, PyObject *value, void *Py_UNUSED(ignored))
     if (func_check_soac_mutable(op) < 0) {
         return -1;
     }
+    if (func_check_soac_defaults(op, value, Py_SOAC_FUNCTION_DEFAULTS_KEYWORD) < 0 ||
+        func_check_soac_mutable(op) < 0) return -1;
     _PyFunction_ClearVersion(op);
     Py_XSETREF(op->func_kwdefaults, Py_XNewRef(value));
     return 0;

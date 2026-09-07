@@ -185,6 +185,8 @@ PyAPI_FUNC(int) _PySOAC_InterpreterFunctionAttribute(
     _PyInterpreterFrame *actual_parent, const _Py_CODEUNIT *this_instr,
     PyFunctionObject *function, uint32_t attribute_flag,
     PyObject *borrowed_installed_value);
+PyAPI_FUNC(int) _PySOAC_InterpreterCheckFunctionDefaults(
+    PyObject *function, PyObject *owner, PyObject *candidate, uint32_t flags);
 extern int _PySOAC_InterpreterInitFrame(
     _PyInterpreterFrame *frame, const _PySoacInterpreterEntryV1 *entry);
 extern int _PySOAC_CheckedFrameBound(_PyInterpreterFrame *frame);

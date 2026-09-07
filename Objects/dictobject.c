@@ -238,7 +238,8 @@ soac_needs_mutation_transaction(PyDictObject *dict)
 {
     if (!_PyDict_HasSoacPolicy(dict)) return 0;
     SoacDictPolicy *policy = soac_policy(dict);
-    return policy->flags != PyDict_SOAC_ADMISSION_ONLY ||
+    return (policy->flags != PyDict_SOAC_ADMISSION_ONLY &&
+            policy->flags != PyDict_SOAC_FUNCTION_DEFAULTS) ||
         soac_policy_terminal(dict, policy) || soac_policy_mutating(dict, policy);
 }
 
@@ -346,9 +347,11 @@ soac_validate(SoacDictPolicy *policy, PyDictObject *dict,
                         "cannot mutate a read-only SOAC dictionary");
         return -1;
     }
-    if (operation == PyDict_SOAC_CLONE && policy->flags != PyDict_SOAC_ADMISSION_ONLY) {
+    if (operation == PyDict_SOAC_CLONE &&
+        policy->flags != PyDict_SOAC_ADMISSION_ONLY &&
+        policy->flags != PyDict_SOAC_FUNCTION_DEFAULTS) {
         PyErr_SetString(soac_mutation_error(),
-                        "ordinary dictionary cloning requires admission-only ownership");
+                        "ordinary dictionary cloning requires ordinary commit ownership");
         return -1;
     }
     int result = policy->validate(
@@ -459,7 +462,27 @@ soac_commit_begin(PyDictObject *dict, SoacDictCommitGuard *guard,
          * grant and must not be invoked with invented provenance. */
         return 0;
     }
+    PyObject *provenance = NULL;
+    if (operation == PyDict_SOAC_CLONE) {
+        provenance = value;
+        value = NULL;
+    }
+    else if (operation == PyDict_SOAC_ATTRIBUTE_SET ||
+             operation == PyDict_SOAC_ATTRIBUTE_SET_EXISTING) {
+        if (policy != NULL && policy->flags == PyDict_SOAC_ALLOW_NONSTRING_KEYS) {
+            provenance = key;
+        }
+        else {
+            operation = operation == PyDict_SOAC_ATTRIBUTE_SET
+                ? PyDict_SOAC_SET : PyDict_SOAC_SET_EXISTING;
+        }
+    }
     if (policy == guard->validated) {
+        /* A watcher may change a function binding or a nominal predicate's
+         * membership without replacing this permanent dictionary policy. */
+        if (policy != NULL && policy->flags == PyDict_SOAC_FUNCTION_DEFAULTS) {
+            return soac_validate(policy, dict, canonical, value, operation, provenance);
+        }
         return 0;
     }
     assert(guard->validated == NULL && policy != NULL);
@@ -473,17 +496,6 @@ soac_commit_begin(PyDictObject *dict, SoacDictCommitGuard *guard,
         PyErr_SetString(soac_mutation_error(), "cannot clear a sealed SOAC namespace");
         soac_commit_end(guard);
         return -1;
-    }
-    PyObject *provenance = NULL;
-    if (operation == PyDict_SOAC_ATTRIBUTE_SET ||
-        operation == PyDict_SOAC_ATTRIBUTE_SET_EXISTING) {
-        if (policy->flags == PyDict_SOAC_ALLOW_NONSTRING_KEYS) {
-            provenance = key;
-        }
-        else {
-            operation = operation == PyDict_SOAC_ATTRIBUTE_SET
-                ? PyDict_SOAC_SET : PyDict_SOAC_SET_EXISTING;
-        }
     }
     if (soac_validate(policy, dict, canonical, value, operation, provenance) < 0) {
         soac_commit_end(guard);
@@ -790,7 +802,8 @@ PyDict_SetSoacPolicy(PyObject *op, PyObject *owner,
     if (op == NULL || !PyDict_CheckExact(op) || owner == NULL ||
         validate == NULL ||
         (flags != 0 && flags != PyDict_SOAC_ALLOW_NONSTRING_KEYS &&
-         flags != PyDict_SOAC_READ_ONLY && flags != PyDict_SOAC_ADMISSION_ONLY)) {
+         flags != PyDict_SOAC_READ_ONLY && flags != PyDict_SOAC_ADMISSION_ONLY &&
+         flags != PyDict_SOAC_FUNCTION_DEFAULTS)) {
         PyErr_SetString(PyExc_TypeError,
                         "SOAC policy requires an exact dict, owner, callback and supported flags");
         return -1;
@@ -828,6 +841,47 @@ PyDict_SetSoacPolicy(PyObject *op, PyObject *owner,
     soac_commit_install(dict, policy);
     return 0;
 #endif
+}
+
+PyObject *
+PyDict_GetSoacFunctionDefaultsOwner(
+    PyObject *dict, PyDict_SoacPolicyCallback expected_validate)
+{
+    if (expected_validate == NULL || !PyDict_HasSoacPolicy(dict)) return NULL;
+    SoacDictPolicy *policy = soac_policy((PyDictObject *)dict);
+    if (soac_policy_terminal((PyDictObject *)dict, policy)) {
+        PyObject *error = PySoac_GetStrictRuntimeUnavailableError();
+        PyErr_SetString(error != NULL ? error : PyExc_RuntimeError,
+                        "function defaults dictionary is terminal");
+        return NULL;
+    }
+    if (policy->validate != expected_validate ||
+        (policy->flags != PyDict_SOAC_FUNCTION_DEFAULTS &&
+         policy->flags != PyDict_SOAC_READ_ONLY)) return NULL;
+    if (soac_policy_installing((PyDictObject *)dict, policy) ||
+        soac_policy_mutating((PyDictObject *)dict, policy)) {
+        PyErr_SetString(soac_mutation_error(),
+                        "function defaults dictionary is being modified");
+        return NULL;
+    }
+    return Py_NewRef(policy->owner);
+}
+
+int
+PyDict_SealSoacFunctionDefaults(
+    PyObject *dict, PyObject *expected_owner,
+    PyDict_SoacPolicyCallback expected_validate)
+{
+    if (expected_owner == NULL || expected_validate == NULL ||
+        !PyDict_MatchesSoacPolicy(dict, expected_owner, expected_validate,
+                                  PyDict_SOAC_FUNCTION_DEFAULTS)) {
+        PyErr_SetString(soac_mutation_error(),
+                        "cannot seal unrelated or unavailable function defaults");
+        return -1;
+    }
+    SoacDictPolicy *policy = soac_policy((PyDictObject *)dict);
+    policy->flags = PyDict_SOAC_READ_ONLY;
+    return 0;
 }
 
 int
@@ -5862,18 +5916,19 @@ dict_dict_merge(PyDictObject *mp, PyDictObject *other, int override)
              USABLE_FRACTION(DK_SIZE(okeys)/2) < other->ma_used)
         ) {
             SoacDictCommitGuard guard = {0};
-            if (soac_commit_begin(mp, &guard, NULL, NULL, NULL, PyDict_SOAC_CLONE) < 0) {
+            if (soac_commit_begin(mp, &guard, NULL, NULL, (PyObject *)other, PyDict_SOAC_CLONE) < 0) {
                 return -1;
             }
             _PyDict_NotifyEvent(PyDict_EVENT_CLONED, mp, (PyObject *)other, NULL);
             if (_PyDict_HasSoacPolicy(mp)) {
-                if (soac_policy(mp)->flags != PyDict_SOAC_ADMISSION_ONLY) {
+                if (soac_policy(mp)->flags != PyDict_SOAC_ADMISSION_ONLY &&
+                    soac_policy(mp)->flags != PyDict_SOAC_FUNCTION_DEFAULTS) {
                     assert(guard.validated == NULL);
                     /* No source key has been looked up or hashed yet. Preserve
                        the newly installed policy's staged bulk path. */
                     return soac_merge(mp, (PyObject *)other, override, 0);
                 }
-                if (soac_commit_begin(mp, &guard, NULL, NULL, NULL, PyDict_SOAC_CLONE) < 0) {
+                if (soac_commit_begin(mp, &guard, NULL, NULL, (PyObject *)other, PyDict_SOAC_CLONE) < 0) {
                     soac_commit_end(&guard);
                     return -1;
                 }
