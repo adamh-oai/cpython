@@ -309,7 +309,7 @@ PyAPI_FUNC(uint64_t) PyType_GetSoacFunctionId(PyObject *);
 
 /* The C-only caller must authenticate the source plan. Ordinary Python cannot
  * construct these native handles or install type capabilities. */
-#define Py_SOAC_TYPE_CONTRACT_ABI 5
+#define Py_SOAC_TYPE_CONTRACT_ABI 6
 #define Py_SOAC_TYPE_FINAL 1u
 
 enum {
@@ -385,6 +385,8 @@ typedef struct {
     PyObject *fields;
     PyObject *protected_names;
     PyObject *final_methods;
+    /* Own authenticated plain-method declaration candidates, not dispatch authority. */
+    PyObject *method_reservation_names;
     PyObject *object_slot_fields;
     int (*check_instance_write)(PyObject *, PyObject *, PyObject *, PyObject *);
     /* ORDINARY returns one metadata owner, not a new dictionary or receiver
@@ -396,14 +398,14 @@ typedef struct {
     int (*prepare_instance_dictionary_policy)(
         PyObject *, PyObject *, PyObject *,
         const PySoacInstanceDictPolicy *, PySoacInstanceDictPolicy *);
-} PySoacTypeContractSpecV5;
+} PySoacTypeContractSpecV6;
 
 /* Captured by the original PENDING construction, never chosen by admission.
  * actual_contract is the stable, native-pinned input view. Success compares it
  * with the owner's immutable prepared requirements without Python/allocation. */
-typedef int (*PySoacTypeFinalCommitV5)(
+typedef int (*PySoacTypeFinalCommitV6)(
     PyObject *owner, PyObject *actual_type,
-    const PySoacTypeContractSpecV5 *actual_contract);
+    const PySoacTypeContractSpecV6 *actual_contract);
 
 typedef struct {
     uint32_t abi_version;
@@ -424,10 +426,10 @@ typedef struct {
      * revalidated on return. Final admission uses the separate strict commit. */
     int (*bind_type)(PyObject *, PyObject *);
     /* PENDING requires this trusted final hook; ENFORCED requires NULL. */
-    PySoacTypeFinalCommitV5 commit_final;
+    PySoacTypeFinalCommitV6 commit_final;
     /* ENFORCED: existing complete contract. PENDING: all-zero, no own
      * instance/namespace contract or inferred replacement field layout. */
-    PySoacTypeContractSpecV5 contract;
+    PySoacTypeContractSpecV6 contract;
 } PySoacTypeConstructionSpec;
 
 /* Existing functions, same roles. Pending mode is a distinct native state,
@@ -483,9 +485,9 @@ PyAPI_FUNC(int) PyType_AdmitSoacPendingV1(
     PyObject *actual_final_type,
     PyObject *expected_owner,
     PyObject *expected_root_construction,
-    const PySoacTypeContractSpecV5 *contract,
+    const PySoacTypeContractSpecV6 *contract,
     size_t contract_size,
-    PySoacTypeFinalCommitV5 expected_commit_final);
+    PySoacTypeFinalCommitV6 expected_commit_final);
 
 /* Exact canonical, consumed pending construction HANDLE required. Scalar
  * terminalization of its unresolved lineage, before callback-capable cleanup.

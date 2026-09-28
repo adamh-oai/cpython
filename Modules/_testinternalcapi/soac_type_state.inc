@@ -110,7 +110,7 @@ soac_test_slot_state_bind(PyObject *owner, PyObject *actual_type)
 }
 
 static int
-soac_test_slot_state_final(PyObject *owner, PyObject *type, const PySoacTypeContractSpecV5 *contract)
+soac_test_slot_state_final(PyObject *owner, PyObject *type, const PySoacTypeContractSpecV6 *contract)
 {
     PySoacTypeConstructionInfoV1 info;
     if (PyType_GetSoacConstructionInfoV1(type, &info, sizeof(info)) != 1 ||
@@ -170,9 +170,10 @@ slot_new_soac_type_state_type(PyObject *self, PyObject *args)
     };
     PyObject *handle = PyType_NewSoacConstructionHandle(&construction);
     PyObject *type = handle == NULL ? NULL : PyType_FromSoacConstructionHandle(handle, namespace_function);
-    PySoacTypeContractSpecV5 contract = {
+    PySoacTypeContractSpecV6 contract = {
         .dictionary_mode = Py_SOAC_INSTANCE_DICT_NONE,
         .fields = empty, .protected_names = empty, .final_methods = empty,
+        .method_reservation_names = empty,
         .object_slot_fields = fields, .check_instance_write = soac_test_ordinary_inline_write,
     };
     if (type != NULL && PyType_AdmitSoacPendingV1(type, owner, handle, &contract, sizeof(contract),

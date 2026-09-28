@@ -2291,7 +2291,7 @@ soac_test_ordinary_prepare_dictionary(PyObject *owner, PyObject *instance,
 
 static int
 soac_test_ordinary_final_commit(PyObject *owner, PyObject *type,
-                                const PySoacTypeContractSpecV5 *contract)
+                                const PySoacTypeContractSpecV6 *contract)
 {
     PySoacTypeConstructionInfoV1 info;
     int checked = PyTuple_GET_SIZE(PyTuple_GET_ITEM(owner, 0)) != 0;
@@ -2390,11 +2390,12 @@ dict_new_soac_ordinary_type_impl(PyObject *args, int direct, int explicit_dict)
         return NULL;
     }
     int checked = PyTuple_GET_SIZE(fields) != 0;
-    PySoacTypeContractSpecV5 contract = {
+    PySoacTypeContractSpecV6 contract = {
         .dictionary_mode = checked ? Py_SOAC_INSTANCE_DICT_ORDINARY : Py_SOAC_INSTANCE_DICT_NONE,
         .fields = fields,
         .protected_names = PyTuple_GET_ITEM(owner, 3),
         .final_methods = PyTuple_GET_ITEM(owner, 4),
+        .method_reservation_names = empty,
         .object_slot_fields = empty,
         .check_instance_write = checked ? soac_test_ordinary_inline_write : NULL,
         .prepare_instance_dictionary_policy = checked ? soac_test_ordinary_prepare_dictionary : NULL,

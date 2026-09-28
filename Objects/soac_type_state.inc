@@ -22,6 +22,7 @@ type_state_traverse(PyTypeState *state, visitproc visit, void *arg)
     Py_VISIT(state->dictionary);
     Py_VISIT(state->dictionary_policy.owner);
     Py_VISIT(state->class_contracts);
+    Py_VISIT(state->receiver_birth_receipt);
     for (Py_ssize_t i = 0; i < state->slot_count; ++i) {
         Py_VISIT(state->slots[i].canonical_name);
         Py_VISIT(state->slots[i].owner);
@@ -39,6 +40,7 @@ type_state_clear(PyTypeState *state)
     Py_CLEAR(state->dictionary);
     Py_CLEAR(state->dictionary_policy.owner);
     Py_CLEAR(state->class_contracts);
+    Py_CLEAR(state->receiver_birth_receipt);
     for (Py_ssize_t i = 0; i < state->slot_count; ++i) {
         Py_CLEAR(state->slots[i].canonical_name);
         Py_CLEAR(state->slots[i].owner);
@@ -102,7 +104,8 @@ _PyTypeState_CheckLive(PyTypeState *state)
 
 static PyTypeState *
 type_state_new_for_spec(PyObject *actual_type, const PyTypeStateSpecV1 *spec,
-                        size_t spec_size, int cache_name_provenance)
+                        size_t spec_size, int cache_name_provenance,
+                        PyObject *receiver_birth_receipt)
 {
     if (!_Py_TYPE_STATE_SUPPORTED) {
         PyErr_SetString(PyExc_NotImplementedError,
@@ -136,6 +139,7 @@ type_state_new_for_spec(PyObject *actual_type, const PyTypeStateSpecV1 *spec,
     PyTypeState *state = type_state_new(_Py_TYPE_STATE_INSTANCE);
     if (state == NULL) return NULL;
     state->allocation_type = type;
+    state->receiver_birth_receipt = Py_XNewRef(receiver_birth_receipt);
     state->type_version = type->tp_version_tag;
     if (_PyTypeState_BindSpec(type, spec, state) < 0) goto error;
     if (spec->slot_count > 0) {
@@ -173,6 +177,10 @@ type_state_new_for_spec(PyObject *actual_type, const PyTypeStateSpecV1 *spec,
         PyObject_GC_Track(dictionary);
         state->dictionary = dictionary;
     }
+    if (receiver_birth_receipt != NULL &&
+        _PySOAC_MatchesReceiverPolicy(type, receiver_birth_receipt,
+            spec->dictionary_owner, spec->validate_dictionary, spec->validate_inline) < 0)
+        goto error;
     state->terminal = 0;
     PyObject_GC_Track(state);
     return state;
@@ -189,14 +197,39 @@ PyTypeState *
 PyTypeState_NewV1(PyObject *actual_type, const PyTypeStateSpecV1 *spec,
                  size_t spec_size)
 {
-    return type_state_new_for_spec(actual_type, spec, spec_size, 0);
+    return type_state_new_for_spec(actual_type, spec, spec_size, 0, NULL);
 }
 
 PyTypeState *
 PyTypeState_NewV2(PyObject *actual_type, const PyTypeStateSpecV1 *spec,
                  size_t spec_size)
 {
-    return type_state_new_for_spec(actual_type, spec, spec_size, 1);
+    return type_state_new_for_spec(actual_type, spec, spec_size, 1, NULL);
+}
+
+PyTypeState *
+PyTypeState_NewV3(PyObject *actual_type, const PyTypeStateSpecV2 *spec,
+                 size_t spec_size)
+{
+    if (spec == NULL || spec_size != sizeof(*spec) ||
+        spec->abi_version != 2 || spec->struct_size != sizeof(*spec) ||
+        spec->receiver_birth_receipt == NULL || actual_type == NULL ||
+        !PyType_Check(actual_type)) {
+        PyErr_SetString(PyExc_ValueError, "invalid birth-aware type-state specification");
+        return NULL;
+    }
+    if (_PySOAC_MatchesReceiverPolicy((PyTypeObject *)actual_type,
+            spec->receiver_birth_receipt, spec->dictionary_owner,
+            spec->validate_dictionary, spec->validate_inline) < 0) return NULL;
+    PyTypeStateSpecV1 legacy = {
+        .abi_version = Py_TYPE_STATE_ABI_V1, .struct_size = sizeof(legacy),
+        .dictionary_owner = spec->dictionary_owner,
+        .validate_dictionary = spec->validate_dictionary,
+        .validate_inline = spec->validate_inline,
+        .slot_count = spec->slot_count, .slots = spec->slots,
+    };
+    return type_state_new_for_spec(actual_type, &legacy, sizeof(legacy), 1,
+                                   spec->receiver_birth_receipt);
 }
 
 int

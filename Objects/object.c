@@ -537,6 +537,11 @@ PyObject_Init(PyObject *op, PyTypeObject *tp)
     }
 
     if (_PySOAC_CheckTypeAllocation(tp) < 0) return NULL;
+    if (_PySOAC_HasReceiverDictionaryPolicy(tp)) {
+        PyErr_SetString(PyExc_TypeError,
+            "PyObject_Init cannot prove caller-owned receiver dictionary storage; use an allocation API");
+        return NULL;
+    }
     _PyObject_Init(op, tp);
     return op;
 }
@@ -549,6 +554,11 @@ PyObject_InitVar(PyVarObject *op, PyTypeObject *tp, Py_ssize_t size)
     }
 
     if (_PySOAC_CheckTypeAllocation(tp) < 0) return NULL;
+    if (_PySOAC_HasReceiverDictionaryPolicy(tp)) {
+        PyErr_SetString(PyExc_TypeError,
+            "PyObject_InitVar cannot prove caller-owned receiver dictionary storage; use an allocation API");
+        return NULL;
+    }
     _PyObject_InitVar(op, tp, size);
     return op;
 }
@@ -557,6 +567,8 @@ PyObject *
 _PyObject_New(PyTypeObject *tp)
 {
     if (_PySOAC_CheckTypeAllocation(tp) < 0) return NULL;
+    if (_PySOAC_HasReceiverDictionaryPolicy(tp))
+        return _PyType_AllocNoTrackWithFree(tp, 0, PyObject_Free);
     PyObject *op = (PyObject *) PyObject_Malloc(_PyObject_SIZE(tp));
     if (op == NULL) {
         return PyErr_NoMemory();
@@ -569,6 +581,8 @@ PyVarObject *
 _PyObject_NewVar(PyTypeObject *tp, Py_ssize_t nitems)
 {
     if (_PySOAC_CheckTypeAllocation(tp) < 0) return NULL;
+    if (_PySOAC_HasReceiverDictionaryPolicy(tp))
+        return (PyVarObject *)_PyType_AllocNoTrackWithFree(tp, nitems, PyObject_Free);
     PyVarObject *op;
     const size_t size = _PyObject_VAR_SIZE(tp, nitems);
     op = (PyVarObject *) PyObject_Malloc(size);

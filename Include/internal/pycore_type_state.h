@@ -61,6 +61,8 @@ struct _PyTypeState {
     /* Only instance states retain native class-liveness metadata. Escaped
      * dictionary projections never acquire this edge. */
     PyObject *class_contracts;
+    /* Instance-only birth receipt; dictionary projection has no type edge. */
+    PyObject *receiver_birth_receipt;
     PyTypeState *dictionary;
     SoacDictPolicy dictionary_policy;
     PyTypeStateFieldCheckV1 validate_inline;

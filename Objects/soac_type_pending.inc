@@ -11,7 +11,7 @@ PyType_GetSoacConstructionInfoV1(PyObject *object,
         return soac_type_state_error("invalid native type construction query");
     }
     SoacTypeContract *state = soac_type_state((PyTypeObject *)object);
-    if (state == NULL) return 0;
+    if (state == NULL || state->phase == SOAC_TYPE_STATE_RECEIVER_ONLY) return 0;
     out->abi_version = Py_SOAC_TYPE_CONSTRUCTION_INFO_ABI_V1;
     out->struct_size = sizeof(*out);
     out->phase = soac_type_phase(state);
@@ -80,18 +80,19 @@ soac_validate_final_slot_views(SoacTypeContract *state, PyTypeObject *type)
 }
 
 static void
-soac_release_contract_inputs(PySoacTypeContractSpecV5 *spec)
+soac_release_contract_inputs(PySoacTypeContractSpecV6 *spec)
 {
     Py_DECREF(spec->fields);
     Py_DECREF(spec->protected_names);
     Py_DECREF(spec->final_methods);
+    Py_DECREF(spec->method_reservation_names);
     Py_XDECREF(spec->object_slot_fields);
 }
 
 int
 PyType_AdmitSoacPendingV1(PyObject *object, PyObject *owner, PyObject *expected_root,
-                         const PySoacTypeContractSpecV5 *spec, size_t size,
-                         PySoacTypeFinalCommitV5 expected_commit_final)
+                         const PySoacTypeContractSpecV6 *spec, size_t size,
+                         PySoacTypeFinalCommitV6 expected_commit_final)
 {
     /* Invalid/foreign requests do not terminalize a valid unrelated type.
      * A real admission starts only after callback-free exact preflight. */
@@ -119,10 +120,11 @@ PyType_AdmitSoacPendingV1(PyObject *object, PyObject *owner, PyObject *expected_
         !(type->tp_flags & Py_TPFLAGS_READY) || (type->tp_flags & Py_TPFLAGS_READYING)) {
         return soac_type_state_error("pending final lineage is unavailable or still constructing");
     }
-    PySoacTypeContractSpecV5 inputs = *spec;
+    PySoacTypeContractSpecV6 inputs = *spec;
     Py_INCREF(inputs.fields);
     Py_INCREF(inputs.protected_names);
     Py_INCREF(inputs.final_methods);
+    Py_INCREF(inputs.method_reservation_names);
     Py_XINCREF(inputs.object_slot_fields);
     root->lineage_phase = SOAC_LINEAGE_ADMITTING;
     state->phase = Py_SOAC_TYPE_STATE_ADMITTING;
@@ -143,6 +145,9 @@ PyType_AdmitSoacPendingV1(PyObject *object, PyObject *owner, PyObject *expected_
     PyType_Modified(type);
     if (PyErr_Occurred() || soac_admission_live(type, state, root, owner) < 0 ||
         soac_validate_final_slot_views(state, type) < 0) goto failed;
+
+    if (soac_prepare_receiver_policy(type) < 0 ||
+        soac_admission_live(type, state, root, owner) < 0) goto failed;
 
     if (soac_prepare_type_seal(type) < 0 ||
         soac_admission_live(type, state, root, owner) < 0) goto failed;
@@ -196,6 +201,11 @@ PyType_DisposeSoacProvisionalV1(PyObject *object, PyObject *owner,
     /* Ordinary storage, inherited policies and already sealed function owners
      * are untouched. Publish dynamic before the first callback-capable release. */
     state->phase = Py_SOAC_TYPE_STATE_DYNAMIC;
+    state->receiver_policy_factory = NULL;
+    if (soac_prepare_receiver_policy((PyTypeObject *)object) < 0) {
+        state->terminal = 1;
+        return -1;
+    }
     PyObject *error = PyErr_GetRaisedException();
     soac_clear_empty_write_policy(state);
     Py_CLEAR(state->owner);

@@ -147,6 +147,103 @@ PyAPI_FUNC(PyTypeState *) PyTypeState_NewV1(
  * CACHE_SET operations. Old V1 callers never receive those operations. */
 PyAPI_FUNC(PyTypeState *) PyTypeState_NewV2(
     PyObject *actual_type, const PyTypeStateSpecV1 *spec, size_t spec_size);
+typedef struct {
+    PyObject *name;
+    uint32_t storage; /* 0 dictionary, 1 authenticated object member */
+    Py_ssize_t offset; /* only meaningful for storage==1 */
+} PySoacReceiverFieldV1;
+
+typedef struct {
+    PyObject *name;
+    uint32_t kind; /* 1 exact PyFunction, 2 data descriptor, 3 other descriptor,
+                   * 4 plain class value; no descriptor calls */
+} PySoacReceiverBindingV1;
+
+typedef struct {
+    PyObject *actual_type;
+    uint32_t namespace_complete; /* 0 or 1; unsafe type-dict keys => 0 */
+    uint32_t field_catalog_complete; /* 0 or 1; unavailable facts => 0 */
+    size_t field_count;
+    const PySoacReceiverFieldV1 *fields;
+    size_t binding_count;
+    const PySoacReceiverBindingV1 *bindings;
+} PySoacReceiverMroRowV1;
+
+typedef struct {
+    uint32_t abi_version; /* 1 */
+    uint32_t struct_size;
+    PyObject *actual_type;
+    uint32_t dictionary_bearing; /* actual layout, 0 or 1 */
+    uint32_t stock_lookup; /* actual lookup shape, 0 or 1 */
+    size_t row_count;
+    const PySoacReceiverMroRowV1 *rows;
+} PySoacReceiverBirthInputV1;
+
+typedef int (*PySoacReceiverDictionaryAttachmentV1)(
+    PyObject *full_storage_owner, PyObject *actual_instance, PyObject *dictionary,
+    const PySoacInstanceDictPolicy *existing, PySoacInstanceDictPolicy *out);
+
+typedef struct {
+    uint32_t abi_version; /* 1 */
+    uint32_t struct_size;
+    PyObject *storage_owner; /* transfers one reference on success */
+    uint32_t coverage; /* 0 complete empty, 1 complete reserved, 2 unsupported */
+    uint32_t dictionary_mode; /* actual effective storage owner's 0 or 2 */
+    PyObject *reservation_names; /* transfers exact canonical tuple on success */
+    PyObject *dictionary_owner; /* separate projection; new ref, or NULL if mode 0 */
+    PyDict_SoacPolicyCallback validate_dictionary;
+    PyTypeStateFieldCheckV1 validate_inline;
+    PySoacReceiverDictionaryAttachmentV1 prepare_dictionary_attachment;
+} PySoacReceiverBirthOutputV1;
+
+typedef int (*PySoacReceiverBirthFactoryV1)(
+    PyObject *requested_owner,
+    const PySoacReceiverBirthInputV1 *,
+    PySoacReceiverBirthOutputV1 *);
+
+PyAPI_FUNC(int) PyType_SetSoacReceiverPolicyFactoryV1(
+    PyObject *actual_type, PyObject *expected_owner,
+    PySoacReceiverBirthFactoryV1);
+
+typedef struct {
+    uint32_t abi_version; /* caller initializes 1 */
+    uint32_t struct_size; /* caller initializes exact sizeof */
+    PyObject *receipt; /* borrowed; native type pins it */
+    PyObject *storage_owner; /* borrowed; receipt pins it */
+    PyObject *dictionary_owner; /* borrowed; NULL if effective mode 0 */
+} PySoacReceiverReceiptViewV1;
+
+PyAPI_FUNC(int) PyType_GetSoacReceiverPolicyV1(
+    PyObject *actual_type, PySoacReceiverReceiptViewV1 *out);
+/* Callback-free query: 1 means exact actual-birth receipt, 0 means missing,
+ * -1 means error. Empty/unsupported receipts can retain valid field storage
+ * without giving any method capability. Receipt owns no strong actual-type
+ * edge; native weak/birth identity rejects address reuse and foreign types.
+ * Dictionary projections MUST NOT retain this receipt or its type lifetime.
+ * PyType_HasSoacContract retains its existing strict-class meaning.
+ */
+
+/* PyTypeStateSpecV2 has the same ordered first seven fields as V1, but
+ * abi_version==2, struct_size==sizeof(V2), followed by:
+ *     PyObject *receiver_birth_receipt;
+ * It is a NEW payload. Do not rename/reinterpret PyTypeStateSpecV1.
+ * PyTypeState_NewV2 keeps V1 payload + cache-event opt-in from stage06.
+ */
+typedef struct {
+    uint32_t abi_version;
+    uint32_t struct_size;
+    PyObject *dictionary_owner;
+    PyDict_SoacPolicyCallback validate_dictionary;
+    PyTypeStateFieldCheckV1 validate_inline;
+    Py_ssize_t slot_count;
+    const PyTypeStateSlotSpecV1 *slots;
+    PyObject *receiver_birth_receipt;
+} PyTypeStateSpecV2;
+
+PyAPI_FUNC(PyTypeState *) PyTypeState_NewV3(
+    PyObject *actual_type, const PyTypeStateSpecV2 *, size_t spec_size);
+
+
 PyAPI_FUNC(int) PyDict_SetSoacPolicy(
     PyObject *dict, PyObject *owner, PyDict_SoacPolicyCallback validate,
     unsigned int flags);

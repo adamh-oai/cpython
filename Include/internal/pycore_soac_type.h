@@ -41,6 +41,12 @@ extern int _PySOAC_CheckTypeMro(PyTypeObject *, PyObject *, int);
 extern int _PySOAC_CheckClassAssignment(PyTypeObject *, PyTypeObject *);
 extern int _PySOAC_CheckDictionaryReplacement(PyObject *);
 extern int _PySOAC_ReadyTypeInheritance(PyTypeObject *);
+extern int _PySOAC_ReadyReceiverPolicy(PyTypeObject *);
+extern int _PySOAC_HasReceiverDictionaryPolicy(PyTypeObject *);
+extern int _PySOAC_CheckReceiverReceipt(PyObject *, PyTypeObject *);
+extern int _PySOAC_MatchesReceiverPolicy(
+    PyTypeObject *, PyObject *, PyObject *, PyDict_SoacPolicyCallback,
+    PyTypeStateFieldCheckV1);
 extern int _PySOAC_TypeContractTraverse(PyTypeObject *, visitproc, void *);
 extern void _PySOAC_TypeContractBeginTeardown(PyTypeObject *);
 extern void _PySOAC_TypeContractClear(PyTypeObject *);

@@ -3,6 +3,7 @@
 
 typedef struct SoacTypeContract SoacTypeContract;
 typedef struct SoacConstructionHandle SoacConstructionHandle;
+typedef struct SoacReceiverReceipt SoacReceiverReceipt;
 
 enum {
     SOAC_LINEAGE_OPEN = 0,
@@ -10,6 +11,9 @@ enum {
     SOAC_LINEAGE_RESOLVED,
     SOAC_LINEAGE_FAILED,
 };
+
+/* A storage receipt on an ordinary descendant is not a construction grant. */
+enum { SOAC_TYPE_STATE_RECEIVER_ONLY = 6 };
 
 struct SoacConstructionHandle {
     PyObject_HEAD
@@ -53,6 +57,10 @@ struct SoacTypeContract {
     Py_ssize_t object_slot_count;
     PyObject *protected_names;
     PyObject *final_methods;
+    PyObject *method_reservation_names;
+    PySoacReceiverBirthFactoryV1 receiver_policy_factory;
+    SoacReceiverReceipt *receiver_policy;
+    int preparing_receiver_policy;
     /* Non-owning: the type owns this contract. Escaping its dictionary must
      * not create a reverse lifetime edge through the dictionary policy. The
      * type clears this address before its deallocation callbacks or reference
@@ -77,7 +85,7 @@ struct SoacTypeContract {
     SoacConstructionHandle *construction; /* owned metadata, not a type pin */
     PyObject *inherited_final_names;  /* immutable inherited-only dict policy */
     int class_dictionary_policy_installed;
-    PySoacTypeFinalCommitV5 commit_final; /* immutable construction authority */
+    PySoacTypeFinalCommitV6 commit_final; /* immutable construction authority */
     PySoacStorageStateFactoryV1 storage_state_factory;
     int binding_storage_factory;
     int empty_write_policy_ready; /* immutable shape, published only at seal */
@@ -100,6 +108,15 @@ static PyObject *type_new_impl(type_new_ctx *ctx);
 static int type_new_get_bases(type_new_ctx *ctx, PyObject **type);
 static int soac_final_override(PyTypeObject *, PyObject *);
 static SoacTypeContract *soac_type_ordinary_dictionary_contract(PyTypeObject *);
+static int soac_prepare_receiver_policy(PyTypeObject *);
+static int soac_receiver_allocation_barrier(PyTypeObject *, int);
+static int soac_receiver_type_selected(PyTypeObject *);
+static void soac_receiver_retire(SoacReceiverReceipt *);
+static int soac_receiver_live(PyTypeObject *, SoacReceiverReceipt *);
+static int soac_receiver_dictionary_mode(SoacTypeContract *);
+static int soac_receiver_inline_write(PyObject *, PyObject *, PyObject *);
+static int soac_receiver_prepare_dictionary(PyObject *, PyObject *,
+    const PySoacInstanceDictPolicy *, PySoacInstanceDictPolicy *);
 
 /* Scalar retirement is safe even in callback-free teardown hooks. Keep the
  * storage shell owned until the ordinary release phase, but never leave a
@@ -245,7 +262,8 @@ soac_type_allocation_barrier(PyTypeObject *type)
 {
     SoacTypeContract *state = soac_type_state(type);
     if (state == NULL || soac_type_phase(state) == Py_SOAC_TYPE_STATE_DYNAMIC) return 0;
-    if (soac_type_phase(state) != Py_SOAC_TYPE_STATE_ENFORCED) {
+    if (soac_type_phase(state) != Py_SOAC_TYPE_STATE_ENFORCED &&
+        soac_type_phase(state) != SOAC_TYPE_STATE_RECEIVER_ONLY) {
         return soac_type_state_error("instances of a pending or failed strict type are unavailable");
     }
     return 0;
@@ -255,14 +273,35 @@ int
 _PySOAC_CheckTypeAllocation(PyTypeObject *type)
 {
     if (soac_type_allocation_barrier(type) < 0) return -1;
+    int selected = soac_receiver_type_selected(type);
     PyObject *mro = type->tp_mro;
     for (Py_ssize_t i = 1; mro != NULL && i < PyTuple_GET_SIZE(mro); ++i) {
-        if (soac_type_allocation_barrier((PyTypeObject *)PyTuple_GET_ITEM(mro, i)) < 0) return -1;
+        PyTypeObject *base = (PyTypeObject *)PyTuple_GET_ITEM(mro, i);
+        if (soac_type_allocation_barrier(base) < 0) return -1;
+        selected |= soac_receiver_type_selected(base);
     }
     for (PyTypeObject *base = type->tp_base; base != NULL; base = base->tp_base) {
         if (soac_type_allocation_barrier(base) < 0) return -1;
+        selected |= soac_receiver_type_selected(base);
     }
-    return 0;
+    if (mro == NULL && (type->tp_flags & Py_TPFLAGS_HEAPTYPE)) {
+        /* Only the pre-MRO construction interval needs these direct bases.
+         * Their completed MROs cover secondary ancestry without recursive
+         * diamond expansion. Ready validates bases before invoking mro(). */
+        PyObject *bases = type->tp_bases;
+        for (Py_ssize_t i = 0; bases != NULL && i < PyTuple_GET_SIZE(bases); ++i) {
+            PyTypeObject *base = (PyTypeObject *)PyTuple_GET_ITEM(bases, i);
+            if (soac_type_allocation_barrier(base) < 0) return -1;
+            selected |= soac_receiver_type_selected(base);
+            PyObject *base_mro = base->tp_mro;
+            for (Py_ssize_t j = 1; base_mro != NULL && j < PyTuple_GET_SIZE(base_mro); ++j) {
+                PyTypeObject *ancestor = (PyTypeObject *)PyTuple_GET_ITEM(base_mro, j);
+                if (soac_type_allocation_barrier(ancestor) < 0) return -1;
+                selected |= soac_receiver_type_selected(ancestor);
+            }
+        }
+    }
+    return soac_receiver_allocation_barrier(type, selected);
 }
 
 int
@@ -317,7 +356,8 @@ _PySOAC_GetTypeConstructionOwner(PyObject *object)
 {
     if (object == NULL || !PyType_Check(object)) return NULL;
     SoacTypeContract *state = soac_type_state((PyTypeObject *)object);
-    if (state == NULL || soac_type_phase(state) == Py_SOAC_TYPE_STATE_DYNAMIC) return NULL;
+    if (state == NULL || state->phase == SOAC_TYPE_STATE_RECEIVER_ONLY ||
+        soac_type_phase(state) == Py_SOAC_TYPE_STATE_DYNAMIC) return NULL;
     if (state->owner == NULL || state->terminal ||
         soac_type_phase(state) == Py_SOAC_TYPE_STATE_FAILED) {
         soac_type_state_error("native type construction owner is unavailable");
@@ -473,6 +513,9 @@ _PyTypeState_CheckInstanceContracts(PyTypeState *storage)
 {
     /* BindSpec authenticated these immutable class-contract edges.
      * Their terminal states can still change during a validator callback. */
+    if (storage->receiver_birth_receipt != NULL &&
+        _PySOAC_CheckReceiverReceipt(storage->receiver_birth_receipt,
+                                     storage->allocation_type) < 0) return -1;
     assert(storage->class_contracts != NULL);
     assert(PyTuple_CheckExact(storage->class_contracts));
     for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(storage->class_contracts); ++i) {
@@ -519,8 +562,11 @@ _PyTypeState_ForAllocation(PyTypeObject *type)
             return NULL;
         }
         factory = contract->storage_state_factory;
-        if (contract->dictionary_mode == Py_SOAC_INSTANCE_DICT_NONE &&
-            contract->object_slot_count == 0) continue;
+        SoacTypeContract *actual = soac_type_state(type);
+        int dictionary = actual != NULL && actual->receiver_policy != NULL
+            ? soac_receiver_dictionary_mode(actual)
+            : contract->dictionary_mode == Py_SOAC_INSTANCE_DICT_ORDINARY;
+        if (!dictionary && contract->object_slot_count == 0) continue;
         if (selected == NULL) {
             selected = contract;
         }
@@ -622,6 +668,7 @@ soac_handle_traverse(SoacConstructionHandle *handle, visitproc visit, void *arg)
     Py_VISIT(handle->spec.contract.object_slot_fields);
     Py_VISIT(handle->spec.contract.protected_names);
     Py_VISIT(handle->spec.contract.final_methods);
+    Py_VISIT(handle->spec.contract.method_reservation_names);
     return 0;
 }
 
@@ -657,6 +704,7 @@ soac_handle_clear(SoacConstructionHandle *handle)
     Py_CLEAR(handle->spec.contract.object_slot_fields);
     Py_CLEAR(handle->spec.contract.protected_names);
     Py_CLEAR(handle->spec.contract.final_methods);
+    Py_CLEAR(handle->spec.contract.method_reservation_names);
     Py_CLEAR(handle->reserved_state);
     Py_CLEAR(handle->root);
     return 0;
@@ -688,6 +736,8 @@ soac_state_traverse(SoacTypeContract *state, visitproc visit, void *arg)
     Py_VISIT(state->object_slot_fields);
     Py_VISIT(state->protected_names);
     Py_VISIT(state->final_methods);
+    Py_VISIT(state->method_reservation_names);
+    Py_VISIT(state->receiver_policy);
     Py_VISIT(state->construction);
     Py_VISIT(state->inherited_final_names);
     Py_VISIT(state->empty_write_storage_owner);
@@ -700,7 +750,9 @@ soac_state_clear(SoacTypeContract *state)
     /* Terminal GC cleanup is not unsealing. Any resurrection still sees the
      * permanent terminal marker and cannot resume optimized or ordinary use. */
     state->terminal = 1;
-    if (state->phase != Py_SOAC_TYPE_STATE_DYNAMIC) {
+    soac_receiver_retire(state->receiver_policy);
+    if (state->phase != Py_SOAC_TYPE_STATE_DYNAMIC &&
+        state->phase != SOAC_TYPE_STATE_RECEIVER_ONLY) {
         state->phase = Py_SOAC_TYPE_STATE_FAILED;
     }
     state->type = NULL;
@@ -716,6 +768,8 @@ soac_state_clear(SoacTypeContract *state)
     Py_CLEAR(state->object_slot_fields);
     Py_CLEAR(state->protected_names);
     Py_CLEAR(state->final_methods);
+    Py_CLEAR(state->method_reservation_names);
+    Py_CLEAR(state->receiver_policy);
     Py_CLEAR(state->construction);
     /* An escaped inherited-only namespace keeps its immutable final names
      * after type death, without a class/owner backedge. */
@@ -746,11 +800,23 @@ static PyTypeObject SoacTypeContract_Type = {
 static SoacTypeContract *
 soac_new_type_state(PyObject *owner, unsigned int phase)
 {
-    SoacTypeContract *state = PyObject_GC_New(SoacTypeContract, &SoacTypeContract_Type);
-    if (state == NULL) return NULL;
-    memset((char *)state + sizeof(PyObject), 0, sizeof(*state) - sizeof(PyObject));
-    state->owner = Py_NewRef(owner);
+    size_t presize = _PyType_PreHeaderSize(&SoacTypeContract_Type);
+    char *memory = _PyObject_MallocWithType(&SoacTypeContract_Type,
+                                           presize + sizeof(SoacTypeContract));
+    if (memory == NULL) return (SoacTypeContract *)PyErr_NoMemory();
+    memset(memory, 0, presize + sizeof(SoacTypeContract));
+    SoacTypeContract *state = (SoacTypeContract *)(memory + presize);
+    state->owner = Py_XNewRef(owner);
     state->phase = phase;
+    _PyObject_GC_Link((PyObject *)state);
+    /* Reftracer CREATE observes initialized unavailable state. It may retire
+     * the shell; publication must never overwrite that terminal decision. */
+    _PyObject_Init((PyObject *)state, &SoacTypeContract_Type);
+    if (state->terminal) {
+        Py_DECREF(state);
+        soac_type_state_error("native type state retired during allocation");
+        return NULL;
+    }
     return state;
 }
 
@@ -774,7 +840,7 @@ soac_valid_names(PyObject *names)
 }
 
 static int
-soac_valid_dictionary_spec(const PySoacTypeContractSpecV5 *spec)
+soac_valid_dictionary_spec(const PySoacTypeContractSpecV6 *spec)
 {
     switch (spec->dictionary_mode) {
         case Py_SOAC_INSTANCE_DICT_NONE:
@@ -788,21 +854,23 @@ soac_valid_dictionary_spec(const PySoacTypeContractSpecV5 *spec)
 }
 
 static int
-soac_valid_contract_spec(const PySoacTypeContractSpecV5 *spec)
+soac_valid_contract_spec(const PySoacTypeContractSpecV6 *spec)
 {
     return spec != NULL && !(spec->flags & ~Py_SOAC_TYPE_FINAL) &&
         soac_valid_dictionary_spec(spec) && spec->fields != NULL && soac_valid_names(spec->fields) &&
         spec->protected_names != NULL && soac_valid_names(spec->protected_names) &&
         spec->final_methods != NULL && soac_valid_names(spec->final_methods) &&
+        spec->method_reservation_names != NULL && soac_valid_names(spec->method_reservation_names) &&
         (spec->object_slot_fields == NULL || soac_valid_names(spec->object_slot_fields));
 }
 
 static int
-soac_empty_contract_spec(const PySoacTypeContractSpecV5 *spec)
+soac_empty_contract_spec(const PySoacTypeContractSpecV6 *spec)
 {
     return spec->flags == 0 && spec->dictionary_mode == Py_SOAC_INSTANCE_DICT_NONE &&
         spec->fields == NULL &&
         spec->protected_names == NULL && spec->final_methods == NULL &&
+        spec->method_reservation_names == NULL &&
         spec->object_slot_fields == NULL && spec->check_instance_write == NULL &&
         spec->prepare_instance_dictionary_policy == NULL;
 }
@@ -894,6 +962,7 @@ soac_new_construction_handle(const PySoacTypeConstructionSpec *spec,
     Py_XINCREF(spec->contract.object_slot_fields);
     Py_XINCREF(spec->contract.protected_names);
     Py_XINCREF(spec->contract.final_methods);
+    Py_XINCREF(spec->contract.method_reservation_names);
     /* Both modes reserve the sole sidecar before actual type allocation.
      * ENFORCED opens it only after its existing full-policy/bind phase;
      * PENDING keeps it for the separately authenticated final admission. */
@@ -1085,6 +1154,7 @@ soac_class_dictionary_policy(PyObject *owner, PyObject *dict, PyObject *key,
     }
     if (operation == PyDict_SOAC_TERMINAL_TEARDOWN) {
         state->terminal = 1;
+        soac_receiver_retire(state->receiver_policy);
         state->type = NULL;
         state->initial_frozen_setattr = NULL;
         state->initial_frozen_delattr = NULL;
@@ -1212,7 +1282,7 @@ _PySOAC_MatchesClassNamespacePolicy(PyObject *policy_owner,
  * preallocated published state. No execution primary is added. */
 static SoacTypeContract *
 soac_prepare_type_contract(PyTypeObject *type, PyObject *owner,
-                           const PySoacTypeContractSpecV5 *spec)
+                           const PySoacTypeContractSpecV6 *spec)
 {
     SoacTypeContract *state = soac_new_type_state(owner, Py_SOAC_TYPE_STATE_ENFORCED);
     if (state == NULL) return NULL;
@@ -1222,6 +1292,7 @@ soac_prepare_type_contract(PyTypeObject *type, PyObject *owner,
     state->object_slot_count = 0;
     state->protected_names = PySet_New(spec->protected_names);
     state->final_methods = PySet_New(spec->final_methods);
+    state->method_reservation_names = Py_NewRef(spec->method_reservation_names);
     state->flags = spec->flags;
     state->dictionary_mode = spec->dictionary_mode;
     state->prepare_instance_dictionary_policy = spec->prepare_instance_dictionary_policy;
@@ -1318,6 +1389,7 @@ soac_move_prepared_policy(SoacTypeContract *state, SoacTypeContract *prepared)
     state->object_slot_fields = prepared->object_slot_fields; prepared->object_slot_fields = NULL;
     state->protected_names = prepared->protected_names; prepared->protected_names = NULL;
     state->final_methods = prepared->final_methods; prepared->final_methods = NULL;
+    state->method_reservation_names = prepared->method_reservation_names; prepared->method_reservation_names = NULL;
     state->object_slots = prepared->object_slots; prepared->object_slots = NULL;
     state->object_slot_count = prepared->object_slot_count; prepared->object_slot_count = 0;
     state->flags = prepared->flags;
@@ -2200,6 +2272,7 @@ _PySOAC_TypeContractBeginTeardown(PyTypeObject *type)
         /* Invalidate before callbacks; preserve the existing positions of
          * all decrefs so this does not reorder user-visible finalizers. */
         state->terminal = 1;
+        soac_receiver_retire(state->receiver_policy);
         state->type = NULL;
         state->initial_frozen_setattr = NULL;
         state->initial_frozen_delattr = NULL;
@@ -2252,6 +2325,9 @@ _PySOAC_HasOrdinaryInstanceWrites(PyTypeObject *type)
 {
     /* Pure actual-state/MRO query. Terminal policies stay selected so the
      * eventual write/prepare helper refuses rather than treating them ordinary. */
+    SoacTypeContract *own = soac_type_state(type);
+    if (own != NULL && own->receiver_policy != NULL)
+        return soac_receiver_dictionary_mode(own);
     return soac_type_ordinary_dictionary_contract(type) != NULL;
 }
 
@@ -2263,6 +2339,11 @@ _PySOAC_CheckInlineInstanceWrite(PyObject *object, PyObject *name, PyObject *val
     }
     if (PyErr_Occurred()) return -1;
     PyTypeObject *type = Py_TYPE(object);
+    SoacTypeContract *own = soac_type_state(type);
+    if (own != NULL && own->receiver_policy != NULL)
+        return soac_receiver_dictionary_mode(own)
+            ? soac_receiver_inline_write(object, name, value)
+            : soac_receiver_live(type, own->receiver_policy);
     SoacTypeContract *state = soac_type_ordinary_dictionary_contract(type);
     if (state == NULL) return 0;
     if (name == NULL || !PyUnicode_CheckExact(name) ||
@@ -2315,6 +2396,9 @@ _PySOAC_PrepareInstanceDictPolicy(PyObject *object, PyObject *dict,
     out->validate = NULL;
     if (PyErr_Occurred()) return -1;
     PyTypeObject *type = Py_TYPE(object);
+    SoacTypeContract *own = soac_type_state(type);
+    if (soac_receiver_dictionary_mode(own))
+        return soac_receiver_prepare_dictionary(object, dict, existing, out);
     SoacTypeContract *state = soac_type_ordinary_dictionary_contract(type);
     if (state == NULL) return 0;
     if (dict == NULL || !PyDict_Check(dict) || state->owner == NULL ||
@@ -2340,3 +2424,5 @@ _PySOAC_PrepareInstanceDictPolicy(PyObject *object, PyObject *dict,
     }
     return 1;
 }
+
+#include "soac_receiver_policy.inc"

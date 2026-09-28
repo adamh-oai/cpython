@@ -193,6 +193,21 @@ _PyTypeState_BindSpec(PyTypeObject *type, const PyTypeStateSpecV1 *spec,
             }
         }
     }
+    if (storage->receiver_birth_receipt != NULL) {
+        if (_PySOAC_MatchesReceiverPolicy(type, storage->receiver_birth_receipt,
+                spec->dictionary_owner, spec->validate_dictionary,
+                spec->validate_inline) < 0) goto error;
+        dictionary = spec->dictionary_owner != NULL;
+    }
+    else {
+        PySoacReceiverReceiptViewV1 receipt = {1, sizeof(receipt), NULL, NULL, NULL};
+        int present = PyType_GetSoacReceiverPolicyV1((PyObject *)type, &receipt);
+        if (present < 0) goto error;
+        if (present) {
+            soac_type_state_error("birth policy requires the V3 storage constructor");
+            goto error;
+        }
+    }
     if (required_slots != spec->slot_count ||
         dictionary != (spec->dictionary_owner != NULL)) {
         soac_type_state_error("storage-state projection does not cover its actual native storage");

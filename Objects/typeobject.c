@@ -9732,6 +9732,11 @@ type_ready(PyTypeObject *type, int initial)
         }
     }
 
+    /* Publish actual inherited storage before any Ready caller, set_name or
+     * init_subclass callback can allocate. Own pending types retain their
+     * original allocation barrier until final admission. */
+    if (_PySOAC_ReadyReceiverPolicy(type) < 0) goto error;
+
     /* All done -- set the ready flag */
     if (initial) {
         type_add_flags(type, Py_TPFLAGS_READY);
