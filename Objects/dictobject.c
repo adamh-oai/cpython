@@ -379,6 +379,11 @@ typedef struct {
     /* Only one native lazy annotation cache effect uses this bypass. It is
      * stack-scoped and never affects reentrant or public dictionary writes. */
     int lazy_annotation;
+    /* Cache transactions must recheck the actual policy after watchers. The
+     * direct bit is captured before callbacks, not read through a retired
+     * borrowed policy pointer when unwinding the guard. */
+    int cache_transaction;
+    int cache_direct;
     /* Native generated-member/slot publication must remain authorized across
      * watcher callbacks, immediately before the actual table commit. */
     int publication_operation;
@@ -408,16 +413,36 @@ static void
 soac_commit_end(SoacDictCommitGuard *guard)
 {
     if (guard->acquired) {
-        if (guard->lazy_annotation) {
+        if (guard->lazy_annotation || (guard->cache_transaction && guard->cache_direct)) {
             /* No policy pointer survives a cache watcher: it may retire the
              * owner. Clear only the attachment tag acquired by this effect. */
             guard->dictionary->_ma_watcher_tag &= ~SOAC_DIRECT_MUTATING;
         }
-        else {
+        else if (!guard->cache_transaction ||
+                 soac_policy(guard->dictionary) == guard->validated) {
             soac_policy_set_mutating(guard->dictionary, guard->validated, 0);
         }
         guard->acquired = 0;
     }
+}
+
+/* A dictionary lookup, validator, or watcher may retire its attachment.
+ * Check identity before dereferencing the policy borrowed before that callback.
+ * This is write-transaction validation, never an ordinary read hook. */
+static int
+soac_cache_policy_retained(PyDictObject *dict, SoacDictCommitGuard *guard)
+{
+    if (!guard->cache_transaction) return 0;
+    SoacDictPolicy *current = soac_policy(dict);
+    if (current == NULL || current != guard->validated ||
+        soac_policy_terminal(dict, current) || current->owner == NULL ||
+        current->validate == NULL) {
+        PyObject *error = PySoac_GetStrictRuntimeUnavailableError();
+        PyErr_SetString(error != NULL ? error : PyExc_RuntimeError,
+                        "cache write lost its instance dictionary policy");
+        return -1;
+    }
+    return 0;
 }
 
 static int
@@ -428,6 +453,7 @@ soac_commit_begin(PyDictObject *dict, SoacDictCommitGuard *guard,
     assert(guard->dictionary == NULL || guard->dictionary == dict);
     guard->dictionary = dict;
     if (guard->lazy_annotation) return 0;
+    if (soac_cache_policy_retained(dict, guard) < 0) return -1;
     SoacDictPolicy *policy = soac_policy(dict);
     if (guard->pending_operation != NULL) {
         if (soac_pending_resolved_unchanged(dict, guard) < 0) return -1;
@@ -469,7 +495,7 @@ soac_commit_begin(PyDictObject *dict, SoacDictCommitGuard *guard,
     }
     else if (operation == PyDict_SOAC_ATTRIBUTE_SET ||
              operation == PyDict_SOAC_ATTRIBUTE_SET_EXISTING) {
-        if (policy != NULL && policy->flags == PyDict_SOAC_ALLOW_NONSTRING_KEYS) {
+        if (policy != NULL && (policy->flags & PyDict_SOAC_ALLOW_NONSTRING_KEYS)) {
             provenance = key;
         }
         else {
@@ -515,9 +541,10 @@ soac_commit_notify(PyDictObject *dict, SoacDictCommitGuard *guard,
     }
     if (guard->pending_operation != NULL &&
         soac_commit_begin(dict, guard, key, canonical, value, operation) < 0) return -1;
-    if (guard->publication_provenance != NULL &&
+    if ((guard->publication_provenance != NULL || guard->cache_transaction) &&
         soac_validate(guard->validated, dict, canonical, value,
                       guard->publication_operation, guard->publication_provenance) < 0) return -1;
+    if (soac_cache_policy_retained(dict, guard) < 0) return -1;
     PyDictKeysObject *keys = dict->ma_keys;
     PyDictValues *values = dict->ma_values;
     _PyDict_NotifyEvent(event, dict, key, value);
@@ -527,10 +554,12 @@ soac_commit_notify(PyDictObject *dict, SoacDictCommitGuard *guard,
                         "dictionary layout changed during a protected write");
         return -1;
     }
+    if (soac_cache_policy_retained(dict, guard) < 0) return -1;
     if (soac_commit_begin(dict, guard, key, canonical, value, operation) < 0) return -1;
-    if (guard->publication_provenance != NULL &&
+    if ((guard->publication_provenance != NULL || guard->cache_transaction) &&
         soac_validate(guard->validated, dict, canonical, value,
                       guard->publication_operation, guard->publication_provenance) < 0) return -1;
+    if (soac_cache_policy_retained(dict, guard) < 0) return -1;
     return 0;
 }
 
@@ -603,6 +632,16 @@ soac_reserve_policy(PyDictObject *dict, unsigned int flags,
                     unsigned int dictionary_mode)
 {
     assert(soac_policy(dict) == NULL);
+    /* A cache write may be suspended in lookup or a watcher with no policy
+     * yet. Do not let an instance owner attach after that write chose the
+     * unprotected cache route but before it commits. Other namespace policies
+     * retain the stock lazy-cache behavior. */
+    if ((flags & PyDict_SOAC_ALLOW_NONSTRING_KEYS) &&
+        (dict->_ma_watcher_tag & SOAC_DIRECT_MUTATING)) {
+        PyErr_SetString(soac_mutation_error(),
+                        "cannot attach an instance policy during a cache write");
+        return NULL;
+    }
     SoacDictPolicy *policy = PyMem_RawCalloc(1, sizeof(*policy));
     if (policy == NULL) {
         PyErr_NoMemory();
@@ -640,6 +679,11 @@ soac_initialize_policy(PyDictObject *dict, SoacDictPolicy *policy,
 {
     assert(policy->installing && policy->mutating && policy->owner == NULL);
     policy->owner = owned_owner;
+    if (policy->validate != NULL && policy->validate != validate) {
+        PyErr_SetString(soac_mutation_error(),
+                        "instance cache capability has a different validator");
+        return -1;
+    }
     policy->validate = validate;
     Py_ssize_t pos = 0;
     PyObject *key, *value;
@@ -739,7 +783,9 @@ soac_prepare_instance_install(PyObject *instance, PyObject *candidate,
     return -1;
 #else
     if ((old != NULL && (old->dictionary_mode != Py_SOAC_INSTANCE_DICT_ORDINARY ||
-                         old->flags != PyDict_SOAC_ALLOW_NONSTRING_KEYS))) {
+                         (old->flags != PyDict_SOAC_ALLOW_NONSTRING_KEYS &&
+                          old->flags != (PyDict_SOAC_ALLOW_NONSTRING_KEYS |
+                                         PyDict_SOAC_CACHE_NAME_PROVENANCE))))) {
         PyErr_SetString(soac_mutation_error(), "incompatible existing instance dictionary policy");
         return -1;
     }
@@ -791,6 +837,28 @@ soac_prepare_instance_install(PyObject *instance, PyObject *candidate,
 }
 
 int
+_PyDict_PrepareSoacInstanceCachePolicy(PyObject *op,
+                                      PyDict_SoacPolicyCallback validate)
+{
+    if (op == NULL || !PyDict_Check(op) || validate == NULL) {
+        PyErr_SetString(PyExc_TypeError, "invalid instance cache policy offer");
+        return -1;
+    }
+    PyDictObject *dict = (PyDictObject *)op;
+    SoacDictPolicy *policy = soac_policy(dict);
+    if (policy == NULL || policy->direct || !policy->installing ||
+        !policy->mutating || policy->owner != NULL || policy->validate != NULL ||
+        policy->flags != PyDict_SOAC_ALLOW_NONSTRING_KEYS) {
+        PyErr_SetString(soac_mutation_error(),
+                        "no private instance dictionary policy reservation");
+        return -1;
+    }
+    policy->validate = validate;
+    policy->flags |= PyDict_SOAC_CACHE_NAME_PROVENANCE;
+    return 0;
+}
+
+int
 PyDict_SetSoacPolicy(PyObject *op, PyObject *owner,
                      PyDict_SoacPolicyCallback validate, unsigned int flags)
 {
@@ -804,6 +872,7 @@ PyDict_SetSoacPolicy(PyObject *op, PyObject *owner,
         owner == NULL ||
         validate == NULL ||
         (flags != 0 && flags != PyDict_SOAC_ALLOW_NONSTRING_KEYS &&
+         flags != (PyDict_SOAC_ALLOW_NONSTRING_KEYS | PyDict_SOAC_CACHE_NAME_PROVENANCE) &&
          flags != PyDict_SOAC_READ_ONLY && flags != PyDict_SOAC_ADMISSION_ONLY &&
          flags != PyDict_SOAC_FUNCTION_DEFAULTS)) {
         PyErr_SetString(PyExc_TypeError,
@@ -4031,11 +4100,14 @@ soac_ordinary_setitem_take2(PyDictObject *dict, PyObject *key, PyObject *value,
     SoacDictCommitGuard guard = {.validated = policy, .dictionary = dict};
     if (soac_check_key(dict, key) < 0 || soac_begin_mutation(dict, policy) < 0) goto fail;
     guard.acquired = 1;
+    guard.cache_transaction = operation == PyDict_SOAC_CACHE_SET;
+    guard.cache_direct = guard.cache_transaction && policy->direct;
     if (hash == -1) hash = _PyObject_HashFast(key);
     if (hash == -1) goto fail;
     PyObject *old_value;
     Py_ssize_t index = _Py_dict_lookup(dict, key, hash, &old_value);
     if (index == DKIX_ERROR) goto fail;
+    if (soac_cache_policy_retained(dict, &guard) < 0) goto fail;
     if (old_value != NULL && override != 1) {
         if (override != 0) {
             _PyErr_SetKeyError(key);
@@ -4051,15 +4123,33 @@ soac_ordinary_setitem_take2(PyDictObject *dict, PyObject *key, PyObject *value,
         switch (operation) {
             case PyDict_SOAC_SET: operation = PyDict_SOAC_SET_EXISTING; break;
             case PyDict_SOAC_ATTRIBUTE_SET: operation = PyDict_SOAC_ATTRIBUTE_SET_EXISTING; break;
+            case PyDict_SOAC_CACHE_SET: operation = PyDict_SOAC_CACHE_SET_EXISTING; break;
             case PyDict_SOAC_CLASS_MEMBER_INSERT: operation = PyDict_SOAC_CLASS_MEMBER_REPLACE; break;
             case PyDict_SOAC_SLOT_DESCRIPTOR_INSERT: operation = PyDict_SOAC_SLOT_DESCRIPTOR_REPLACE; break;
         }
     }
+    if ((operation == PyDict_SOAC_CACHE_SET ||
+         operation == PyDict_SOAC_CACHE_SET_EXISTING) &&
+        !(policy->flags & PyDict_SOAC_CACHE_NAME_PROVENANCE)) {
+        /* An older public callback does not recognize this operation. Its
+         * SET check is sufficient only when that canonical key is the exact
+         * cache name; never claim that a non-string alias was checked. */
+        if (!PyUnicode_CheckExact(canonical) || !unicode_eq(canonical, key)) {
+            PyErr_SetString(soac_mutation_error(),
+                            "instance policy cannot validate the cache name");
+            goto fail;
+        }
+        operation = operation == PyDict_SOAC_CACHE_SET
+            ? PyDict_SOAC_SET : PyDict_SOAC_SET_EXISTING;
+        provenance = NULL;
+    }
     if (soac_validate(policy, dict, canonical, value, operation, provenance) < 0) goto fail;
+    if (soac_cache_policy_retained(dict, &guard) < 0) goto fail;
     if (operation == PyDict_SOAC_CLASS_MEMBER_INSERT ||
         operation == PyDict_SOAC_CLASS_MEMBER_REPLACE ||
         operation == PyDict_SOAC_SLOT_DESCRIPTOR_INSERT ||
-        operation == PyDict_SOAC_SLOT_DESCRIPTOR_REPLACE) {
+        operation == PyDict_SOAC_SLOT_DESCRIPTOR_REPLACE ||
+        guard.cache_transaction) {
         guard.publication_operation = operation;
         guard.publication_provenance = provenance;
     }
@@ -4184,25 +4274,34 @@ _PyDict_SetItemForLazyAnnotation(PyObject *op, PyObject *key, PyObject *value)
     int result;
     Py_BEGIN_CRITICAL_SECTION(op);
     PyDictObject *dict = (PyDictObject *)op;
-    SoacDictCommitGuard guard = {.dictionary = dict, .lazy_annotation = 1};
-    /* This is the actual cache write, not a read-policy/liveness check. Keep
-     * ordinary public mutations out of its resolved-entry commit interval.
-     * A nested cache effect never releases a preexisting attachment guard. */
-    if (!(dict->_ma_watcher_tag & SOAC_DIRECT_MUTATING)) {
-        dict->_ma_watcher_tag |= SOAC_DIRECT_MUTATING;
-        guard.acquired = 1;
-    }
-    Py_hash_t hash = _PyObject_HashFast(key);
-    PyObject *old_value = NULL;
-    Py_ssize_t index = hash == -1 ? DKIX_ERROR : _Py_dict_lookup(dict, key, hash, &old_value);
-    if (index == DKIX_ERROR) {
-        result = -1;
+    if (_PyDict_HasSoacPolicy(dict) &&
+        (soac_policy(dict)->flags & PyDict_SOAC_ALLOW_NONSTRING_KEYS)) {
+        /* The actual cache namespace is also an instance dictionary. This
+         * is an unrelated protected write, so retain its normal transaction. */
+        result = soac_ordinary_setitem_take2(
+            dict, Py_NewRef(key), Py_NewRef(value), PyDict_SOAC_CACHE_SET, key, 1, -1);
     }
     else {
-        result = soac_ordinary_commit_resolved_take2(
-            dict, Py_NewRef(key), hash, Py_NewRef(value), index, old_value, &guard);
+        SoacDictCommitGuard guard = {.dictionary = dict, .lazy_annotation = 1};
+        /* This is the actual cache write, not a read-policy/liveness check.
+         * Keep public mutations out of its resolved-entry commit interval.
+         * A nested cache effect never releases a preexisting guard. */
+        if (!(dict->_ma_watcher_tag & SOAC_DIRECT_MUTATING)) {
+            dict->_ma_watcher_tag |= SOAC_DIRECT_MUTATING;
+            guard.acquired = 1;
+        }
+        Py_hash_t hash = _PyObject_HashFast(key);
+        PyObject *old_value = NULL;
+        Py_ssize_t index = hash == -1 ? DKIX_ERROR : _Py_dict_lookup(dict, key, hash, &old_value);
+        if (index == DKIX_ERROR) {
+            result = -1;
+        }
+        else {
+            result = soac_ordinary_commit_resolved_take2(
+                dict, Py_NewRef(key), hash, Py_NewRef(value), index, old_value, &guard);
+        }
+        soac_commit_end(&guard);
     }
-    soac_commit_end(&guard);
     Py_END_CRITICAL_SECTION();
     return result;
 }

@@ -50,6 +50,9 @@ typedef struct {
  * CLASS_MEMBER_INSERT/CLASS_MEMBER_REPLACE carry one opaque native dataclass
  * member operation. They are never emitted by mapping or attribute writes;
  * the exact operation is checked again after the last dictionary watcher.
+ * CACHE_SET/CACHE_SET_EXISTING are only sent to opted-in instance policies;
+ * provenance is the exact cache name and key is the resolved canonical key.
+ * They do not represent or authorize an attribute assignment.
  *
  * TERMINAL_TEARDOWN is an irreversible notification from unreachable GC or
  * module destruction: the owner must make dependent execution unavailable
@@ -74,9 +77,14 @@ enum {
     /* Ordinary empty-dict bulk clone. key/value are NULL; provenance is the
      * actual source dict. Defaults owners validate its canonical entries with
      * no additional per-key hash/equality calls. Admission owners check life. */
-    PyDict_SOAC_CLONE = 14
+    PyDict_SOAC_CLONE = 14,
+    /* A lazy annotation cache write to an instance-policy dictionary. The
+     * provenance is the exact original cache name, not an attribute store. */
+    PyDict_SOAC_CACHE_SET = 15,
+    PyDict_SOAC_CACHE_SET_EXISTING = 16
 };
 #define PyDict_SOAC_ALLOW_NONSTRING_KEYS 1u
+#define PyDict_SOAC_CACHE_NAME_PROVENANCE 16u
 #define PyDict_SOAC_READ_ONLY 2u
 /* Authentication/lifetime ownership without namespace or field restrictions.
  * Mutually exclusive with the other modes; requires ordinary dict storage.
@@ -135,9 +143,17 @@ typedef struct {
  * one owned native PyObject-compatible state reference, or NULL with error. */
 PyAPI_FUNC(PyTypeState *) PyTypeState_NewV1(
     PyObject *actual_type, const PyTypeStateSpecV1 *spec, size_t spec_size);
+/* Same V1 layout; V2 explicitly opts the dictionary validator into the
+ * CACHE_SET operations. Old V1 callers never receive those operations. */
+PyAPI_FUNC(PyTypeState *) PyTypeState_NewV2(
+    PyObject *actual_type, const PyTypeStateSpecV1 *spec, size_t spec_size);
 PyAPI_FUNC(int) PyDict_SetSoacPolicy(
     PyObject *dict, PyObject *owner, PyDict_SoacPolicyCallback validate,
     unsigned int flags);
+/* During a new instance-dictionary factory only, bind the private reserved
+ * policy's cache capability to the exact callback that factory will return. */
+PyAPI_FUNC(int) _PyDict_PrepareSoacInstanceCachePolicy(
+    PyObject *dict, PyDict_SoacPolicyCallback validate);
 /* Private validator identity and this mode authenticate the returned owned
  * reference. NULL without error means an unrelated policy; terminal or active
  * installation/mutation fails. Never expose or replace another policy owner. */

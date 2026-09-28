@@ -124,7 +124,10 @@ soac_test_validate(PyObject *op, PyObject *dict, PyObject *key,
     SoacTestOwner *owner = (SoacTestOwner *)op;
     int attribute = operation == PyDict_SOAC_ATTRIBUTE_SET ||
                     operation == PyDict_SOAC_ATTRIBUTE_SET_EXISTING;
-    assert(attribute ? (provenance != NULL && PyUnicode_Check(provenance))
+    int cache = operation == PyDict_SOAC_CACHE_SET ||
+                operation == PyDict_SOAC_CACHE_SET_EXISTING;
+    int named_destination = attribute || cache;
+    assert(named_destination ? (provenance != NULL && PyUnicode_Check(provenance))
                      : provenance == NULL);
     if (operation == PyDict_SOAC_VALIDATE_INITIAL) {
         assert(!PyDict_MatchesSoacPolicy(dict, op, soac_test_validate, owner->flags));
@@ -157,11 +160,11 @@ soac_test_validate(PyObject *op, PyObject *dict, PyObject *key,
         }
     }
     if (operation == PyDict_SOAC_SET || operation == PyDict_SOAC_SET_EXISTING ||
-        operation == PyDict_SOAC_VALIDATE_INITIAL || attribute) {
+        operation == PyDict_SOAC_VALIDATE_INITIAL || named_destination) {
         if (soac_test_validate_value(owner, key, value) < 0) {
             return -1;
         }
-        if (attribute) {
+        if (named_destination) {
             PyObject *name = PyUnicode_FromObject(provenance);
             if (name == NULL) {
                 return -1;
@@ -180,6 +183,7 @@ soac_test_validate(PyObject *op, PyObject *dict, PyObject *key,
         }
         if (final && (operation == PyDict_SOAC_SET_EXISTING ||
                       operation == PyDict_SOAC_ATTRIBUTE_SET_EXISTING ||
+                      operation == PyDict_SOAC_CACHE_SET_EXISTING ||
                       operation == PyDict_SOAC_DELETE)) {
             PyErr_SetString(PyExc_TypeError, "immutable SOAC test binding");
             return -1;

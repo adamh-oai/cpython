@@ -100,9 +100,9 @@ _PyTypeState_CheckLive(PyTypeState *state)
     return 0;
 }
 
-PyTypeState *
-PyTypeState_NewV1(PyObject *actual_type, const PyTypeStateSpecV1 *spec,
-                 size_t spec_size)
+static PyTypeState *
+type_state_new_for_spec(PyObject *actual_type, const PyTypeStateSpecV1 *spec,
+                        size_t spec_size, int cache_name_provenance)
 {
     if (!_Py_TYPE_STATE_SUPPORTED) {
         PyErr_SetString(PyExc_NotImplementedError,
@@ -164,7 +164,8 @@ PyTypeState_NewV1(PyObject *actual_type, const PyTypeStateSpecV1 *spec,
         if (dictionary == NULL) goto error;
         dictionary->dictionary_policy.owner = Py_NewRef(spec->dictionary_owner);
         dictionary->dictionary_policy.validate = spec->validate_dictionary;
-        dictionary->dictionary_policy.flags = PyDict_SOAC_ALLOW_NONSTRING_KEYS;
+        dictionary->dictionary_policy.flags = PyDict_SOAC_ALLOW_NONSTRING_KEYS |
+            (cache_name_provenance ? PyDict_SOAC_CACHE_NAME_PROVENANCE : 0);
         dictionary->dictionary_policy.dictionary_mode = Py_SOAC_INSTANCE_DICT_ORDINARY;
         dictionary->dictionary_policy.direct = 1;
         dictionary->validate_inline = spec->validate_inline;
@@ -182,6 +183,20 @@ error:
         PyErr_SetRaisedException(error);
         return NULL;
     }
+}
+
+PyTypeState *
+PyTypeState_NewV1(PyObject *actual_type, const PyTypeStateSpecV1 *spec,
+                 size_t spec_size)
+{
+    return type_state_new_for_spec(actual_type, spec, spec_size, 0);
+}
+
+PyTypeState *
+PyTypeState_NewV2(PyObject *actual_type, const PyTypeStateSpecV1 *spec,
+                 size_t spec_size)
+{
+    return type_state_new_for_spec(actual_type, spec, spec_size, 1);
 }
 
 int

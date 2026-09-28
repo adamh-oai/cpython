@@ -41,6 +41,62 @@ class SoacDictPolicyTests(unittest.TestCase):
         return _testcapi.dict_set_soac_policy(
             dictionary, schema, finals, callback, keepalive, flags)
 
+    def test_lazy_cache_instance_callback_capability(self):
+        from types import ModuleType
+
+        class ChangingKey:
+            def __init__(self):
+                self.calls = 0
+            def __hash__(self):
+                return hash('__annotations__')
+            def __eq__(self, other):
+                if other == '__annotations__':
+                    self.calls += 1
+                    return self.calls >= 2
+                return False
+
+        # A legacy callback gets its documented SET operation for an exact
+        # cache key. It is never sent the newer name-bearing operation.
+        module = ModuleType('legacy_exact')
+        events = []
+        owner = self.protect(module.__dict__, {'__annotations__': dict},
+                             callback=lambda d, k, v, op: events.append(op), flags=1)
+        self.assertEqual(module.__annotations__, {})
+        self.assertTrue(events)
+        self.assertTrue(all(op == 1 for op in events))
+
+        # A legacy callback cannot validate the original name behind an
+        # arbitrary canonical alias; fail after lookup without calling it.
+        module = ModuleType('legacy_alias')
+        key = ChangingKey()
+        module.__dict__[key] = 19
+        events = []
+        owner = self.protect(module.__dict__, {'__annotations__': dict},
+                             callback=lambda d, k, v, op: events.append(op), flags=1)
+        with self.assertRaisesRegex(Exception, 'cannot validate the cache name'):
+            module.__annotations__
+        self.assertEqual(module.__dict__[key], 19)
+        self.assertEqual(events, [])
+
+        # The opted-in callback receives a separate cache operation and
+        # checks the original exact name even if the canonical key differs.
+        for expected, succeeds in ((dict, True), (int, False)):
+            module = ModuleType('capable_alias')
+            key = ChangingKey()
+            module.__dict__[key] = 19
+            events = []
+            owner = self.protect(module.__dict__, {'__annotations__': expected},
+                                 callback=lambda d, k, v, op: events.append(op), flags=17)
+            if succeeds:
+                result = module.__annotations__
+                self.assertIs(module.__dict__[key], result)
+                self.assertTrue(events)
+                self.assertTrue(all(op == 16 for op in events))
+            else:
+                with self.assertRaises(TypeError):
+                    module.__annotations__
+                self.assertEqual(module.__dict__[key], 19)
+
     def test_admission_only_registration_is_permanent_with_ordinary_storage(self):
         key, value = object(), object()
         d = {key: value, "x": "not an int"}

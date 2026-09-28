@@ -493,8 +493,9 @@ capability.  Those require separately verified native owners.
    publication and is never emitted by a public mutation API.
    Mapping operations, initial validation, and terminal notifications pass
    ``NULL`` provenance. Lazy annotation getters use a private, operation-local
-   stock cache insertion rather than an owner/provider capability. This bypass
-   applies only to that getter's actual cache destination; reentrant public
+   stock cache insertion for their own module or class namespace policies.
+   If the actual cache dictionary also has an instance policy, that cache
+   write is instead checked against the instance policy. Reentrant public
    writes and unrelated protected destinations still use their policies.
 
    ``PyDict_SOAC_ATTRIBUTE_SET`` and ``PyDict_SOAC_ATTRIBUTE_SET_EXISTING``
@@ -511,6 +512,27 @@ capability.  Those require separately verified native owners.
    not a precheck followed by a second lookup. Public mapping writes remain
    ordinary ``SET``/``SET_EXISTING`` operations with ``NULL`` provenance, and
    no mapping key is normalized or replaced merely because it aliases a field.
+
+   ``PyDict_SOAC_CACHE_SET`` and ``PyDict_SOAC_CACHE_SET_EXISTING`` describe
+   the actual lazy annotation cache write to an instance-policy dictionary.
+   Their *provenance* is the original exact Unicode cache name; *key* is the
+   once-resolved canonical stored key. They do not represent Python attribute
+   assignment or grant an attribute, mapping, or namespace permission. The
+   owner validates both names, without another hash, equality, or conversion
+   callback. These operations are delivered only to callbacks that explicitly
+   opt into ``PyDict_SOAC_CACHE_NAME_PROVENANCE``. Older instance callbacks
+   receive ordinary ``SET`` or ``SET_EXISTING`` when the canonical key is the
+   exact cache name; an ambiguous non-exact alias fails closed because the
+   older callback has no supported way to check the original name. The cache
+   callback may run before and after a watcher, so it must be side-effect-free.
+   After a watcher, the kernel rechecks the actual policy and asks the callback
+   to revalidate its owner before committing the cache value.
+
+   A first instance policy cannot be attached while a native lazy cache write
+   on that dictionary is suspended in lookup or watcher notification. The
+   rejected installation publishes no policy; it may be retried afterward.
+   A cache write that already has an instance policy uses its ordinary guarded
+   transaction and cannot reenter another mutation of that dictionary.
 
    ``_PyDict_SetItemForAttribute(dict, name, value)`` is the private native
    entrypoint for that transaction; it requires a Unicode name and a non-NULL
@@ -562,6 +584,16 @@ capability.  Those require separately verified native owners.
    ``PyDict_SOAC_ALLOW_NONSTRING_KEYS`` (``1``) selects an ordinary instance
    dictionary policy. Arbitrary keys retain normal lookup and callback behavior;
    the policy checks selected writes at their actual destinations.
+
+   ``PyDict_SOAC_CACHE_NAME_PROVENANCE`` (``16``) is an explicit callback
+   capability and may only be combined with ``ALLOW_NONSTRING_KEYS``. The
+   callback must enforce both the canonical and original cache names when it
+   receives the cache operations described above. It does not alter the key
+   storage model or waive any existing write restriction. A direct native type
+   state uses ``PyTypeState_NewV2`` to opt its instance validator in; V1 keeps
+   its original callback contract. A replacement-dictionary factory opts in
+   while its new policy is private, binding the capability to its exact
+   returned validator. Already published policies cannot be upgraded in place.
 
    ``PyDict_SOAC_READ_ONLY`` (``2``) freezes the existing dictionary contents
    without converting its storage or replacing, normalizing, hashing, or
