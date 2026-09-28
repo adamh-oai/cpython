@@ -4,6 +4,7 @@
 typedef struct SoacTypeContract SoacTypeContract;
 typedef struct SoacConstructionHandle SoacConstructionHandle;
 typedef struct SoacReceiverReceipt SoacReceiverReceipt;
+typedef struct SoacFamilyClosure SoacFamilyClosure;
 
 enum {
     SOAC_LINEAGE_OPEN = 0,
@@ -100,6 +101,8 @@ struct SoacTypeContract {
     int (*prepare_instance_dictionary_policy)(
         PyObject *, PyObject *, PyObject *,
         const PySoacInstanceDictPolicy *, PySoacInstanceDictPolicy *);
+    SoacFamilyClosure *family_closure; /* own root membership, never instance policy */
+    int preparing_family; /* all-root barrier before callback-visible allocation */
 };
 
 static PyTypeObject SoacConstructionHandle_Type;
@@ -112,6 +115,9 @@ static int soac_prepare_receiver_policy(PyTypeObject *);
 static int soac_receiver_allocation_barrier(PyTypeObject *, int);
 static int soac_receiver_type_selected(PyTypeObject *);
 static void soac_receiver_retire(SoacReceiverReceipt *);
+static void soac_family_retire(SoacFamilyClosure *);
+static int soac_family_check_base(PyTypeObject *);
+static int soac_family_check_publication(PyTypeObject *, PyObject *);
 static int soac_receiver_live(PyTypeObject *, SoacReceiverReceipt *);
 static int soac_receiver_dictionary_mode(SoacTypeContract *);
 static int soac_receiver_inline_write(PyObject *, PyObject *, PyObject *);
@@ -310,7 +316,9 @@ _PySOAC_CheckPendingBases(PyObject *bases)
     if (bases != NULL && PyTuple_Check(bases)) {
         for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(bases); ++i) {
             PyObject *base = PyTuple_GET_ITEM(bases, i);
-            if (PyType_Check(base) && _PySOAC_CheckTypeAllocation((PyTypeObject *)base) < 0) return -1;
+            if (PyType_Check(base) &&
+                (_PySOAC_CheckTypeAllocation((PyTypeObject *)base) < 0 ||
+                 soac_family_check_base((PyTypeObject *)base) < 0)) return -1;
         }
     }
     return 0;
@@ -738,6 +746,7 @@ soac_state_traverse(SoacTypeContract *state, visitproc visit, void *arg)
     Py_VISIT(state->final_methods);
     Py_VISIT(state->method_reservation_names);
     Py_VISIT(state->receiver_policy);
+    Py_VISIT(state->family_closure);
     Py_VISIT(state->construction);
     Py_VISIT(state->inherited_final_names);
     Py_VISIT(state->empty_write_storage_owner);
@@ -751,6 +760,8 @@ soac_state_clear(SoacTypeContract *state)
      * permanent terminal marker and cannot resume optimized or ordinary use. */
     state->terminal = 1;
     soac_receiver_retire(state->receiver_policy);
+    soac_family_retire(state->family_closure);
+    state->preparing_family = 0;
     if (state->phase != Py_SOAC_TYPE_STATE_DYNAMIC &&
         state->phase != SOAC_TYPE_STATE_RECEIVER_ONLY) {
         state->phase = Py_SOAC_TYPE_STATE_FAILED;
@@ -770,6 +781,7 @@ soac_state_clear(SoacTypeContract *state)
     Py_CLEAR(state->final_methods);
     Py_CLEAR(state->method_reservation_names);
     Py_CLEAR(state->receiver_policy);
+    Py_CLEAR(state->family_closure);
     Py_CLEAR(state->construction);
     /* An escaped inherited-only namespace keeps its immutable final names
      * after type death, without a class/owner backedge. */
@@ -1155,6 +1167,8 @@ soac_class_dictionary_policy(PyObject *owner, PyObject *dict, PyObject *key,
     if (operation == PyDict_SOAC_TERMINAL_TEARDOWN) {
         state->terminal = 1;
         soac_receiver_retire(state->receiver_policy);
+        soac_family_retire(state->family_closure);
+        state->preparing_family = 0;
         state->type = NULL;
         state->initial_frozen_setattr = NULL;
         state->initial_frozen_delattr = NULL;
@@ -2103,6 +2117,7 @@ _PySOAC_CheckTypeBases(PyTypeObject *type, PyObject *bases)
 int
 _PySOAC_CheckTypeMro(PyTypeObject *type, PyObject *new_mro, int initial)
 {
+    if (soac_family_check_publication(type, new_mro) < 0) return -1;
     for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(new_mro); ++i) {
         PyTypeObject *base = (PyTypeObject *)PyTuple_GET_ITEM(new_mro, i);
         if (initial && base == type) continue;
@@ -2273,6 +2288,8 @@ _PySOAC_TypeContractBeginTeardown(PyTypeObject *type)
          * all decrefs so this does not reorder user-visible finalizers. */
         state->terminal = 1;
         soac_receiver_retire(state->receiver_policy);
+        soac_family_retire(state->family_closure);
+        state->preparing_family = 0;
         state->type = NULL;
         state->initial_frozen_setattr = NULL;
         state->initial_frozen_delattr = NULL;
@@ -2426,3 +2443,5 @@ _PySOAC_PrepareInstanceDictPolicy(PyObject *object, PyObject *dict,
 }
 
 #include "soac_receiver_policy.inc"
+
+#include "soac_family.inc"

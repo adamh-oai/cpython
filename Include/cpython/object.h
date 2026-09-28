@@ -795,3 +795,45 @@ PyAPI_FUNC(int) PyUnstable_TryIncRef(PyObject *);
 PyAPI_FUNC(void) PyUnstable_EnableTryIncRef(PyObject *);
 
 PyAPI_FUNC(int) PyUnstable_Object_IsUniquelyReferenced(PyObject *);
+
+/* Public declarations to append to Include/cpython/object.h.
+ * GIL-only synchronous capture. Exact types and existing native owners select
+ * roots; source names, Python-built membership lists and JSON IDs never do. */
+typedef int (*PySoacFamilyCaptureValidateV1)(
+    void *context, PyObject *all_types, PyObject *roots,
+    PyObject *members_by_root);
+typedef struct {
+    uint32_t abi_version;  /* 1 */
+    uint32_t struct_size;
+    Py_ssize_t max_classes;
+    Py_ssize_t max_frontier;
+    /* Bounds graph links plus captured base/MRO references. */
+    Py_ssize_t max_edges;
+    Py_ssize_t max_memberships;
+    void *context;  /* borrowed only for the synchronous call */
+    PySoacFamilyCaptureValidateV1 validate;
+} PySoacFamilyCaptureSpecV1;
+
+/* All outputs are NULL on failure. Success returns two owned exact tuples:
+ * opaque per-root receipts (in roots order) and pinned all_types. The callback
+ * receives borrowed exact tuples while all new roots are PREPARING, and must
+ * return 0 without an error or -1 with an error. Run bounded diagnostic rendering
+ * inside it: validation/rendering failure publishes no new closure. Existing
+ * closures remain closed on every failure. Native revalidates all pinned graph,
+ * MRO, construction and receiver facts after the callback, then commits without
+ * callbacks. No callback/context is retained. No dispatch/default guarantee is
+ * granted by membership alone. Unsupported concurrency modes reject capture. */
+/* Invalid specs raise ValueError; native budget exhaustion raises OverflowError
+ * for the Python census wrapper to map to its existing CensusLimitError. A
+ * callback's exception propagates unchanged; it is never a native limit code. */
+PyAPI_FUNC(int) PyType_CaptureSoacFamiliesV1(
+    const PySoacFamilyCaptureSpecV1 *spec,
+    PyObject **receipts_out, PyObject **types_out);
+
+/* New exact tuple of currently live members; dead weak members may disappear.
+ * A retired root/receipt rejects. Allocation is followed by liveness recheck. */
+PyAPI_FUNC(PyObject *) PyType_GetSoacFamilyMembersV1(PyObject *receipt);
+/* Callback-free identity query: 1 member, 0 nonmember, -1 invalid/retired.
+ * Caller must supply an actual type. No source/execution/default authority. */
+PyAPI_FUNC(int) PyType_IsSoacFamilyMemberV1(
+    PyObject *receipt, PyObject *actual_type);

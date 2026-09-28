@@ -9736,6 +9736,7 @@ type_ready(PyTypeObject *type, int initial)
      * init_subclass callback can allocate. Own pending types retain their
      * original allocation barrier until final admission. */
     if (_PySOAC_ReadyReceiverPolicy(type) < 0) goto error;
+    if (soac_family_check_publication(type, lookup_tp_mro(type)) < 0) goto error;
 
     /* All done -- set the ready flag */
     if (initial) {
@@ -9863,6 +9864,14 @@ add_subclass(PyTypeObject *base, PyTypeObject *type)
     }
     assert(PyDict_CheckExact(subclasses));
 
+    /* Weakref/dictionary allocation can reenter capture. Recheck at
+     * the last callback-free boundary before exposing this link. */
+    if (soac_family_check_publication(type, lookup_tp_mro(type)) < 0 ||
+        soac_family_check_base(base) < 0) {
+        Py_DECREF(ref);
+        Py_DECREF(key);
+        return -1;
+    }
     int result = PyDict_SetItem(subclasses, key, ref);
     Py_DECREF(ref);
     Py_DECREF(key);
