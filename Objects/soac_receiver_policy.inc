@@ -290,7 +290,10 @@ soac_receiver_snapshot(PyTypeObject *type, SoacReceiverSnapshot *snapshot)
         PySoacReceiverMroRowV1 *row = &snapshot->rows[i];
         SoacReceiverRowSnapshot *held = &snapshot->snapshots[i];
         row->actual_type = (PyObject *)base;
-        row->namespace_complete = base->tp_dict != NULL && PyDict_CheckExact(base->tp_dict);
+        /* Static builtins store their namespace in interpreter-owned state.
+         * This accessor is a callback-free borrow for both storage families. */
+        PyObject *dictionary = _PyType_GetDict(base);
+        row->namespace_complete = dictionary != NULL && PyDict_CheckExact(dictionary);
         SoacTypeContract *contract = soac_type_contract(base);
         if (contract != NULL && soac_contract_not_terminal(contract) < 0) return -1;
         /* object has no instance dictionary, declared fields or object slots.
@@ -311,8 +314,8 @@ soac_receiver_snapshot(PyTypeObject *type, SoacReceiverSnapshot *snapshot)
             catalog[fields + j] = (PySoacReceiverFieldV1){
                 PyTuple_GET_ITEM(held->slots, j), 1, contract->object_slots[j].offset};
         if (!row->namespace_complete) continue;
-        held->dictionary = Py_NewRef(base->tp_dict);
-        Py_ssize_t entries = PyDict_GET_SIZE(base->tp_dict);
+        held->dictionary = Py_NewRef(dictionary);
+        Py_ssize_t entries = PyDict_GET_SIZE(dictionary);
         held->keys = PyMem_Calloc(entries, sizeof(*held->keys));
         held->values = PyMem_Calloc(entries, sizeof(*held->values));
         held->value_types = PyMem_Calloc(entries, sizeof(*held->value_types));
@@ -327,7 +330,7 @@ soac_receiver_snapshot(PyTypeObject *type, SoacReceiverSnapshot *snapshot)
         }
         Py_ssize_t pos = 0;
         PyObject *key, *value;
-        while (PyDict_Next(base->tp_dict, &pos, &key, &value)) {
+        while (PyDict_Next(dictionary, &pos, &key, &value)) {
             Py_ssize_t j = held->count++;
             held->keys[j] = Py_NewRef(key);
             held->values[j] = Py_NewRef(value);
@@ -353,21 +356,22 @@ soac_receiver_snapshot_live(PyTypeObject *type, const SoacReceiverSnapshot *snap
     for (size_t i = 0; i < snapshot->input.row_count; ++i) {
         PyTypeObject *base = (PyTypeObject *)snapshot->rows[i].actual_type;
         const SoacReceiverRowSnapshot *held = &snapshot->snapshots[i];
+        PyObject *dictionary = _PyType_GetDict(base);
         if (held->contract != soac_type_contract(base) ||
             (held->contract != NULL && (soac_contract_not_terminal(held->contract) < 0 ||
                 held->contract->fields != held->fields ||
                 held->contract->object_slot_fields != held->slots)))
             return soac_type_state_error("receiver field contract changed during preparation");
         if (held->dictionary == NULL) {
-            if (base->tp_dict != NULL && PyDict_CheckExact(base->tp_dict))
+            if (dictionary != NULL && PyDict_CheckExact(dictionary))
                 return soac_type_state_error("receiver namespace appeared during preparation");
             continue;
         }
-        if (base->tp_dict != held->dictionary || PyDict_GET_SIZE(base->tp_dict) != held->count)
+        if (dictionary != held->dictionary || PyDict_GET_SIZE(dictionary) != held->count)
             return soac_type_state_error("receiver namespace changed during preparation");
         Py_ssize_t pos = 0, j = 0;
         PyObject *key, *value;
-        while (PyDict_Next(base->tp_dict, &pos, &key, &value)) {
+        while (PyDict_Next(dictionary, &pos, &key, &value)) {
             if (j >= held->count || key != held->keys[j] || value != held->values[j] ||
                 Py_TYPE(value) != held->value_types[j] ||
                 Py_TYPE(value)->tp_descr_get != held->getters[j] ||
