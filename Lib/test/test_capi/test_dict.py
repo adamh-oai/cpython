@@ -46,14 +46,19 @@ class SoacDictPolicyTests(unittest.TestCase):
 
         class ChangingKey:
             def __init__(self):
-                self.calls = 0
+                self.enabled = False
             def __hash__(self):
                 return hash('__annotations__')
             def __eq__(self, other):
                 if other == '__annotations__':
-                    self.calls += 1
-                    return self.calls >= 2
+                    return self.enabled
                 return False
+
+        def enable_for_cache(key):
+            def annotate(format):
+                key.enabled = True
+                return {}
+            return annotate
 
         # A legacy callback gets its documented SET operation for an exact
         # cache key. It is never sent the newer name-bearing operation.
@@ -70,6 +75,7 @@ class SoacDictPolicyTests(unittest.TestCase):
         module = ModuleType('legacy_alias')
         key = ChangingKey()
         module.__dict__[key] = 19
+        module.__annotate__ = enable_for_cache(key)
         events = []
         owner = self.protect(module.__dict__, {'__annotations__': dict},
                              callback=lambda d, k, v, op: events.append(op), flags=1)
@@ -84,6 +90,7 @@ class SoacDictPolicyTests(unittest.TestCase):
             module = ModuleType('capable_alias')
             key = ChangingKey()
             module.__dict__[key] = 19
+            module.__annotate__ = enable_for_cache(key)
             events = []
             owner = self.protect(module.__dict__, {'__annotations__': expected},
                                  callback=lambda d, k, v, op: events.append(op), flags=17)

@@ -127,8 +127,17 @@ soac_test_validate(PyObject *op, PyObject *dict, PyObject *key,
     int cache = operation == PyDict_SOAC_CACHE_SET ||
                 operation == PyDict_SOAC_CACHE_SET_EXISTING;
     int named_destination = attribute || cache;
-    assert(named_destination ? (provenance != NULL && PyUnicode_Check(provenance))
-                     : provenance == NULL);
+    if (operation == PyDict_SOAC_CLONE) {
+        /* Empty-dict bulk clone carries the source dictionary, not a name. */
+        assert(owner->flags == PyDict_SOAC_ADMISSION_ONLY ||
+               owner->flags == PyDict_SOAC_FUNCTION_DEFAULTS);
+        assert(key == NULL && value == NULL);
+        assert(provenance != NULL && PyDict_Check(provenance));
+    }
+    else {
+        assert(named_destination ? (provenance != NULL && PyUnicode_Check(provenance))
+                                 : provenance == NULL);
+    }
     if (operation == PyDict_SOAC_VALIDATE_INITIAL) {
         assert(!PyDict_MatchesSoacPolicy(dict, op, soac_test_validate, owner->flags));
     }
