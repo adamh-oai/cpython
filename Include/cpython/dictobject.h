@@ -223,6 +223,13 @@ PyAPI_FUNC(int) PyType_GetSoacReceiverPolicyV1(
  * PyType_HasSoacContract retains its existing strict-class meaning.
  */
 
+/* Optional cold capability query. Same borrowed view and input requirements
+ * as GetSoacReceiverPolicyV1. Returns 0 with empty outputs for a missing or
+ * explicitly retired native policy; a nonterminal inconsistent policy remains
+ * an error. Never use this query to bypass write/allocation enforcement. */
+PyAPI_FUNC(int) PyType_TryGetSoacReceiverPolicyV1(
+    PyObject *actual_type, PySoacReceiverReceiptViewV1 *out);
+
 /* PyTypeStateSpecV2 has the same ordered first seven fields as V1, but
  * abi_version==2, struct_size==sizeof(V2), followed by:
  *     PyObject *receiver_birth_receipt;

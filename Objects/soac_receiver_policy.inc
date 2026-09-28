@@ -133,6 +133,22 @@ PyType_GetSoacReceiverPolicyV1(PyObject *object, PySoacReceiverReceiptViewV1 *ou
 }
 
 int
+PyType_TryGetSoacReceiverPolicyV1(PyObject *object, PySoacReceiverReceiptViewV1 *out)
+{
+    if (out == NULL || out->abi_version != 1 || out->struct_size != sizeof(*out) ||
+        object == NULL || !PyType_Check(object)) {
+        return soac_type_state_error("invalid receiver birth policy query");
+    }
+    out->receipt = out->storage_owner = out->dictionary_owner = NULL;
+    SoacTypeContract *state = soac_type_state((PyTypeObject *)object);
+    if (state == NULL || state->receiver_policy == NULL) return 0;
+    /* Scalar retirement is a positive optional miss. All remaining identity
+     * and owner checks retain the enforcing query's error semantics. */
+    if (state->terminal || state->receiver_policy->terminal) return 0;
+    return PyType_GetSoacReceiverPolicyV1(object, out);
+}
+
+int
 _PySOAC_MatchesReceiverPolicy(PyTypeObject *type, PyObject *receipt_object,
                              PyObject *dictionary_owner,
                              PyDict_SoacPolicyCallback validate_dictionary,
