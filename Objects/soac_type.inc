@@ -103,6 +103,7 @@ struct SoacTypeContract {
         const PySoacInstanceDictPolicy *, PySoacInstanceDictPolicy *);
     SoacFamilyClosure *family_closure; /* own root membership, never instance policy */
     int preparing_family; /* all-root barrier before callback-visible allocation */
+    PySoacTypeRetireCallbackV1 retire_optional_facts; /* context is existing owner */
 };
 
 static PyTypeObject SoacConstructionHandle_Type;
@@ -140,6 +141,26 @@ soac_clear_empty_write_policy(SoacTypeContract *state)
 {
     soac_forget_empty_write_records(state);
     Py_CLEAR(state->empty_write_storage_owner);
+}
+
+/* The terminal bit must already be set. The existing native owner edge pins
+ * callback context through notification, even if a caller holds no owner ref.
+ * Clearing first makes repeated native clear/dealloc notification impossible.
+ * There is no allocation, Python call, or reference release on the valid path. */
+static void
+soac_retire_optional_facts(SoacTypeContract *state)
+{
+    PySoacTypeRetireCallbackV1 retire = state->retire_optional_facts;
+    if (retire == NULL) return;
+    assert(state->terminal);
+    state->retire_optional_facts = NULL;
+    if (state->owner == NULL)
+        Py_FatalError("SOAC retirement callback lost its owned context");
+    PyObject *exception = PyErr_GetRaisedException();
+    retire(state->owner);
+    if (PyErr_Occurred())
+        Py_FatalError("SOAC retirement callback raised during irreversible teardown");
+    PyErr_SetRaisedException(exception);
 }
 
 static PyObject *
@@ -451,6 +472,30 @@ soac_contract_not_terminal(SoacTypeContract *state)
 }
 
 int
+PyType_SetSoacRetirementCallbackV1(PyObject *object, PyObject *expected_owner,
+                                  PySoacTypeRetireCallbackV1 retire)
+{
+    if (PyErr_Occurred()) return -1;
+#ifdef Py_GIL_DISABLED
+    (void)object; (void)expected_owner; (void)retire;
+    return soac_type_state_error("type retirement callbacks require the GIL configuration");
+#else
+    SoacTypeContract *state = object != NULL && PyType_Check(object)
+        ? soac_type_contract((PyTypeObject *)object) : NULL;
+    if (state == NULL || expected_owner == NULL || retire == NULL ||
+        state->owner != expected_owner || state->type != (PyTypeObject *)object ||
+        state->terminal || !state->sealed ||
+        soac_type_phase(state) != Py_SOAC_TYPE_STATE_ENFORCED ||
+        (state->retire_optional_facts != NULL && state->retire_optional_facts != retire))
+        return soac_type_state_error("retirement callback requires the same live sealed type owner");
+    if (soac_contract_not_terminal(state) < 0) return -1;
+    /* No allocation/callback between validation and the scalar commit. */
+    state->retire_optional_facts = retire;
+    return 0;
+#endif
+}
+
+int
 PyType_SetSoacStorageStateFactoryV1(PyObject *object, PyObject *expected_owner,
                                    PySoacStorageStateFactoryV1 prepare)
 {
@@ -759,6 +804,7 @@ soac_state_clear(SoacTypeContract *state)
     /* Terminal GC cleanup is not unsealing. Any resurrection still sees the
      * permanent terminal marker and cannot resume optimized or ordinary use. */
     state->terminal = 1;
+    soac_retire_optional_facts(state);
     soac_receiver_retire(state->receiver_policy);
     soac_family_retire(state->family_closure);
     state->preparing_family = 0;
@@ -1166,6 +1212,7 @@ soac_class_dictionary_policy(PyObject *owner, PyObject *dict, PyObject *key,
     }
     if (operation == PyDict_SOAC_TERMINAL_TEARDOWN) {
         state->terminal = 1;
+        soac_retire_optional_facts(state);
         soac_receiver_retire(state->receiver_policy);
         soac_family_retire(state->family_closure);
         state->preparing_family = 0;
@@ -2287,6 +2334,7 @@ _PySOAC_TypeContractBeginTeardown(PyTypeObject *type)
         /* Invalidate before callbacks; preserve the existing positions of
          * all decrefs so this does not reorder user-visible finalizers. */
         state->terminal = 1;
+        soac_retire_optional_facts(state);
         soac_receiver_retire(state->receiver_policy);
         soac_family_retire(state->family_closure);
         state->preparing_family = 0;

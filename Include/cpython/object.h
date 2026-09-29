@@ -331,6 +331,24 @@ PyAPI_FUNC(int) PyType_SetSoacStorageStateFactoryV1(
     PyObject *actual_type, PyObject *expected_owner,
     PySoacStorageStateFactoryV1 prepare);
 
+/* Cold, write-once notification for optional compiled facts. The caller must
+ * authenticate its actual owner; this grants no source or family authority.
+ * Only a live, sealed, permanently enforced type accepts registration. The
+ * contract already owns expected_owner, which is the callback's borrowed
+ * context until notification returns. No additional Python edge is acquired.
+ * The owner may already have been tp_cleared: its own retirement must revoke
+ * dependent facts, and callback data must survive until final deallocation.
+ * Repeating the identical callback is allowed; replacement and NULL reject.
+ * GIL-only. retire must not allocate, invoke Python, reenter, or fail. Native
+ * marks itself terminal and clears the callback slot before invoking it, prior
+ * to namespace/owner reference release. A raised exception is a fatal callback
+ * contract violation; a pre-existing exception is preserved. No read invokes
+ * this callback. Callback code must remain available through type retirement. */
+typedef void (*PySoacTypeRetireCallbackV1)(PyObject *existing_owner);
+PyAPI_FUNC(int) PyType_SetSoacRetirementCallbackV1(
+    PyObject *actual_type, PyObject *expected_owner,
+    PySoacTypeRetireCallbackV1 retire);
+
 enum {
     Py_SOAC_OWNER_LIVENESS_PENDING = 0,
     Py_SOAC_OWNER_LIVENESS_READY = 1,
